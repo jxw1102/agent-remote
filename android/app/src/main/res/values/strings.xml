@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Agent Remote</string>
+    <string name="notif_channel_jobs">Running turns</string>
+    <string name="notif_channel_jobs_desc">Progress of agent turns you started</string>
+    <string name="notif_channel_alerts">Needs you</string>
+    <string name="notif_channel_alerts_desc">Turn finished, permission or question waiting</string>
+</resources>

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Agent Remote</title>
+<link rel="stylesheet" href="app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 108 108'%3E%3Crect width='108' height='108' rx='54' fill='%2312121a'/%3E%3Cpath d='M34 40 L48 54 L34 68' stroke='%23d97757' stroke-width='7' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M56 68 L76 68' stroke='%2300d4ff' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E">
+</head>
+<body>
+<div id="app" class="app">
+  <!-- Left: every daemon's sessions in one list. -->
+  <aside class="pane-list">
+    <header class="list-head">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 108 108" aria-hidden="true">
+          <path d="M34 40 L48 54 L34 68" stroke="#d97757" stroke-width="7"
+                fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M56 68 L76 68" stroke="#00d4ff" stroke-width="7"
+                stroke-linecap="round"/>
+        </svg>
+        <span>Agent Remote</span>
+      </div>
+      <div class="head-actions">
+        <button id="btn-new" class="primary" type="button">New session</button>
+        <button id="btn-inbox" type="button" title="Files from host">Inbox</button>
+        <button id="btn-usage" type="button" title="Subscription usage">Usage</button>
+        <button id="btn-profiles" type="button" title="Daemons">Daemons</button>
+        <button id="btn-sound" type="button" title="Sound cues" aria-pressed="true">♪</button>
+      </div>
+      <input id="search" class="search" type="search"
+             placeholder="Search titles and messages…  (Ctrl+K)"
+             autocomplete="off" spellcheck="false">
+      <div id="filters" class="filters"></div>
+      <div id="list-status" class="list-status"></div>
+    </header>
+    <div id="sessions" class="sessions" tabindex="0"></div>
+  </aside>
+
+  <!-- Right: the open transcript. -->
+  <main class="pane-chat">
+    <header id="chat-head" class="chat-head hidden">
+      <div class="chat-title">
+        <h1 id="chat-title">Session</h1>
+        <div id="chat-sub" class="chat-sub"></div>
+      </div>
+      <div class="chat-actions">
+        <!-- Icon buttons (titles keep labels for hover + a11y). -->
+        <button id="btn-options" class="icon-btn" type="button"
+                title="Options — model, effort, execution mode" aria-label="Options">
+          <!-- Cog / gear (not a sun — no radial rays). -->
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+               stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+               stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06
+                     a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09
+                     A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83
+                     l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09
+                     A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83
+                     l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09
+                     a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83
+                     l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09
+                     a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+        <button id="btn-refresh" class="icon-btn" type="button"
+                title="Reload transcript" aria-label="Refresh">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 12a8 8 0 1 1-2.3-5.6" fill="none" stroke="currentColor"
+                  stroke-width="1.8" stroke-linecap="round"/>
+            <path d="M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="1.8"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <button id="btn-stop" class="icon-btn danger hidden" type="button"
+                title="Stop" aria-label="Stop">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="6.5" y="6.5" width="11" height="11" rx="1.5"
+                  fill="currentColor"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <div id="transcript" class="transcript">
+      <div class="empty">
+        <svg class="empty-logo" viewBox="0 0 108 108" aria-hidden="true">
+          <path d="M34 40 L48 54 L34 68" stroke="#d97757" stroke-width="7"
+                fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M56 68 L76 68" stroke="#00d4ff" stroke-width="7"
+                stroke-linecap="round"/>
+        </svg>
+        <h2>Pick a session</h2>
+        <p>Every daemon you add shows up in one list on the left — Claude and
+           Grok side by side, newest first.</p>
+      </div>
+    </div>
+
+    <div id="composer" class="composer hidden">
+      <div id="composer-note" class="composer-note hidden"></div>
+      <div class="composer-row">
+        <button id="btn-attach" type="button" title="Attach a file">+</button>
+        <input id="file-attach" type="file" multiple hidden>
+        <textarea id="prompt" rows="1" spellcheck="false"
+                  placeholder="Message, /command or !shell · Enter sends"></textarea>
+        <button id="btn-send" class="primary" type="button">Send</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- Modal host: profiles, new session, inbox, usage, options, questions. -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <header class="modal-head">
+      <h2 id="modal-title">…</h2>
+      <button id="modal-close" class="ghost" type="button" aria-label="Close">✕</button>
+    </header>
+    <div id="modal-body" class="modal-body"></div>
+    <footer id="modal-foot" class="modal-foot"></footer>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

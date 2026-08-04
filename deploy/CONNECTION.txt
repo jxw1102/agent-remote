@@ -1,0 +1,39 @@
+Agent Remote — connection cheatsheet
+
+Point a client (BB10 / Android / web) at your agentremoted instance.
+One process serves every harness via "providers" in config.json.
+
+----------------------------------------------------------------------
+macOS (launchd multi — ./daemon/scripts/install-launchd.sh)
+----------------------------------------------------------------------
+  Base URL = http://127.0.0.1:8473
+  Token    = contents of ~/.agentremoted/token
+
+  curl -s http://127.0.0.1:8473/api/ping
+  tail -f ~/.agentremoted/daemon.log
+
+----------------------------------------------------------------------
+Linux (systemd unit agentremoted — ./deploy/deploy.sh or manual)
+----------------------------------------------------------------------
+  Base URL = http://your-host.example.com:8473
+  Token    = contents of /root/.agentremoted/token
+             (or ~/.agentremoted/token if you run as your user)
+
+  Port comes from config.json (default 8473; deploy.sh respects PORT=).
+
+  systemctl status agentremoted
+  journalctl -u agentremoted -f
+  curl -s http://127.0.0.1:8473/api/ping
+
+----------------------------------------------------------------------
+Foreground (any OS)
+----------------------------------------------------------------------
+  cd daemon && PYTHONPATH=. python3 -m agentremoted
+  Token: PYTHONPATH=. python3 -m agentremoted --print-token
+
+----------------------------------------------------------------------
+Auth headers
+----------------------------------------------------------------------
+  curl -s -H "Authorization: Bearer <TOKEN>" \
+    "http://127.0.0.1:8473/api/sessions?limit=3"
+  # also: X-Auth-Token: <TOKEN>   or   ?token=<TOKEN>

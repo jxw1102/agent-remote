@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+blackberry/arm/
+blackberry/release/
+blackberry/debug/
+blackberry/Makefile
+blackberry/Makefile.*
+
+# build artifacts — rebuilt on demand, not committed
+dist/*.bar
+dist/**/*.bar
+dist/*.symbols.elf
+
+# deploy tarball, rebuilt on demand
+dist/*.tar.gz
+
+# web client bundle — python3 web/build.py regenerates it from web/src
+web/dist/
+
+.DS_Store
+android/.gradle/
+android/.kotlin/
+android/app/build/
+android/local.properties

@@ -1,0 +1,90 @@
+"""Provider adapters: everything agent-CLI-specific lives here.
+
+A provider supplies two objects with duck-typed interfaces:
+
+Store — read-only view over the agent's on-disk session transcripts:
+    list_projects() -> [{id, cwd, name, session_count, last_active}]
+    list_sessions(project_id=None, limit=25, user_only=True) -> [summary]
+    search_sessions(query, project_id=None, limit=25, user_only=True)
+        -> [summary + {snippet}]  full-text over title + message text
+
+`user_only` (the default, and what the app asks for) lists only sessions the
+human started: no subagent transcripts the agent spawned for itself, and no
+shells that opened and quit without a turn. Lookups by id (get_session /
+get_messages) never filter, so a link to any session still resolves.
+    get_session(session_id) -> summary | None
+    get_messages(session_id, offset=None, limit=50)
+        -> {session_id, total, offset, messages: [{uuid, role, ts, text,
+            blocks}]} | None
+
+Runner — how one turn is executed as a subprocess (used by jobs.JobManager):
+    name                                  "claude" | "grok" | "codex"
+    capabilities() -> dict                feature flags for /api/ping
+    slash_commands() -> [str]             commands offered to the app
+    prepare(job, mode) -> (cmd, env)      build the CLI invocation; may set
+                                          job.cwd default; raises RunnerError
+    handle_stream_line(job, line)         parse one stdout line into events
+    tick(job)                             called ~4x/s while running (cheap)
+    finalize(job, returncode, stderr_tail) -> bool | None
+                                          post-exit fixups; True forces
+                                          success, False failure, None means
+                                          "returncode == 0 decides"
+    cleanup(job)                          delete temp files
+
+The HTTP layer and job manager never branch on the provider name — anything
+provider-specific must stay behind these two objects.
+"""
+
+from collections import OrderedDict
+
+
+class RunnerError(Exception):
+    """A job could not be started (bad cwd, missing binary, ...)."""
+
+
+class ProviderBundle:
+    """One harness: store + runner + its own job manager."""
+
+    __slots__ = ("name", "store", "runner", "jobs")
+
+    def __init__(self, name, store, runner, jobs):
+        self.name = name
+        self.store = store
+        self.runner = runner
+        self.jobs = jobs
+
+
+def build_one(config, name: str):
+    """Return (store, runner) for a single named provider."""
+    name = str(name or "claude").lower()
+    if name == "claude":
+        from .claude import ClaudeRunner, ClaudeStore
+        return ClaudeStore(config.projects_path, config), ClaudeRunner(config)
+    if name == "grok":
+        from .grok import GrokRunner, GrokStore
+        return GrokStore(config.grok_home_path), GrokRunner(config)
+    if name == "codex":
+        from .codex import CodexRunner, CodexStore
+        store = CodexStore(config.codex_home_path, config)
+        return store, CodexRunner(config)
+    raise ValueError(
+        "unknown provider %r (expected 'claude', 'grok', or 'codex')" % name)
+
+
+def build(config):
+    """Back-compat: (store, runner) for config.provider / first of providers."""
+    names = config.provider_names() if hasattr(config, "provider_names") else [
+        str(getattr(config, "provider", "claude") or "claude").lower()]
+    return build_one(config, names[0])
+
+
+def build_all(config, job_manager_cls):
+    """OrderedDict name → ProviderBundle for every configured harness."""
+    bundles = OrderedDict()
+    for name in config.provider_names():
+        store, runner = build_one(config, name)
+        jobs = job_manager_cls(config, runner)
+        bundles[name] = ProviderBundle(name, store, runner, jobs)
+    if not bundles:
+        raise ValueError("no providers configured")
+    return bundles

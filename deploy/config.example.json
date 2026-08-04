@@ -1,0 +1,24 @@
+{
+  "bind": "0.0.0.0",
+  "port": 8473,
+  "providers": ["claude", "grok", "codex"],
+
+  "claude_bin": "claude",
+  "permission_mode": "bypassPermissions",
+  "permission_timeout": 300,
+  "claude_env": {},
+
+  "grok_bin": "grok",
+  "grok_home": "~/.grok",
+  "grok_prompt_flags": "--yolo --deny Bash(rm*) --deny Bash(sudo*) --deny Bash(*--force*)",
+  "grok_default_cwd": "",
+  "grok_env": {},
+
+  "codex_bin": "codex",
+  "codex_home": "~/.codex",
+  "codex_sandbox": "danger-full-access",
+  "codex_exec_flags": "",
+  "codex_env": {},
+
+  "turn_timeout": 1800
+}

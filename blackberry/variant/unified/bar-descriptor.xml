@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<qnx xmlns="http://www.qnx.com/schemas/application/1.0">
+    <!-- NEW app id: Agent Remote installs ALONGSIDE ClaudeRemote/GrokRemote
+         (different sandboxes), so trying it costs nothing and profiles are
+         entered fresh - BB10 QSettings cannot cross app sandboxes. -->
+    <id>com.bb10d.agentremote</id>
+    <author>jxw1102</author>
+    <name>Agent Remote</name>
+    <description>Agent Remote: profiles for agentremoted hosts (Claude, Grok, Codex), merged session list, per-provider accents.</description>
+    <versionNumber>3.0.0</versionNumber>
+    <buildId>7</buildId>
+    <platformVersion>10.3.1.0</platformVersion>
+
+    <icon>
+        <image>icon.png</image>
+    </icon>
+
+    <initialWindow>
+        <systemChrome>none</systemChrome>
+        <transparent>false</transparent>
+        <autoOrients>true</autoOrients>
+        <aspectRatio>portrait</aspectRatio>
+    </initialWindow>
+
+    <permission system="true">run_native</permission>
+    <permission>access_internet</permission>
+    <permission>access_network_shared</permission>
+    <!-- FilePicker (attachments) reads from the shared documents/photos -->
+    <permission>access_shared</permission>
+    <!-- Chime flashes the notification LED on status / done / error -->
+    <permission>access_led_control</permission>
+
+    <!-- Qt4/Cascades libs are not on the default linker path — without this
+         the app is killed by the dynamic linker before main() runs. -->
+    <env var="LD_LIBRARY_PATH" value="app/native/lib:/usr/lib/qt4/lib"/>
+    <!-- Cascades-style default blue at theme creation (= BRAND_ACCENT_COLOR).
+         ApiClient::applyProviderTheme recolors primary/primaryBase to the
+         active session's provider accent at runtime (claude orange / grok
+         cyan / codex green). -->
+    <env var="CASCADES_THEME" value="dark?primaryColor=0x00A8DF"/>
+
+    <asset path="AgentRemote" entry="true" type="Qnx/Elf">app</asset>
+    <asset path="assets">assets</asset>
+
+    <action system="true">run_native</action>
+</qnx>

@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<!--
+  Chime lab: tune the beep cues by ear, then hand the numbers back to be
+  baked into blackberry/src/chime.cpp. The renderer below is a port of renderWav()
+  there, so every knob here has a direct counterpart in the C++.
+
+  Caveat: your speaker is not the phone's. A laptop reproduces the 350-600Hz
+  fundamentals that a small piezo physically cannot, which is why the same
+  numbers sound fuller here than on a Flipper. The high-pass knob simulates
+  that; the last word still belongs to the device.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>chime lab</title>
+<style>
+  body { background:#111; color:#ddd; font:14px/1.5 -apple-system, monospace;
+         margin:0; padding:24px 28px; }
+  h1 { font-size:16px; letter-spacing:.08em; text-transform:uppercase;
+       color:#7ab; margin:0 0 6px; }
+  p.lede { color:#777; font-size:12px; margin:0 0 20px; max-width:760px; }
+  section { border:1px solid #333; border-radius:6px; padding:14px 16px;
+            margin-bottom:16px; max-width:820px; }
+  h2 { font-size:13px; margin:0 0 10px; color:#eee; text-transform:uppercase;
+       letter-spacing:.06em; }
+  .row { display:flex; align-items:center; gap:10px; margin:6px 0; }
+  .row label { width:118px; color:#999; }
+  input[type=range] { flex:1; min-width:170px; }
+  input[type=number] { width:76px; background:#000; color:#0f0; border:1px solid #444;
+                       padding:3px 5px; font:13px monospace; }
+  select { background:#000; color:#0f0; border:1px solid #444; padding:3px;
+           font:13px monospace; }
+  button { background:#1d3a4a; color:#cfe; border:1px solid #3a6a80; border-radius:4px;
+           padding:6px 14px; font:13px monospace; cursor:pointer; }
+  button:hover { background:#27506a; }
+  button.play { background:#2a4a2a; border-color:#4a7a4a; color:#dfd; }
+  .note { color:#666; font-size:12px; }
+  pre { background:#000; border:1px solid #333; padding:12px; overflow:auto;
+        color:#9c9; max-width:820px; }
+</style>
+</head>
+<body>
+<h1>chime lab &mdash; bb10-remote</h1>
+<p class="lede">Defaults are what the apps ship today. Timbre lives in the
+  Voice section: duty cycle and the high-pass do more for "sounds like a
+  Flipper" than frequency does.</p>
+
+<section>
+  <h2>Voice &mdash; timbre (global to all three cues)</h2>
+  <div class="row"><label>wave</label>
+    <select id="wave">
+      <option value="square" selected>square / pulse</option>
+      <option value="sine">sine</option>
+      <option value="triangle">triangle</option>
+      <option value="saw">saw</option>
+    </select>
+    <span class="note">pulse + duty is the piezo sound</span></div>
+  <div class="row"><label>mono osc</label>
+    <input type="checkbox" id="mono" checked style="flex:none">
+    <span class="note">one oscillator retuned per note: phase carries over and the
+      envelope only hits the ends of the sequence, as on the Flipper. Off =
+      each note retriggers (can read as a chord).</span></div>
+  <div class="row"><label>duty cycle</label>
+    <input type="range" id="duty" min="0.05" max="0.95" step="0.01" value="0.50">
+    <input type="number" id="dutyN" step="0.01">
+    <span class="note">0.5 = square, 0.1 = thin/nasal</span></div>
+  <div class="row"><label>amplitude</label>
+    <input type="range" id="amp" min="0.05" max="0.95" step="0.01" value="0.40">
+    <input type="number" id="ampN" step="0.01"></div>
+  <div class="row"><label>attack (ms)</label>
+    <input type="range" id="att" min="0" max="20" step="0.1" value="0.2">
+    <input type="number" id="attN" step="0.1"></div>
+  <div class="row"><label>release (ms)</label>
+    <input type="range" id="rel" min="0" max="60" step="0.1" value="0.2">
+    <input type="number" id="relN" step="0.1"></div>
+  <div class="row"><label>decay (ms)</label>
+    <input type="range" id="decay" min="0" max="400" step="5" value="0">
+    <input type="number" id="decayN" step="5">
+    <span class="note">0 = flat hold; small = percussive tick</span></div>
+  <div class="row"><label>high-pass (Hz)</label>
+    <input type="range" id="hp" min="0" max="3000" step="10" value="0">
+    <input type="number" id="hpN" step="10">
+    <span class="note">small-speaker sim: eats the fundamental</span></div>
+  <div class="row"><label>bit depth</label>
+    <input type="range" id="bits" min="3" max="16" step="1" value="16">
+    <input type="number" id="bitsN" step="1">
+    <span class="note">low = gritty, retro</span></div>
+</section>
+
+<section>
+  <h2>Status beep &mdash; single POST tone</h2>
+  <div class="row"><label>freq (Hz)</label>
+    <input type="range" id="sFreq" min="150" max="3000" step="1" value="600">
+    <input type="number" id="sFreqN" step="1"></div>
+  <div class="row"><label>length (ms)</label>
+    <input type="range" id="sMs" min="20" max="600" step="5" value="180">
+    <input type="number" id="sMsN" step="5"></div>
+  <div class="row"><button class="play" data-play="status">play status</button>
+    <span class="note" id="sNote"></span></div>
+</section>
+
+<section>
+  <h2>Turn finished &mdash; 3-note rise (do-mi-so)</h2>
+  <div class="row"><label>note 1 (Hz)</label>
+    <input type="range" id="d1Freq" min="150" max="3000" step="0.25" value="400">
+    <input type="number" id="d1FreqN" step="0.25">
+    <label style="width:auto">ms</label><input type="number" id="d1Ms" value="100" step="10"></div>
+  <div class="row"><label>note 2 (Hz)</label>
+    <input type="range" id="d2Freq" min="150" max="3000" step="0.25" value="504">
+    <input type="number" id="d2FreqN" step="0.25">
+    <label style="width:auto">ms</label><input type="number" id="d2Ms" value="100" step="10"></div>
+  <div class="row"><label>note 3 (Hz)</label>
+    <input type="range" id="d3Freq" min="150" max="3000" step="0.25" value="599.25">
+    <input type="number" id="d3FreqN" step="0.25">
+    <label style="width:auto">ms</label><input type="number" id="d3Ms" value="200" step="10"></div>
+  <div class="row"><label>gap (ms)</label>
+    <input type="range" id="dGap" min="0" max="200" step="5" value="30">
+    <input type="number" id="dGapN" step="5">
+    <span class="note">0 blends into a chord; 20-40 makes each note a beep</span></div>
+  <div class="row"><button class="play" data-play="done">play done</button>
+    <button id="triad">snap to C-E-G from note 1</button>
+    <span class="note" id="dNote"></span></div>
+</section>
+
+<section>
+  <h2>Error &mdash; double beep</h2>
+  <div class="row"><label>freq (Hz)</label>
+    <input type="range" id="eFreq" min="150" max="3000" step="1" value="350">
+    <input type="number" id="eFreqN" step="1"></div>
+  <div class="row"><label>beep (ms)</label>
+    <input type="range" id="eMs" min="20" max="400" step="5" value="110">
+    <input type="number" id="eMsN" step="5"></div>
+  <div class="row"><label>gap (ms)</label>
+    <input type="range" id="eGap" min="10" max="400" step="5" value="80">
+    <input type="number" id="eGapN" step="5"></div>
+  <div class="row"><button class="play" data-play="error">play error</button>
+    <span class="note" id="eNote"></span></div>
+</section>
+
+<section>
+  <h2>Attention &mdash; rising C5-E5 (permission / question / plan)</h2>
+  <p class="lede" style="margin:0 0 10px">Flipper <code>seq_perm</code> /
+    <code>SoundPerm</code>. Must not be confusable with the same-pitch error
+    bi-bi.</p>
+  <div class="row"><label>note 1 (Hz)</label>
+    <input type="range" id="a1Freq" min="150" max="3000" step="0.25" value="523.25">
+    <input type="number" id="a1FreqN" step="0.25">
+    <label style="width:auto">ms</label><input type="number" id="a1Ms" value="100" step="10"></div>
+  <div class="row"><label>gap (ms)</label>
+    <input type="range" id="aGap" min="0" max="200" step="5" value="50">
+    <input type="number" id="aGapN" step="5"></div>
+  <div class="row"><label>note 2 (Hz)</label>
+    <input type="range" id="a2Freq" min="150" max="3000" step="0.25" value="659.25">
+    <input type="number" id="a2FreqN" step="0.25">
+    <label style="width:auto">ms</label><input type="number" id="a2Ms" value="100" step="10"></div>
+  <div class="row"><button class="play" data-play="attention">play attention</button>
+    <button id="aPerm">snap to Flipper C5-E5</button>
+    <span class="note" id="aNote"></span></div>
+</section>
+
+<section>
+  <h2>Params to hand back</h2>
+  <div class="row"><button id="copy">copy</button>
+    <button id="reset">back to shipped defaults</button>
+    <span class="note">paste this into the chat and it goes straight into chime.cpp</span></div>
+  <pre id="out"></pre>
+</section>
+
+<script>
+const SAMPLE_RATE = 44100;
+const el = id => document.getElementById(id);
+const num = id => +el(id).value;
+let ctx = null;
+
+// ---- synthesis: mirrors renderWav() in blackberry/src/chime.cpp -----------
+function renderPcm(notes) {
+  const amp = num('amp'), duty = num('duty'), wave = el('wave').value;
+  const att = Math.max(1, Math.round(SAMPLE_RATE * num('att') / 1000));
+  const rel = Math.max(1, Math.round(SAMPLE_RATE * num('rel') / 1000));
+  const decayMs = num('decay'), hp = num('hp'), bits = num('bits');
+  const mono = el('mono').checked;
+
+  const total = notes.reduce((a, n) => a + Math.floor(SAMPLE_RATE * n.ms / 1000), 0);
+  const buf = new Float32Array(total);
+  let off = 0;
+  let phase = 0; // carried across notes in mono mode
+  for (const n of notes) {
+    const samples = Math.floor(SAMPLE_RATE * n.ms / 1000);
+    if (!mono) phase = 0;
+    for (let i = 0; i < samples; i++) {
+      let v = 0;
+      if (n.hz > 0) {
+        if (wave === 'sine') v = amp * Math.sin(2 * Math.PI * phase);
+        else if (wave === 'triangle') v = amp * (4 * Math.abs(phase - 0.5) - 1);
+        else if (wave === 'saw') v = amp * (2 * phase - 1);
+        else v = phase < duty ? amp : -amp;
+        // Exponential decay: what makes a struck piezo tick rather than hum.
+        // Per note when retriggering, across the whole cue when mono.
+        const t = mono ? (off + i) : i;
+        if (decayMs > 0) v *= Math.exp(-(t / SAMPLE_RATE) * 1000 / decayMs);
+      }
+      // Mono keeps its envelope at the ends of the sequence; retrigger mode
+      // shapes every note, which is what puts a click between them.
+      const pos = mono ? off + i : i;
+      const len = mono ? total : samples;
+      if (pos < att) v *= pos / att;
+      else if (pos > len - rel) v *= (len - pos) / rel;
+      buf[off + i] = v;
+      phase = (phase + n.hz / SAMPLE_RATE) % 1;
+    }
+    off += samples;
+  }
+
+  // One-pole high-pass: a small speaker's bass roll-off, so you hear the
+  // harmonics instead of the fundamental.
+  if (hp > 0) {
+    const rc = 1 / (2 * Math.PI * hp);
+    const a = rc / (rc + 1 / SAMPLE_RATE);
+    let prevIn = buf[0], prevOut = 0;
+    for (let i = 1; i < buf.length; i++) {
+      const x = buf[i];
+      prevOut = a * (prevOut + x - prevIn);
+      prevIn = x;
+      buf[i] = prevOut;
+    }
+  }
+
+  // The high-pass differentiates the pulse edges and can overshoot well past
+  // the set amplitude; pull it back so you audition the tone, not clipping.
+  let peak = 0;
+  for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i]));
+  if (peak > 0.95) {
+    const g = 0.95 / peak;
+    for (let i = 0; i < buf.length; i++) buf[i] *= g;
+  }
+
+  if (bits < 16) {
+    const steps = Math.pow(2, bits - 1);
+    for (let i = 0; i < buf.length; i++)
+      buf[i] = Math.round(buf[i] * steps) / steps;
+  }
+  return buf;
+}
+
+function play(notes) {
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const pcm = renderPcm(notes);
+  const ab = ctx.createBuffer(1, pcm.length, SAMPLE_RATE);
+  ab.getChannelData(0).set(pcm);
+  const src = ctx.createBufferSource();
+  src.buffer = ab;
+  src.connect(ctx.destination);
+  src.start();
+}
+
+// ---- cue definitions from the controls -----------------------------------
+function seq(kind) {
+  if (kind === 'status') return [{ hz: num('sFreq'), ms: num('sMs') }];
+  if (kind === 'done') {
+    const gap = num('dGap');
+    const out = [];
+    for (const i of [1, 2, 3]) {
+      if (gap > 0 && out.length) out.push({ hz: 0, ms: gap });
+      out.push({ hz: num('d' + i + 'Freq'), ms: num('d' + i + 'Ms') });
+    }
+    return out;
+  }
+  if (kind === 'attention') {
+    const gap = num('aGap');
+    const out = [{ hz: num('a1Freq'), ms: num('a1Ms') }];
+    if (gap > 0) out.push({ hz: 0, ms: gap });
+    out.push({ hz: num('a2Freq'), ms: num('a2Ms') });
+    return out;
+  }
+  return [{ hz: num('eFreq'), ms: num('eMs') },
+          { hz: 0, ms: num('eGap') },
+          { hz: num('eFreq'), ms: num('eMs') }];
+}
+
+// ---- plumbing: slider <-> number box, live readouts ----------------------
+for (const r of document.querySelectorAll('input[type=range]')) {
+  const n = el(r.id + 'N');
+  if (!n) continue;
+  n.value = r.value;
+  r.addEventListener('input', () => { n.value = r.value; refresh(); });
+  n.addEventListener('input', () => { r.value = n.value; refresh(); });
+}
+for (const id of ['d1Ms', 'd2Ms', 'd3Ms', 'a1Ms', 'a2Ms'])
+  el(id).addEventListener('input', refresh);
+el('wave').addEventListener('change', refresh);
+el('mono').addEventListener('change', refresh);
+
+for (const b of document.querySelectorAll('button[data-play]'))
+  b.addEventListener('click', () => play(seq(b.dataset.play)));
+
+// Keeps the finish cue a real major triad while you drag the root around.
+el('triad').addEventListener('click', () => {
+  const root = num('d1Freq');
+  setPair('d2Freq', (root * Math.pow(2, 4 / 12)).toFixed(2));
+  setPair('d3Freq', (root * Math.pow(2, 7 / 12)).toFixed(2));
+  refresh();
+});
+// Flipper seq_perm defaults.
+el('aPerm').addEventListener('click', () => {
+  setPair('a1Freq', 523.25);
+  el('a1Ms').value = 100;
+  setPair('aGap', 50);
+  setPair('a2Freq', 659.25);
+  el('a2Ms').value = 100;
+  refresh();
+});
+el('reset').addEventListener('click', () => location.reload());
+function setPair(id, v) { el(id).value = v; el(id + 'N').value = v; }
+
+const NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+function noteName(hz) {
+  const n = Math.round(12 * Math.log2(hz / 440) + 69);
+  return NAMES[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1);
+}
+
+function refresh() {
+  el('sNote').textContent = noteName(num('sFreq'));
+  el('eNote').textContent = noteName(num('eFreq'));
+  el('dNote').textContent = [1, 2, 3].map(i => noteName(num('d' + i + 'Freq'))).join(' - ');
+  el('aNote').textContent = [1, 2].map(i => noteName(num('a' + i + 'Freq'))).join(' - ');
+  el('out').textContent =
+`chime.cpp params
+  wave        = ${el('wave').value}
+  mono osc    = ${el('mono').checked}
+  duty        = ${num('duty').toFixed(2)}
+  AMPLITUDE   = ${num('amp').toFixed(2)}
+  attack      = ${num('att')} ms
+  release     = ${num('rel')} ms
+  decay       = ${num('decay')} ms
+  high-pass   = ${num('hp')} Hz
+  bit depth   = ${num('bits')}
+  status      = ${num('sFreq')} Hz, ${num('sMs')} ms   (${noteName(num('sFreq'))})
+  done        = ${[1,2,3].map(i => num('d'+i+'Freq') + 'Hz/' + num('d'+i+'Ms') + 'ms').join(', ')}, gap ${num('dGap')}ms
+  error       = ${num('eFreq')}Hz/${num('eMs')}ms, gap ${num('eGap')}ms, ${num('eFreq')}Hz/${num('eMs')}ms
+  attention   = ${num('a1Freq')}Hz/${num('a1Ms')}ms, gap ${num('aGap')}ms, ${num('a2Freq')}Hz/${num('a2Ms')}ms`;
+}
+
+el('copy').addEventListener('click', () =>
+  navigator.clipboard.writeText(el('out').textContent));
+
+refresh();
+</script>
+</body>
+</html>

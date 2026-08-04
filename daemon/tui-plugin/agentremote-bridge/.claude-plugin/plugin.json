@@ -1,0 +1,8 @@
+{
+  "name": "agentremote-bridge",
+  "description": "Companion plugin for agentremoted interactive mode: forwards Claude Code lifecycle events (SessionStart, Stop, Notification, SessionEnd, compaction) to the local agentremoted daemon so a BB10 phone can follow a TUI-hosted turn. Loaded only into daemon-spawned tmux TUIs via --plugin-dir; a manual session with this plugin loaded silently no-ops unless AGENTREMOTE_HOOK_URL is set.",
+  "version": "1.0.0",
+  "author": {
+    "name": "bb10-remote"
+  }
+}

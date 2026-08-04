@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Daemons are reached over plain HTTP by design: agentremoted speaks HTTP on a
+  trusted LAN / VPN (see daemon/agentremoted/config.py) and only optionally
+  terminates TLS behind Cloudflare. Cleartext therefore has to stay allowed,
+  but user-added CAs are trusted too so a self-signed VPS cert can be pinned
+  by the device owner.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
