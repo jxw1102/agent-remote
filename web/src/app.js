@@ -2582,12 +2582,10 @@ function wire() {
     }
   });
 
+  // No Cmd/Ctrl+K — conflicts with macOS native shortcuts (e.g. clear line /
+  // browser chrome). Search is focused by clicking the field.
   document.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === "k") {
-      e.preventDefault();
-      $("search").focus();
-      $("search").select();
-    } else if (e.key === "Escape" && !$("modal").classList.contains("hidden")) {
+    if (e.key === "Escape" && !$("modal").classList.contains("hidden")) {
       closeModal();
     }
   });
