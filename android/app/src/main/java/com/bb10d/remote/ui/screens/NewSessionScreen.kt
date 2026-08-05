@@ -1,6 +1,5 @@
 package com.bb10d.remote.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -81,7 +80,7 @@ import com.bb10d.remote.ui.theme.palette
 fun NewSessionScreen(
     vm: NewSessionViewModel,
     onBack: () -> Unit,
-    onStarted: (profileId: String, jobId: String) -> Unit,
+    onStarted: (profileId: String, jobId: String, provider: String) -> Unit,
 ) {
     val profileState by vm.profiles.collectAsStateWithLifecycle()
     val selectedId by vm.profileId.collectAsStateWithLifecycle()
@@ -98,6 +97,13 @@ fun NewSessionScreen(
     val multiHost = profile?.caps?.isMulti == true || harnesses.size > 1
     val accent = Accent.forProvider(activeHarness.ifBlank { profile?.provider })
     val pal = palette
+    // Multi /api/projects merges every harness; only show the active one.
+    val visibleProjects = remember(projects, activeHarness, multiHost) {
+        if (!multiHost || activeHarness.isBlank()) projects
+        else projects.filter {
+            it.provider.isBlank() || it.provider.equals(activeHarness, ignoreCase = true)
+        }
+    }
 
     var cwd by remember(profile?.id) { mutableStateOf("") }
     var prompt by remember { mutableStateOf("") }
@@ -232,16 +238,17 @@ fun NewSessionScreen(
                             color = pal.dim,
                         )
                     }
-                } else if (projects.isNotEmpty()) {
+                } else if (visibleProjects.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
-                    projects.take(if (showAdvanced) projects.size else 6).forEach { project ->
-                        ProjectRow(project, cwd == project.cwd) { cwd = project.cwd }
-                    }
-                    if (projects.size > 6 && !showAdvanced) {
+                    visibleProjects.take(if (showAdvanced) visibleProjects.size else 6)
+                        .forEach { project ->
+                            ProjectRow(project, cwd == project.cwd) { cwd = project.cwd }
+                        }
+                    if (visibleProjects.size > 6 && !showAdvanced) {
                         TextButton(
                             onClick = { showAdvanced = true },
                             modifier = Modifier.padding(start = 8.dp),
-                        ) { Text("Show all ${projects.size} projects") }
+                        ) { Text("Show all ${visibleProjects.size} projects") }
                     }
                 }
 
@@ -294,8 +301,8 @@ fun NewSessionScreen(
                 Button(
                     onClick = {
                         val target = profile ?: return@Button
-                        vm.start(target, cwd.trim(), prompt.trim()) { jobId ->
-                            onStarted(target.id, jobId)
+                        vm.start(target, cwd.trim(), prompt.trim()) { jobId, provider ->
+                            onStarted(target.id, jobId, provider)
                         }
                     },
                     enabled = canStart,
@@ -400,69 +407,77 @@ private fun ProjectRow(project: ProjectDto, selected: Boolean, onClick: () -> Un
     }
 }
 
-/** Model / effort / execution mode, all gated on what the daemon reported. */
+/** Model / effort / execution mode for the selected harness (always visible). */
 @Composable
 private fun ComposerDefaults(
     vm: NewSessionViewModel,
     profile: Profile,
     harness: String = "",
 ) {
-    var expanded by remember { mutableStateOf(false) }
     val pal = palette
-    val models = profile.caps.modelsFor(harness.ifBlank { null })
-    val efforts = profile.caps.effortsFor(harness.ifBlank { null })
-    val detailCaps = harness.takeIf { it.isNotBlank() }
-        ?.let { profile.caps.providerDetails[it]?.caps }
-    val interactive = profile.caps.interactiveFor(harness.ifBlank { null })
-    val canSetModel = detailCaps?.get("can_set_model") ?: profile.caps.canSetModel
-    val canSetEffort = detailCaps?.get("can_set_effort") ?: profile.caps.canSetEffort
-    Column {
-        TextButton(onClick = { expanded = !expanded }, modifier = Modifier.padding(start = 8.dp)) {
-            Text(if (expanded) "Hide options" else "Model, effort, execution mode")
+    val h = harness.ifBlank { null }
+    val models = profile.caps.modelsFor(h)
+    val efforts = profile.caps.effortsFor(h)
+    val interactive = profile.caps.interactiveFor(h)
+    val canSetModel = profile.caps.canSetModelFor(h)
+    val canSetEffort = profile.caps.canSetEffortFor(h)
+    val selectedModel = profile.model.takeIf { it in models }
+        ?: models.firstOrNull().orEmpty()
+    val selectedEffort = profile.effort.takeIf { it in efforts }
+        ?: efforts.firstOrNull().orEmpty()
+
+    Column(Modifier.padding(horizontal = 16.dp)) {
+        SectionLabel("Model & execution")
+        OptionRow(
+            label = "Execution",
+            options = ExecMode.options(interactive),
+            selected = vm.execModeFor(profile, harness),
+            display = { ExecMode.short(it) },
+            onSelect = { vm.setExecMode(profile.id, it) },
+        )
+        Text(
+            "Both modes auto-run tools (no permission prompts).",
+            style = MaterialTheme.typography.bodySmall,
+            color = pal.dim,
+        )
+        if (canSetModel && models.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            OptionRow(
+                label = "Model",
+                options = models,
+                selected = selectedModel,
+                display = { it },
+                onSelect = { vm.setModel(profile.id, it) },
+            )
         }
-        AnimatedVisibility(expanded) {
-            Column(Modifier.padding(horizontal = 16.dp)) {
-                OptionRow(
-                    label = "Execution",
-                    options = ExecMode.options(interactive),
-                    selected = vm.execModeFor(profile, harness),
-                    display = { ExecMode.short(it) },
-                    onSelect = { vm.setExecMode(profile.id, it) },
-                )
-                Text(
-                    "Both modes auto-run tools (no permission prompts).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = pal.dim,
-                )
-                if (canSetModel && models.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    OptionRow(
-                        label = "Model",
-                        options = models,
-                        selected = profile.model.ifBlank { models.first() },
-                        display = { it },
-                        onSelect = { vm.setModel(profile.id, it) },
-                    )
-                }
-                if (canSetEffort && efforts.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    OptionRow(
-                        label = "Effort",
-                        options = efforts,
-                        selected = profile.effort.ifBlank { efforts.first() },
-                        display = { it },
-                        onSelect = { vm.setEffort(profile.id, it) },
-                    )
-                }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "These stick to this profile and are reused for every turn you send " +
-                        "to it.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = pal.dim,
-                )
-            }
+        if (canSetEffort && efforts.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            OptionRow(
+                label = "Reasoning effort",
+                options = efforts,
+                selected = selectedEffort,
+                display = { it },
+                onSelect = { vm.setEffort(profile.id, it) },
+            )
         }
+        if ((!canSetModel || models.isEmpty()) && (!canSetEffort || efforts.isEmpty())) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = if (h.isNullOrBlank()) {
+                    "This daemon did not advertise models for the selected harness."
+                } else {
+                    "No model/effort list from $h yet — re-test the profile connection."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = pal.dim,
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "Choices stick to this profile and apply to new sessions and later turns.",
+            style = MaterialTheme.typography.bodySmall,
+            color = pal.dim,
+        )
     }
 }
 

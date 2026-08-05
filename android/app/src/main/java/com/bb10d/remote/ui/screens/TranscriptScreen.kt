@@ -57,6 +57,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -83,6 +84,7 @@ import com.bb10d.remote.ui.components.rememberClip
 import com.bb10d.remote.ui.components.WorkingPulse
 import com.bb10d.remote.ui.markdown.MarkdownText
 import com.bb10d.remote.ui.theme.Accent
+import com.bb10d.remote.ui.theme.AgentRemoteTheme
 import com.bb10d.remote.ui.theme.MonoStyle
 import com.bb10d.remote.ui.theme.palette
 import kotlinx.coroutines.delay
@@ -90,17 +92,63 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun TranscriptScreen(vm: TranscriptViewModel, onBack: () -> Unit) {
+fun TranscriptScreen(
+    vm: TranscriptViewModel,
+    onBack: () -> Unit,
+    onLiveTui: () -> Unit = {},
+) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val jobState by vm.job.collectAsStateWithLifecycle()
     val live by vm.liveStatus.collectAsStateWithLifecycle()
     val session by vm.session.collectAsStateWithLifecycle()
     val profile by vm.profile.collectAsStateWithLifecycle()
-    val ref by vm.ref.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
+    val harness by vm.harnessProvider.collectAsStateWithLifecycle()
 
-    val accent = Accent.forProvider(profile?.provider)
+    // Theme follows THIS session's harness (multi hosts), not the profile's
+    // default ping provider — matches BB/web chrome.
+    val accent = Accent.forProvider(harness)
+    val dark = when (settings.theme) {
+        "dark" -> true
+        "light" -> false
+        else -> isSystemInDarkTheme()
+    }
+    AgentRemoteTheme(accent = accent, dark = dark) {
+        TranscriptScreenBody(
+            vm = vm,
+            onBack = onBack,
+            onLiveTui = onLiveTui,
+            ui = ui,
+            jobState = jobState,
+            live = live,
+            session = session,
+            profile = profile,
+            settings = settings,
+            accent = accent,
+            harness = harness,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+private fun TranscriptScreenBody(
+    vm: TranscriptViewModel,
+    onBack: () -> Unit,
+    onLiveTui: () -> Unit,
+    ui: TranscriptUi,
+    jobState: com.bb10d.remote.data.JobState,
+    live: com.bb10d.remote.data.ActiveJobDto?,
+    session: com.bb10d.remote.data.SessionDto?,
+    profile: com.bb10d.remote.data.Profile?,
+    settings: com.bb10d.remote.data.AppSettings,
+    accent: Accent,
+    harness: String,
+) {
     val pal = palette
+    val ref by vm.ref.collectAsStateWithLifecycle()
+    val showLiveTui = ref.sessionId.isNotEmpty()
+        && (profile?.caps?.liveTuiFor(harness.ifBlank { null }) == true)
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val clipboard = rememberClip()
@@ -178,6 +226,7 @@ fun TranscriptScreen(vm: TranscriptViewModel, onBack: () -> Unit) {
                                     text = buildSubtitle(
                                         profile?.displayName.orEmpty(),
                                         session?.cwd.orEmpty(),
+                                        accent.label,
                                     ),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = pal.dim,
@@ -222,6 +271,15 @@ fun TranscriptScreen(vm: TranscriptViewModel, onBack: () -> Unit) {
                                     leadingIcon = { Icon(Icons.Outlined.Refresh, null) },
                                     onClick = { menuOpen = false; vm.refresh() },
                                 )
+                                if (showLiveTui) {
+                                    DropdownMenuItem(
+                                        text = { Text("Live TUI") },
+                                        onClick = {
+                                            menuOpen = false
+                                            onLiveTui()
+                                        },
+                                    )
+                                }
                                 DropdownMenuItem(
                                     text = { Text("Copy transcript") },
                                     leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
@@ -450,9 +508,11 @@ fun TranscriptScreen(vm: TranscriptViewModel, onBack: () -> Unit) {
     }
 }
 
-private fun buildSubtitle(profileName: String, cwd: String): String {
+private fun buildSubtitle(profileName: String, cwd: String, harnessLabel: String): String {
     val folder = cwd.trimEnd('/').substringAfterLast('/')
-    return listOf(profileName, folder).filter { it.isNotBlank() }.joinToString(" · ")
+    return listOf(profileName, harnessLabel.takeIf { it.isNotBlank() && it != "Agent" }, folder)
+        .filter { !it.isNullOrBlank() }
+        .joinToString(" · ")
 }
 
 private fun plainTranscript(items: List<TranscriptItem>): String =
@@ -917,18 +977,31 @@ private fun QueueSheet(
 @Composable
 private fun TurnOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.remote.data.Profile) {
     val caps = profile.caps
+    val harness by vm.harnessProvider.collectAsStateWithLifecycle()
+    val h = harness.ifBlank { null }
+    val models = caps.modelsFor(h)
+    val efforts = caps.effortsFor(h)
+    val interactive = caps.interactiveFor(h)
+    val canSetModel = caps.canSetModelFor(h)
+    val canSetEffort = caps.canSetEffortFor(h)
+    val selectedModel = profile.model.takeIf { it in models } ?: models.firstOrNull().orEmpty()
+    val selectedEffort = profile.effort.takeIf { it in efforts } ?: efforts.firstOrNull().orEmpty()
     Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 28.dp)) {
         Text("Turn options", style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Applies to ${profile.displayName} — every session on that daemon.",
+            buildString {
+                append("Applies to ${profile.displayName}")
+                if (harness.isNotBlank()) append(" · $harness")
+                append(" — later turns on this profile.")
+            },
             style = MaterialTheme.typography.bodySmall,
             color = palette.dim,
         )
         Spacer(Modifier.height(16.dp))
         OptionRow(
             label = "Execution",
-            options = ExecMode.options(caps.interactive),
+            options = ExecMode.options(interactive),
             selected = profile.effectiveExecMode(),
             display = { ExecMode.short(it) },
             onSelect = { vm.setExecMode(it) },
@@ -939,27 +1012,27 @@ private fun TurnOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.remote.
             style = MaterialTheme.typography.bodySmall,
             color = palette.dim,
         )
-        if (caps.canSetModel && caps.models.isNotEmpty()) {
+        if (canSetModel && models.isNotEmpty()) {
             Spacer(Modifier.height(16.dp))
             OptionRow(
                 label = "Model",
-                options = caps.models,
-                selected = profile.model.ifBlank { caps.models.first() },
+                options = models,
+                selected = selectedModel,
                 display = { it },
                 onSelect = { vm.setModel(it) },
             )
         }
-        if (caps.canSetEffort && caps.efforts.isNotEmpty()) {
+        if (canSetEffort && efforts.isNotEmpty()) {
             Spacer(Modifier.height(16.dp))
             OptionRow(
                 label = "Reasoning effort",
-                options = caps.efforts,
-                selected = profile.effort.ifBlank { caps.efforts.first() },
+                options = efforts,
+                selected = selectedEffort,
                 display = { it },
                 onSelect = { vm.setEffort(it) },
             )
         }
-        if (caps.rewind) {
+        if (caps.rewindFor(h)) {
             Spacer(Modifier.height(16.dp))
             Text(
                 "Long-press one of your messages to rewind the session back to it.",

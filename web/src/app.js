@@ -137,6 +137,11 @@ const state = {
   jobTimer: null,
   jobSince: 0,
   jobFails: 0,
+  liveTui: false,        // Live TUI mode open
+  liveTuiTimer: null,
+  liveTuiSeq: 0,
+  liveTuiKeys: false,    // pane has keyboard focus
+  liveTuiEscArmed: false,
   askedQuestion: null,   // request_id already auto-opened (reopen via banner)
   askedPermission: null, // request_id already auto-opened (reopen via banner)
   gen: 0,                // fan-out generation guard
@@ -861,6 +866,7 @@ function applyAccent(provider) {
 
 async function openSession(row) {
   stopJobWatch();
+  closeLiveTui();
   state.open = {
     profileId: row.profileId,
     sessionId: row.session.id,
@@ -879,6 +885,7 @@ async function openSession(row) {
   $("composer").classList.remove("hidden");
   $("chat-title").textContent = row.session.title || "Session";
   renderChatSub();
+  updateLiveTuiButton();
   renderSessions();
 
   $("transcript").innerHTML = "";
@@ -892,6 +899,154 @@ async function openSession(row) {
   const running = (state.active[row.profileId] || []).find(
     (j) => j.session_id === row.session.id || j.new_session_id === row.session.id);
   if (running) attachJob(running.job_id);
+  updateLiveTuiButton();
+}
+
+// ---------------------------------------------------------------- live TUI
+
+function profileSupportsLiveTui(profile, harness) {
+  if (!profile) return false;
+  return !!capOf(profile, "live_tui", false, harness)
+    || !!capOf(profile, "interactive", false, harness);
+}
+
+function updateLiveTuiButton() {
+  const btn = $("btn-live-tui");
+  if (!btn) return;
+  const open = state.open;
+  if (!open || !open.sessionId) {
+    btn.classList.add("hidden");
+    return;
+  }
+  const profile = profileById(open.profileId);
+  const harness = sessionProvider(open.session, profile);
+  if (!profileSupportsLiveTui(profile, harness)) {
+    btn.classList.add("hidden");
+    return;
+  }
+  btn.classList.remove("hidden");
+  btn.setAttribute("aria-pressed", state.liveTui ? "true" : "false");
+  btn.title = state.liveTui
+    ? "Back to transcript"
+    : "Live TUI — host terminal for this session";
+}
+
+function openLiveTui() {
+  if (!state.open || !state.open.sessionId) return;
+  state.liveTui = true;
+  state.liveTuiSeq = 0;
+  $("live-tui").classList.remove("hidden");
+  $("transcript").classList.add("hidden");
+  $("composer").classList.add("hidden");
+  updateLiveTuiButton();
+  const pane = $("live-tui-pane");
+  pane.textContent = "Connecting to host TUI…";
+  pane.classList.add("empty-tui");
+  $("live-tui-status").textContent = "Host TUI";
+  $("live-tui-status").classList.remove("live");
+  pollLiveTui(true);
+  clearInterval(state.liveTuiTimer);
+  state.liveTuiTimer = setInterval(() => pollLiveTui(false), 400);
+}
+
+function closeLiveTui() {
+  state.liveTui = false;
+  state.liveTuiKeys = false;
+  state.liveTuiEscArmed = false;
+  clearInterval(state.liveTuiTimer);
+  state.liveTuiTimer = null;
+  const box = $("live-tui");
+  if (box) box.classList.add("hidden");
+  const tr = $("transcript");
+  if (tr) tr.classList.remove("hidden");
+  if (state.open) {
+    $("composer")?.classList.remove("hidden");
+  }
+  updateLiveTuiButton();
+}
+
+async function pollLiveTui(force) {
+  if (!state.liveTui || !state.open) return;
+  const profile = profileById(state.open.profileId);
+  if (!profile) return;
+  try {
+    const frame = await call(
+      profile,
+      `/api/sessions/${encodeURIComponent(state.open.sessionId)}/tui`,
+    );
+    if (!state.liveTui) return;
+    const status = $("live-tui-status");
+    const pane = $("live-tui-pane");
+    if (!frame || frame.attached === false) {
+      status.textContent = frame?.error || "No host TUI attached";
+      status.classList.remove("live");
+      if (force || !pane.dataset.hadFrame) {
+        pane.textContent = frame?.error
+          || "No interactive TUI for this session. Start a turn in Interactive mode.";
+        pane.classList.add("empty-tui");
+      }
+      return;
+    }
+    if (!force && frame.seq === state.liveTuiSeq) return;
+    state.liveTuiSeq = frame.seq;
+    pane.dataset.hadFrame = "1";
+    pane.classList.remove("empty-tui");
+    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
+    pane.textContent = frame.text || "(empty pane)";
+    if (atBottom) pane.scrollTop = pane.scrollHeight;
+    status.textContent = frame.job_id
+      ? `Host TUI · job ${String(frame.job_id).slice(0, 8)}`
+      : "Host TUI · live";
+    status.classList.add("live");
+  } catch (e) {
+    if (!state.liveTui) return;
+    $("live-tui-status").textContent = e.message || "Live TUI error";
+    $("live-tui-status").classList.remove("live");
+  }
+}
+
+async function sendLiveTuiKeys(keys, text) {
+  if (!state.open || !state.open.sessionId) return;
+  const profile = profileById(state.open.profileId);
+  if (!profile) return;
+  const body = {};
+  if (keys && keys.length) body.keys = keys;
+  if (text) body.text = text;
+  if (!body.keys && !body.text) return;
+  try {
+    await call(
+      profile,
+      `/api/sessions/${encodeURIComponent(state.open.sessionId)}/tui/keys`,
+      { method: "POST", body },
+    );
+    // Immediate refresh so typing feels snappy.
+    setTimeout(() => pollLiveTui(true), 80);
+  } catch (e) {
+    toast(e.message || "TUI input failed");
+  }
+}
+
+function liveTuiKeyName(e) {
+  if (e.ctrlKey || e.metaKey) {
+    const k = (e.key || "").toLowerCase();
+    if (k.length === 1 && k >= "a" && k <= "z") return "Ctrl+" + k.toUpperCase();
+    return null;
+  }
+  if (e.key === "Escape") return "Escape";
+  if (e.key === "Enter") return "Enter";
+  if (e.key === "Backspace") return "Backspace";
+  if (e.key === "Tab") return "Tab";
+  if (e.key === "ArrowUp") return "Up";
+  if (e.key === "ArrowDown") return "Down";
+  if (e.key === "ArrowLeft") return "Left";
+  if (e.key === "ArrowRight") return "Right";
+  if (e.key === "Home") return "Home";
+  if (e.key === "End") return "End";
+  if (e.key === "PageUp") return "PageUp";
+  if (e.key === "PageDown") return "PageDown";
+  if (e.key === "Delete") return "Delete";
+  if (e.key.length === 1 && !e.altKey) return e.key; // printable
+  return null;
 }
 
 /**
@@ -2493,6 +2648,63 @@ function wire() {
     if (state.job && state.job.pendingQuestion) showQuestion(state.job.pendingQuestion);
     else if (state.job && state.job.pendingPermission) {
       showPermission(state.job.pendingPermission, { force: true });
+    }
+  });
+  $("btn-live-tui")?.addEventListener("click", () => {
+    if (state.liveTui) closeLiveTui();
+    else openLiveTui();
+  });
+  $("btn-live-tui-close")?.addEventListener("click", () => closeLiveTui());
+  $("live-tui")?.querySelectorAll("[data-tui-key]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      sendLiveTuiKeys([btn.getAttribute("data-tui-key")]);
+      $("live-tui-pane")?.focus();
+    });
+  });
+  $("live-tui-pane")?.addEventListener("focus", () => {
+    state.liveTuiKeys = true;
+    state.liveTuiEscArmed = false;
+  });
+  $("live-tui-pane")?.addEventListener("blur", () => {
+    state.liveTuiKeys = false;
+    state.liveTuiEscArmed = false;
+  });
+  $("live-tui-pane")?.addEventListener("keydown", (e) => {
+    if (!state.liveTui) return;
+    // Double Esc releases keyboard capture back to the page.
+    if (e.key === "Escape") {
+      if (state.liveTuiEscArmed) {
+        e.preventDefault();
+        state.liveTuiEscArmed = false;
+        $("live-tui-input")?.focus();
+        return;
+      }
+      state.liveTuiEscArmed = true;
+      setTimeout(() => { state.liveTuiEscArmed = false; }, 600);
+    } else {
+      state.liveTuiEscArmed = false;
+    }
+    const name = liveTuiKeyName(e);
+    if (!name) return;
+    e.preventDefault();
+    if (name.length === 1 && !e.ctrlKey && !e.metaKey) {
+      sendLiveTuiKeys(null, name);
+    } else {
+      sendLiveTuiKeys([name]);
+    }
+  });
+  $("btn-live-tui-send")?.addEventListener("click", () => {
+    const input = $("live-tui-input");
+    const text = (input?.value || "").trim();
+    if (!text) return;
+    // Full line into TUI (Enter included) via key path: text + Enter.
+    sendLiveTuiKeys(["Enter"], text);
+    if (input) input.value = "";
+  });
+  $("live-tui-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      $("btn-live-tui-send")?.click();
     }
   });
   $("btn-stop").addEventListener("click", async () => {

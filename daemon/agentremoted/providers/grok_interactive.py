@@ -680,6 +680,14 @@ class GrokInteractiveManager:
                              daemon=True).start()
         return ""
 
+    def capture_tui(self, session_id: str) -> dict:
+        from ..live_tui import capture_session
+        return capture_session(self, session_id)
+
+    def send_tui_keys(self, session_id: str, keys=None, text: str = "") -> str:
+        from ..live_tui import send_to_session
+        return send_to_session(self, session_id, keys=keys, text=text)
+
     def _send_prompt(self, tui: _Tui, prompt: str) -> str:
         """Type the prompt into the pane. Bracketed paste keeps multi-line
         prompts from submitting early; one Enter submits. Returns "" or err.

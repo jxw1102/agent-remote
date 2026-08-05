@@ -70,6 +70,8 @@ class TranscriptViewModel(
     private val repo: AgentRepository,
     initialRef: SessionRef,
     private val initialJobId: String,
+    /** Harness known at navigation time (session row or new-session picker). */
+    private val initialProvider: String = "",
 ) : ViewModel() {
 
     private val _ref = MutableStateFlow(initialRef)
@@ -84,6 +86,36 @@ class TranscriptViewModel(
     val profile: StateFlow<Profile?> = repo.profiles
         .map { it.byId(initialRef.profileId) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, repo.profile(initialRef.profileId))
+
+    /**
+     * Accent / banner harness for this open transcript.
+     * Prefer the session's own provider (multi hosts tag each row); then the
+     * list/nav hint; never the multi profile's default ping provider alone —
+     * that was painting every multi session as Claude (or Neutral).
+     */
+    val harnessProvider: StateFlow<String> = combine(
+        _session,
+        profile,
+        repo.sessions,
+        _ref,
+    ) { sess, prof, sessions, ref ->
+        sess?.provider?.takeIf { it.isNotBlank() }
+            ?: initialProvider.takeIf { it.isNotBlank() }
+            ?: sessions.rows.firstOrNull {
+                it.ref.profileId == ref.profileId && it.ref.sessionId == ref.sessionId
+            }?.provider?.takeIf { it.isNotBlank() }
+            ?: prof?.provider.orEmpty()
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.Eagerly,
+        initialProvider.ifBlank {
+            repo.sessions.value.rows.firstOrNull {
+                it.ref.profileId == initialRef.profileId
+                    && it.ref.sessionId == initialRef.sessionId
+            }?.provider?.ifBlank { null }
+                ?: repo.profile(initialRef.profileId)?.provider.orEmpty()
+        },
+    )
 
     private val watcher = JobWatcher(repo, initialRef.profileId, viewModelScope)
     val job: StateFlow<JobState> = watcher.state
@@ -244,10 +276,10 @@ class TranscriptViewModel(
                     // race the daemon writing the very lines we already echoed
                     // locally. Keep only the echoes the transcript has not
                     // caught up with, or the user sees their prompt twice.
-                    val settled = fetched.mapTo(HashSet()) { it.role + " " + it.text.trim() }
+                    val settled = fetched.mapTo(HashSet()) { it.role + "" + it.text.trim() }
                     val live = if (keepLive) {
                         _ui.value.items.filter {
-                            it.live && (it.role + " " + it.text.trim()) !in settled
+                            it.live && (it.role + "" + it.text.trim()) !in settled
                         }
                     } else {
                         emptyList()
@@ -500,13 +532,20 @@ class TranscriptViewModel(
         watcher.markStarting()
         setStatus("")
         viewModelScope.launch {
+            val harness = harnessProvider.value.ifBlank { null }
+            val models = profile.caps.modelsFor(harness)
+            val efforts = profile.caps.effortsFor(harness)
+            val model = profile.model.takeIf { it in models }
+                ?: models.firstOrNull().orEmpty()
+            val effort = profile.effort.takeIf { it in efforts }
+                ?: efforts.firstOrNull().orEmpty()
             runCatching {
                 c.continueSession(
                     sessionId = _ref.value.sessionId,
                     prompt = text,
                     execMode = profile.effectiveExecMode(),
-                    model = profile.model,
-                    effort = profile.effort,
+                    model = model,
+                    effort = effort,
                 )
             }
                 .onSuccess { jobId ->

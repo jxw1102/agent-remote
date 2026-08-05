@@ -16,9 +16,3 @@ dist/*.tar.gz
 
 # web client bundle — python3 web/build.py regenerates it from web/src
 web/dist/
-
-.DS_Store
-android/.gradle/
-android/.kotlin/
-android/app/build/
-android/local.properties

@@ -864,6 +864,12 @@ class GrokRunner:
         """Type a message into a session's live interactive TUI ("" or err)."""
         return self._interactive_mgr().type_text(session_id, text)
 
+    def capture_tui(self, session_id: str) -> dict:
+        return self._interactive_mgr().capture_tui(session_id)
+
+    def send_tui_keys(self, session_id: str, keys=None, text: str = "") -> str:
+        return self._interactive_mgr().send_tui_keys(session_id, keys=keys, text=text)
+
     def usage(self) -> dict:
         """Subscription limits for the phone's Usage sheet. grok has no usage
         API, so they are read out of a dedicated throwaway TUI running its
@@ -889,6 +895,7 @@ class GrokRunner:
             "can_show_usage": tmux_available(),
             # "interactive" permission mode: turns run in a host tmux TUI.
             "interactive": True,
+            "live_tui": tmux_available(),
             # "/rewind N" is driven in that TUI: grok's picker lists one point
             # per prompt, newest first, so N back == the Nth row. Conversation
             # only — reverting files is grok's default but the changes are

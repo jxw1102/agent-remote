@@ -104,12 +104,25 @@ class NewSessionViewModel(private val repo: AgentRepository) : ViewModel() {
         }
     }
 
-    fun start(profile: Profile, cwd: String, prompt: String, onStarted: (String) -> Unit) {
+    fun start(
+        profile: Profile,
+        cwd: String,
+        prompt: String,
+        onStarted: (jobId: String, provider: String) -> Unit,
+    ) {
         if (_starting.value) return
         val client = repo.client(profile)
         val harness = _harness.value.ifBlank {
             profile.caps.harnesses().firstOrNull() ?: profile.provider
         }
+        // Prefer a model/effort valid for THIS harness (stored profile defaults
+        // may be from another harness on multi hosts).
+        val models = profile.caps.modelsFor(harness)
+        val efforts = profile.caps.effortsFor(harness)
+        val model = profile.model.takeIf { it in models }
+            ?: models.firstOrNull().orEmpty()
+        val effort = profile.effort.takeIf { it in efforts }
+            ?: efforts.firstOrNull().orEmpty()
         _starting.value = true
         _error.value = null
         viewModelScope.launch {
@@ -118,14 +131,21 @@ class NewSessionViewModel(private val repo: AgentRepository) : ViewModel() {
                     cwd = cwd,
                     prompt = prompt,
                     execMode = execModeFor(profile, harness),
-                    model = profile.model,
-                    effort = profile.effort,
+                    model = model,
+                    effort = effort,
                     provider = harness,
                 )
             }
                 .onSuccess { jobId ->
                     repo.rememberFirstPrompt(jobId, prompt)
-                    onStarted(jobId)
+                    // Persist the resolved picks so the next open remembers them.
+                    if (model.isNotBlank() && model != profile.model) {
+                        repo.profileStore.updateComposerDefaults(profile.id, model = model)
+                    }
+                    if (effort.isNotBlank() && effort != profile.effort) {
+                        repo.profileStore.updateComposerDefaults(profile.id, effort = effort)
+                    }
+                    onStarted(jobId, harness)
                 }
                 .onFailure { _error.value = repo.reason(it) }
             _starting.value = false

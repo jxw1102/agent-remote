@@ -194,7 +194,9 @@ POST /api/jobs/<id>/queue {prompt}
 POST /api/jobs/<id>/queue/<qid>/cancel
 POST /api/jobs/<id>/stop
 POST /api/jobs/<id>/permission {request_id, allow}
-POST /api/jobs/<id>/input {prompt}
+POST /api/jobs/<id>/input {prompt}              type a full line into interactive TUI
+GET  /api/sessions/<id>/tui                     Live TUI pane capture
+POST /api/sessions/<id>/tui/keys {keys?,text?}  key/text injection into Live TUI
 POST /api/attachments
 GET  /api/drop
 GET  /api/drop/<name>
@@ -202,6 +204,9 @@ POST /api/drop/<name>/delete
 GET  /ws/status
 GET  /sse/status
 ```
+
+Cap `live_tui` on `/api/ping` when the harness can host a tmux TUI. Clients
+poll `GET …/tui` (~2–5 Hz) and send keys via `POST …/tui/keys`.
 
 ### Whose sessions get listed
 

@@ -1366,6 +1366,12 @@ class ClaudeRunner:
         """Type a message into a session's live interactive TUI ("" or err)."""
         return self._interactive_mgr().type_text(session_id, text)
 
+    def capture_tui(self, session_id: str) -> dict:
+        return self._interactive_mgr().capture_tui(session_id)
+
+    def send_tui_keys(self, session_id: str, keys=None, text: str = "") -> str:
+        return self._interactive_mgr().send_tui_keys(session_id, keys=keys, text=text)
+
     def on_hook(self, payload: dict, secret: str, tui_name: str = "") -> bool:
         """/internal/hook bridge for TUI SessionStart/Stop hook posts."""
         return self._interactive_mgr().on_hook(payload, secret, tui_name)
@@ -1387,6 +1393,8 @@ class ClaudeRunner:
             # "interactive" permission mode: turns run in a host tmux TUI,
             # where claude.ai connectors work.
             "interactive": True,
+            # Live TUI: clients can capture the pane and send keys.
+            "live_tui": True,
             # "/rewind N" (N user messages back) is driven in that TUI. Not a
             # grok capability: its /rewind takes a prompt, not a count.
             "rewind": True,

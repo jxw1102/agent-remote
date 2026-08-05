@@ -69,6 +69,8 @@ log = logging.getLogger(__name__)
 
 _SESSION_MSGS = re.compile(r"^/api/sessions/([^/]+)/messages$")
 _SESSION_CONT = re.compile(r"^/api/sessions/([^/]+)/continue$")
+_SESSION_TUI = re.compile(r"^/api/sessions/([^/]+)/tui$")
+_SESSION_TUI_KEYS = re.compile(r"^/api/sessions/([^/]+)/tui/keys$")
 _SESSION_ONE = re.compile(r"^/api/sessions/([^/]+)$")
 _JOB_ONE = re.compile(r"^/api/jobs/([^/]+)$")
 _JOB_STOP = re.compile(r"^/api/jobs/([^/]+)/stop$")
@@ -265,8 +267,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 p["provider"] = name
                 # Disambiguate project ids across harnesses.
                 p["id"] = "%s:%s" % (name, p.get("id") or "")
+                # Normalize last_active to a float epoch so clients (Android
+                # ProjectDto) never see mixed ISO strings + floats.
+                p["last_active"] = self._activity_sort_key(p)
                 rows.append(p)
-        rows.sort(key=self._activity_sort_key, reverse=True)
+        rows.sort(key=lambda r: float(r.get("last_active") or 0), reverse=True)
         return rows
 
     def _merged_search(self, q, project, limit, user_only):
@@ -596,6 +601,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_session_messages(m.group(1), query)
             return
 
+        m = _SESSION_TUI.match(path)
+        if m:
+            self._handle_tui_capture(m.group(1))
+            return
+
         m = _SESSION_ONE.match(path)
         if m:
             session = self.store.get_session(m.group(1))
@@ -754,6 +764,17 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._bind_bundle(name)
             self._send_session_messages(m.group(1), query)
             return
+        m = _SESSION_TUI.match(path)
+        if m:
+            name, b, _ = self._find_session(m.group(1))
+            if b is None:
+                # TUI may exist for a brand-new session before store indexes it.
+                # Still try every harness.
+                self._handle_tui_capture(m.group(1))
+                return
+            self._bind_bundle(name)
+            self._handle_tui_capture(m.group(1))
+            return
         m = _SESSION_ONE.match(path)
         if m:
             name, b, session = self._find_session(m.group(1))
@@ -896,6 +917,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_continue(m.group(1), body)
             return
 
+        m = _SESSION_TUI_KEYS.match(path)
+        if m:
+            self._handle_tui_keys(m.group(1), body)
+            return
+
         if path == "/api/sessions/new":
             self._handle_new_session(body)
             return
@@ -972,6 +998,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             self._bind_bundle(name)
             self._handle_continue(m.group(1), body)
+            return
+        m = _SESSION_TUI_KEYS.match(path)
+        if m:
+            name, b, _ = self._find_session(m.group(1))
+            if b is not None:
+                self._bind_bundle(name)
+            self._handle_tui_keys(m.group(1), body)
             return
         m = _JOB_PERM.match(path)
         if m:
@@ -1121,7 +1154,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             model=str(body.get("model", "") or ""),
             effort=str(body.get("effort", "") or ""),
         )
-        self._send_json({"job_id": job.id}, status=202)
+        # 200 (not 202): some mobile HTTP stacks / proxies mishandle 202
+        # bodies; clients only need the job_id JSON either way.
+        self._send_json({"job_id": job.id}, status=200)
 
     def _handle_new_session(self, body):
         if not isinstance(body, dict) or not isinstance(body.get("prompt"), str) \
@@ -1143,7 +1178,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             model=str(body.get("model", "") or ""),
             effort=str(body.get("effort", "") or ""),
         )
-        self._send_json({"job_id": job.id}, status=202)
+        self._send_json({"job_id": job.id}, status=200)
 
     def _handle_job_input(self, job_id, body):
         """Type a message into an interactive job's TUI (no daemon queue)."""
@@ -1156,6 +1191,103 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(409, reason)
             return
         self._send_json({"ok": True}, status=202)
+
+    def _tui_runner_for_session(self, session_id: str):
+        """Pick the runner that owns a live TUI for session_id (multi or single)."""
+        sid = (session_id or "").strip()
+        if not sid:
+            return None
+        # Prefer the already-bound runner (path prefix or find_session).
+        if self.runner is not None and hasattr(self.runner, "capture_tui"):
+            frame = self.runner.capture_tui(sid)
+            if frame.get("attached"):
+                return self.runner
+        # Multi: probe every harness.
+        for b in (self.bundles or {}).values():
+            r = b.runner
+            if not hasattr(r, "capture_tui"):
+                continue
+            frame = r.capture_tui(sid)
+            if frame.get("attached"):
+                return r
+        return self.runner if hasattr(self.runner or object(), "capture_tui") else None
+
+    def _handle_tui_capture(self, session_id: str):
+        """GET /api/sessions/<id>/tui — live host TUI pane text."""
+        from .live_tui import frame_payload
+        last = None
+        # Multi: try every harness so an attached TUI is found regardless of
+        # path binding; keep the last unattached frame for a useful error.
+        if self.bundles:
+            for b in self.bundles.values():
+                r = b.runner
+                if not hasattr(r, "capture_tui"):
+                    continue
+                frame = r.capture_tui(session_id)
+                last = frame
+                if frame.get("attached"):
+                    self._send_json(frame)
+                    return
+            if last is not None:
+                self._send_json(last)
+                return
+        if self.runner is not None and hasattr(self.runner, "capture_tui"):
+            self._send_json(self.runner.capture_tui(session_id))
+            return
+        self._send_json(frame_payload(
+            session_id, "", False,
+            error="live TUI not available on this daemon",
+        ))
+
+    def _handle_tui_keys(self, session_id, body):
+        """POST /api/sessions/<id>/tui/keys {keys?:[], text?:str}."""
+        if not isinstance(body, dict):
+            self._error(400, "body must be JSON")
+            return
+        keys = body.get("keys")
+        text = body.get("text") or ""
+        if not isinstance(text, str):
+            text = str(text)
+        if keys is not None and not isinstance(keys, list):
+            self._error(400, "'keys' must be a list of key names")
+            return
+        if (not keys) and not text:
+            self._error(400, "provide 'keys' and/or 'text'")
+            return
+        runner = self._tui_runner_for_session(session_id)
+        if runner is None or not hasattr(runner, "send_tui_keys"):
+            # Multi probe
+            if self.bundles:
+                for b in self.bundles.values():
+                    r = b.runner
+                    if hasattr(r, "send_tui_keys"):
+                        err = r.send_tui_keys(session_id, keys=keys, text=text)
+                        if not err or err != "no interactive TUI for this session":
+                            if err:
+                                self._error(409, err)
+                            else:
+                                self._send_json({"ok": True})
+                            return
+            self._error(409, "no interactive TUI for this session")
+            return
+        err = runner.send_tui_keys(session_id, keys=keys, text=text)
+        if err:
+            # Multi: try other harnesses if this one has no pane.
+            if err == "no interactive TUI for this session" and self.bundles:
+                for b in self.bundles.values():
+                    r = b.runner
+                    if r is runner or not hasattr(r, "send_tui_keys"):
+                        continue
+                    err2 = r.send_tui_keys(session_id, keys=keys, text=text)
+                    if not err2:
+                        self._send_json({"ok": True})
+                        return
+                    if err2 != "no interactive TUI for this session":
+                        self._error(409, err2)
+                        return
+            self._error(409, err)
+            return
+        self._send_json({"ok": True})
 
     def _handle_queue(self, job_id, body):
         if not isinstance(body, dict) or not isinstance(body.get("prompt"), str) \

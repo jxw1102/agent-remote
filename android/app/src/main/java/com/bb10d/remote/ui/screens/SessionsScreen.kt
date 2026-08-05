@@ -84,7 +84,7 @@ import java.time.ZoneId
 @Composable
 fun SessionsScreen(
     vm: SessionsViewModel,
-    onOpen: (SessionRef) -> Unit,
+    onOpen: (SessionRef, provider: String) -> Unit,
     onNewSession: () -> Unit,
     onProfiles: () -> Unit,
     onSettings: () -> Unit,
@@ -362,7 +362,7 @@ private fun SessionList(
     problems: List<Pair<String, String>>,
     searching: Boolean,
     listState: androidx.compose.foundation.lazy.LazyListState,
-    onOpen: (SessionRef) -> Unit,
+    onOpen: (SessionRef, provider: String) -> Unit,
     onProfiles: () -> Unit,
 ) {
     LazyColumn(
@@ -387,7 +387,7 @@ private fun SessionList(
                     working = working.contains(row.ref.key),
                     blocked = blocked.contains(row.ref.key),
                     searching = searching,
-                    onClick = { onOpen(row.ref) },
+                    onClick = { onOpen(row.ref, row.provider) },
                 )
                 Hairline(inset = 16)
             }

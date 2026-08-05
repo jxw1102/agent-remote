@@ -74,6 +74,17 @@
                   stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
+        <button id="btn-live-tui" class="icon-btn hidden" type="button"
+                title="Live TUI — host terminal for this session" aria-label="Live TUI"
+                aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+               stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+               stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="14" rx="2"/>
+            <path d="M8 20h8M12 18v2"/>
+            <path d="M7 9h.01M10 9h7"/>
+          </svg>
+        </button>
         <button id="btn-stop" class="icon-btn danger hidden" type="button"
                 title="Stop" aria-label="Stop">
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -97,6 +108,30 @@
         <h2>Pick a session</h2>
         <p>Every daemon you add shows up in one list on the left — Claude and
            Grok side by side, newest first.</p>
+      </div>
+    </div>
+
+    <!-- Live TUI: host tmux pane + keyboard capture (hidden by default). -->
+    <div id="live-tui" class="live-tui hidden" tabindex="0">
+      <div class="live-tui-bar">
+        <span id="live-tui-status" class="live-tui-status">Host TUI</span>
+        <span class="live-tui-hint">Click pane to capture keys · Esc Esc releases</span>
+        <div class="live-tui-keys">
+          <button type="button" data-tui-key="Escape" title="Escape">Esc</button>
+          <button type="button" data-tui-key="Tab" title="Tab">Tab</button>
+          <button type="button" data-tui-key="Up" title="Up">↑</button>
+          <button type="button" data-tui-key="Down" title="Down">↓</button>
+          <button type="button" data-tui-key="Left" title="Left">←</button>
+          <button type="button" data-tui-key="Right" title="Right">→</button>
+          <button type="button" data-tui-key="Ctrl+C" title="Ctrl+C">^C</button>
+        </div>
+        <button id="btn-live-tui-close" type="button" class="ghost">Transcript</button>
+      </div>
+      <pre id="live-tui-pane" class="live-tui-pane" aria-live="polite"></pre>
+      <div class="live-tui-line">
+        <input id="live-tui-input" type="text" autocomplete="off" spellcheck="false"
+               placeholder="Type here, or focus the pane for direct keys · Enter sends line">
+        <button id="btn-live-tui-send" class="primary" type="button">Send line</button>
       </div>
     </div>
 

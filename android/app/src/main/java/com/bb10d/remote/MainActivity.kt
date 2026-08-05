@@ -29,6 +29,7 @@ import com.bb10d.remote.data.SessionRef
 import com.bb10d.remote.service.JobWatchService
 import com.bb10d.remote.ui.screens.DropScreen
 import com.bb10d.remote.ui.screens.DropViewModel
+import com.bb10d.remote.ui.screens.LiveTuiScreen
 import com.bb10d.remote.ui.screens.NewSessionScreen
 import com.bb10d.remote.ui.screens.NewSessionViewModel
 import com.bb10d.remote.ui.screens.ProfileEditorScreen
@@ -45,6 +46,7 @@ import com.bb10d.remote.ui.screens.UsageViewModel
 import com.bb10d.remote.ui.theme.Accent
 import com.bb10d.remote.ui.theme.AgentRemoteTheme
 import kotlinx.coroutines.flow.MutableStateFlow
+// Accent/AgentRemoteTheme: app shell uses Neutral; TranscriptScreen re-themes per harness.
 
 class MainActivity : ComponentActivity() {
 
@@ -97,9 +99,19 @@ private object Routes {
     const val DROP = "drop"
     const val NEW_SESSION = "new-session"
     const val TRANSCRIPT = "transcript"
+    const val LIVE_TUI = "live-tui"
 
-    fun transcript(profileId: String, sessionId: String, jobId: String = "") =
-        "$TRANSCRIPT/$profileId/${sessionId.ifEmpty { NONE }}?job=$jobId"
+    fun transcript(
+        profileId: String,
+        sessionId: String,
+        jobId: String = "",
+        provider: String = "",
+    ) =
+        "$TRANSCRIPT/$profileId/${sessionId.ifEmpty { NONE }}" +
+            "?job=${jobId}&provider=${provider}"
+
+    fun liveTui(profileId: String, sessionId: String) =
+        "$LIVE_TUI/$profileId/${sessionId.ifEmpty { NONE }}"
 
     const val NONE = "-"
 }
@@ -152,7 +164,11 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
         composable(Routes.SESSIONS) {
             SessionsScreen(
                 vm = viewModel(factory = factory),
-                onOpen = { ref -> nav.navigate(Routes.transcript(ref.profileId, ref.sessionId)) },
+                onOpen = { ref, provider ->
+                    nav.navigate(
+                        Routes.transcript(ref.profileId, ref.sessionId, provider = provider),
+                    )
+                },
                 onNewSession = { nav.navigate(Routes.NEW_SESSION) },
                 onProfiles = { nav.navigate(Routes.PROFILES) },
                 onSettings = { nav.navigate(Routes.SETTINGS) },
@@ -204,41 +220,63 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
             NewSessionScreen(
                 vm = viewModel(factory = factory),
                 onBack = { nav.popBackStack() },
-                onStarted = { profileId, jobId ->
+                onStarted = { profileId, jobId, provider ->
                     nav.popBackStack()
-                    nav.navigate(Routes.transcript(profileId, "", jobId))
+                    nav.navigate(
+                        Routes.transcript(profileId, "", jobId, provider = provider),
+                    )
                 },
             )
         }
 
         composable(
-            route = "${Routes.TRANSCRIPT}/{profileId}/{sessionId}?job={job}",
+            route = "${Routes.TRANSCRIPT}/{profileId}/{sessionId}?job={job}&provider={provider}",
             arguments = listOf(
                 navArgument("profileId") { type = NavType.StringType },
                 navArgument("sessionId") { type = NavType.StringType },
                 navArgument("job") { defaultValue = "" },
+                navArgument("provider") { defaultValue = "" },
             ),
         ) { entry ->
             val profileId = entry.arguments?.getString("profileId").orEmpty()
             val rawSession = entry.arguments?.getString("sessionId").orEmpty()
             val sessionId = if (rawSession == Routes.NONE) "" else rawSession
             val jobId = entry.arguments?.getString("job").orEmpty()
+            val provider = entry.arguments?.getString("provider").orEmpty()
             val ref = SessionRef(profileId, sessionId)
-            val transcriptFactory = remember(ref.key, jobId) {
+            val transcriptFactory = remember(ref.key, jobId, provider) {
                 viewModelFactory {
-                    initializer { TranscriptViewModel(repo, ref, jobId) }
+                    initializer { TranscriptViewModel(repo, ref, jobId, provider) }
                 }
             }
-            // Re-theme to the daemon's provider: inside a session there is no
-            // ambiguity about who is answering, and the colour says it without
-            // spending a line of the screen on it.
-            val accent = Accent.forProvider(profiles.byId(profileId)?.provider)
-            AgentRemoteTheme(accent = accent, dark = dark) {
-                TranscriptScreen(
-                    vm = viewModel(key = ref.key + jobId, factory = transcriptFactory),
-                    onBack = { nav.popBackStack() },
-                )
-            }
+            // Theme is applied inside TranscriptScreen from the session harness
+            // (nav provider is the initial hint for multi hosts).
+            TranscriptScreen(
+                vm = viewModel(key = ref.key + jobId + provider, factory = transcriptFactory),
+                onBack = { nav.popBackStack() },
+                onLiveTui = {
+                    if (sessionId.isNotEmpty()) {
+                        nav.navigate(Routes.liveTui(profileId, sessionId))
+                    }
+                },
+            )
+        }
+
+        composable(
+            route = "${Routes.LIVE_TUI}/{profileId}/{sessionId}",
+            arguments = listOf(
+                navArgument("profileId") { type = NavType.StringType },
+                navArgument("sessionId") { type = NavType.StringType },
+            ),
+        ) { entry ->
+            val profileId = entry.arguments?.getString("profileId").orEmpty()
+            val rawSession = entry.arguments?.getString("sessionId").orEmpty()
+            val sessionId = if (rawSession == Routes.NONE) "" else rawSession
+            LiveTuiScreen(
+                repo = repo,
+                ref = SessionRef(profileId, sessionId),
+                onBack = { nav.popBackStack() },
+            )
         }
     }
 }

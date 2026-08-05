@@ -1,8 +1,19 @@
 package com.bb10d.remote.data
 
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.longOrNull
+import java.time.Instant
 
 /*
  * Wire types for the agentremoted HTTP API (daemon/agentremoted/server.py).
@@ -13,6 +24,46 @@ import kotlinx.serialization.json.JsonElement
  * Everything is defaulted: an older daemon that predates a field must degrade
  * to "feature off", not to a parse error.
  */
+
+/**
+ * Multi /api/projects mixes float epochs (claude/grok) with ISO strings
+ * (codex). Accept either as a Double epoch so one bad row never kills the list.
+ */
+object FlexibleEpochSerializer : KSerializer<Double> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("FlexibleEpoch", PrimitiveKind.DOUBLE)
+
+    override fun deserialize(decoder: Decoder): Double {
+        val json = decoder as? JsonDecoder
+        if (json != null) {
+            val el = json.decodeJsonElement()
+            val p = el as? JsonPrimitive ?: return 0.0
+            p.doubleOrNull?.let { return it }
+            p.longOrNull?.let { return it.toDouble() }
+            val s = p.content.trim()
+            if (s.isEmpty()) return 0.0
+            s.toDoubleOrNull()?.let { return it }
+            return runCatching {
+                Instant.parse(
+                    if (s.endsWith("Z") || s.contains('+') || s.lastIndexOf('-') > 10) s
+                    else s + "Z",
+                ).epochSecond.toDouble()
+            }.getOrElse {
+                runCatching {
+                    // "2026-08-04T13:08:59Z" style without Instant if needed
+                    Instant.parse(s.replace(" ", "T").let {
+                        if (it.endsWith("Z") || it.contains('+')) it else "${it}Z"
+                    }).toEpochMilli() / 1000.0
+                }.getOrDefault(0.0)
+            }
+        }
+        return runCatching { decoder.decodeDouble() }.getOrDefault(0.0)
+    }
+
+    override fun serialize(encoder: Encoder, value: Double) {
+        encoder.encodeDouble(value)
+    }
+}
 
 @Serializable
 data class ProviderDetailDto(
@@ -41,13 +92,22 @@ data class PingDto(
     val providerDetails: Map<String, ProviderDetailDto> = emptyMap(),
 )
 
+/**
+ * [lastActive] may be a float epoch (claude/grok) or an ISO string (older
+ * codex). [FlexibleEpochSerializer] accepts both so multi /api/projects
+ * never fails the whole list for one harness.
+ */
 @Serializable
 data class ProjectDto(
     val id: String = "",
     val cwd: String = "",
     val name: String = "",
     @SerialName("session_count") val sessionCount: Int = 0,
-    @SerialName("last_active") val lastActive: Double = 0.0,
+    @SerialName("last_active")
+    @Serializable(with = FlexibleEpochSerializer::class)
+    val lastActive: Double = 0.0,
+    /** Multi-harness root tags each project with its provider. */
+    val provider: String = "",
 )
 
 @Serializable
@@ -251,6 +311,20 @@ data class DropListDto(
 @Serializable
 data class JobStartedDto(@SerialName("job_id") val jobId: String = "")
 
+/** GET /api/sessions/<id>/tui — host tmux pane frame. */
+@Serializable
+data class TuiFrameDto(
+    @SerialName("session_id") val sessionId: String = "",
+    @SerialName("job_id") val jobId: String = "",
+    val attached: Boolean = false,
+    val text: String = "",
+    val seq: Long = 0,
+    val cols: Int = 0,
+    val rows: Int = 0,
+    val error: String = "",
+    val ts: Double = 0.0,
+)
+
 @Serializable
 data class AttachmentDto(
     val ok: Boolean = false,
@@ -281,6 +355,7 @@ object Cap {
     const val CAN_SET_EFFORT = "can_set_effort"
     const val CAN_SHOW_USAGE = "can_show_usage"
     const val INTERACTIVE = "interactive"
+    const val LIVE_TUI = "live_tui"
     const val REWIND = "rewind"
 }
 
@@ -318,7 +393,16 @@ data class Caps(
             return this[Cap.CAN_SHOW_USAGE]
         }
     val interactive: Boolean get() = this[Cap.INTERACTIVE]
+    val liveTui: Boolean get() = this[Cap.LIVE_TUI] || interactive
     val rewind: Boolean get() = this[Cap.REWIND]
+
+    fun liveTuiFor(harness: String?): Boolean {
+        val h = harness?.lowercase().orEmpty()
+        val detail = if (h.isNotEmpty()) providerDetails[h] else null
+        val flag = detail?.caps?.get(Cap.LIVE_TUI)
+        if (flag != null) return flag
+        return detail?.caps?.get(Cap.INTERACTIVE) ?: liveTui
+    }
 
     /** Harnesses this host fronts (multi) or the single known provider. */
     fun harnesses(): List<String> {
@@ -372,6 +456,26 @@ data class Caps(
         val h = harness?.lowercase().orEmpty()
         val detail = if (h.isNotEmpty()) providerDetails[h] else null
         return detail?.efforts?.takeIf { it.isNotEmpty() } ?: efforts
+    }
+
+    /** Multi: read can_set_model from the harness detail, not only the root union. */
+    fun canSetModelFor(harness: String?): Boolean {
+        val h = harness?.lowercase().orEmpty()
+        val detail = if (h.isNotEmpty()) providerDetails[h] else null
+        val flag = detail?.caps?.get(Cap.CAN_SET_MODEL)
+        if (flag != null) return flag
+        // Fall back: if this harness (or root) advertises a model list, show the picker.
+        if (modelsFor(h.ifBlank { null }).isNotEmpty()) return true
+        return canSetModel
+    }
+
+    fun canSetEffortFor(harness: String?): Boolean {
+        val h = harness?.lowercase().orEmpty()
+        val detail = if (h.isNotEmpty()) providerDetails[h] else null
+        val flag = detail?.caps?.get(Cap.CAN_SET_EFFORT)
+        if (flag != null) return flag
+        if (effortsFor(h.ifBlank { null }).isNotEmpty()) return true
+        return canSetEffort
     }
 
     fun interactiveFor(harness: String?): Boolean {

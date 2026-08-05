@@ -13,6 +13,7 @@ import com.bb10d.remote.data.SearchDto
 import com.bb10d.remote.data.SessionDto
 import com.bb10d.remote.data.SessionsDto
 import com.bb10d.remote.data.ShellResultDto
+import com.bb10d.remote.data.TuiFrameDto
 import com.bb10d.remote.data.UsageDto
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -115,10 +116,13 @@ class DaemonClient(
         timeoutSeconds: Int = 0,
     ): T = withContext(Dispatchers.IO) {
         val body = raw(req, timeoutSeconds)
+        val text = body.decodeToString()
         try {
-            Json.decodeFromString(serializer, body.decodeToString())
+            Json.decodeFromString(serializer, text)
+        } catch (e: DaemonException) {
+            throw e
         } catch (e: Exception) {
-            throw DaemonException(0, "The daemon sent something this app cannot read")
+            throw DaemonException(0, unreadMessage(text))
         }
     }
 
@@ -137,22 +141,68 @@ class DaemonClient(
             }
             response.use {
                 val bytes = it.body?.bytes() ?: ByteArray(0)
-                if (!it.isSuccessful) throw DaemonException(it.code, errorText(it.code, bytes))
+                // 2xx includes 202 Accepted (job started) from agentremoted.
+                if (it.code !in 200..299) {
+                    throw DaemonException(it.code, errorText(it.code, bytes))
+                }
                 bytes
             }
         }
 
     private fun errorText(code: Int, body: ByteArray): String {
+        val text = body.decodeToString()
         val parsed = runCatching {
-            Json.decodeFromString(ErrorDto.serializer(), body.decodeToString()).error
+            Json.decodeFromString(ErrorDto.serializer(), text).error
         }.getOrNull()
         if (!parsed.isNullOrBlank()) return parsed
-        return when (code) {
-            401 -> "Token rejected by the daemon"
-            404 -> "Not found on the daemon"
+        // Multi root often returns plain {"error":"…"}; also surface a snippet
+        // so misrouted HTML/proxy pages are diagnosable.
+        val snip = text.trim().replace(Regex("\\s+"), " ").take(160)
+        return when {
+            snip.isNotEmpty() && !snip.startsWith("{") ->
+                "Daemon returned HTTP $code: $snip"
+            code == 401 -> "Token rejected by the daemon"
+            code == 404 -> "Not found on the daemon"
             else -> "Daemon returned HTTP $code"
         }
     }
+
+    private fun unreadMessage(text: String): String {
+        val snip = text.trim().replace(Regex("\\s+"), " ").take(160)
+        return if (snip.isEmpty()) {
+            "The daemon sent an empty reply"
+        } else {
+            "The daemon sent something this app cannot read: $snip"
+        }
+    }
+
+    /**
+     * POST /api/sessions/new and /continue return `{"job_id":"…"}` (HTTP 202).
+     * Parse the id without depending only on the generated serializer, so a
+     * R8/minifier quirk or an extra field cannot blank the start flow.
+     */
+    private fun parseJobId(body: ByteArray): String {
+        val text = body.decodeToString()
+        val obj = runCatching {
+            Json.parseToJsonElement(text) as? JsonObject
+        }.getOrNull()
+        if (obj != null) {
+            val id = primitiveString(obj["job_id"])
+                ?: primitiveString(obj["jobId"])
+            if (!id.isNullOrBlank()) return id
+            val err = primitiveString(obj["error"])
+            if (!err.isNullOrBlank()) throw DaemonException(0, err)
+        }
+        // Last resort: typed DTO (same payload shape as older clients).
+        val typed = runCatching {
+            Json.decodeFromString(JobStartedDto.serializer(), text).jobId
+        }.getOrNull()
+        if (!typed.isNullOrBlank()) return typed
+        throw DaemonException(0, unreadMessage(text))
+    }
+
+    private fun primitiveString(el: kotlinx.serialization.json.JsonElement?): String? =
+        (el as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
 
     private fun jsonBody(build: JsonObject): RequestBody =
         Json.encodeToString(JsonObject.serializer(), build).toRequestBody(JSON_MEDIA)
@@ -232,20 +282,21 @@ class DaemonClient(
         execMode: String,
         model: String,
         effort: String,
-    ): String = call(
-        request(url("api/sessions/$sessionId/continue")).post(
-            jsonBody(
-                buildJsonObject {
-                    put("prompt", prompt)
-                    // Interactive | Headless UI → daemon permission_mode.
-                    put("permission_mode", com.bb10d.remote.data.ExecMode.wire(execMode))
-                    put("model", model)
-                    put("effort", effort)
-                },
-            ),
-        ).build(),
-        JobStartedDto.serializer(),
-    ).jobId
+    ): String = parseJobId(
+        raw(
+            request(url("api/sessions/$sessionId/continue")).post(
+                jsonBody(
+                    buildJsonObject {
+                        put("prompt", prompt)
+                        // Interactive | Headless UI → daemon permission_mode.
+                        put("permission_mode", com.bb10d.remote.data.ExecMode.wire(execMode))
+                        put("model", model)
+                        put("effort", effort)
+                    },
+                ),
+            ).build(),
+        ),
+    )
 
     suspend fun newSession(
         cwd: String,
@@ -255,21 +306,22 @@ class DaemonClient(
         effort: String,
         /** Multi-harness root requires this so the daemon routes the turn. */
         provider: String = "",
-    ): String = call(
-        request(url("api/sessions/new")).post(
-            jsonBody(
-                buildJsonObject {
-                    put("cwd", cwd)
-                    put("prompt", prompt)
-                    put("permission_mode", com.bb10d.remote.data.ExecMode.wire(execMode))
-                    put("model", model)
-                    put("effort", effort)
-                    if (provider.isNotBlank()) put("provider", provider)
-                },
-            ),
-        ).build(),
-        JobStartedDto.serializer(),
-    ).jobId
+    ): String = parseJobId(
+        raw(
+            request(url("api/sessions/new")).post(
+                jsonBody(
+                    buildJsonObject {
+                        put("cwd", cwd)
+                        put("prompt", prompt)
+                        put("permission_mode", com.bb10d.remote.data.ExecMode.wire(execMode))
+                        put("model", model)
+                        put("effort", effort)
+                        if (provider.isNotBlank()) put("provider", provider)
+                    },
+                ),
+            ).build(),
+        ),
+    )
 
     suspend fun job(jobId: String, since: Int): JobSnapshotDto = call(
         request(url("api/jobs/$jobId", mapOf("since" to since.toString()))).get().build(),
@@ -285,6 +337,34 @@ class DaemonClient(
         raw(
             request(url("api/jobs/$jobId/input"))
                 .post(jsonBody(buildJsonObject { put("prompt", prompt) })).build(),
+        )
+    }
+
+    /** Live TUI pane capture for a session. */
+    suspend fun tui(sessionId: String): TuiFrameDto = call(
+        request(url("api/sessions/$sessionId/tui")).get().build(),
+        TuiFrameDto.serializer(),
+        timeoutSeconds = 15,
+    )
+
+    /** Inject keys and/or literal text into the session's Live TUI. */
+    suspend fun tuiKeys(sessionId: String, keys: List<String> = emptyList(), text: String = "") {
+        raw(
+            request(url("api/sessions/$sessionId/tui/keys")).post(
+                jsonBody(
+                    buildJsonObject {
+                        if (keys.isNotEmpty()) {
+                            put(
+                                "keys",
+                                kotlinx.serialization.json.JsonArray(
+                                    keys.map { kotlinx.serialization.json.JsonPrimitive(it) },
+                                ),
+                            )
+                        }
+                        if (text.isNotEmpty()) put("text", text)
+                    },
+                ),
+            ).build(),
         )
     }
 

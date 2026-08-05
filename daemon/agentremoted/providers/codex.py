@@ -145,25 +145,22 @@ class CodexStore:
         for row in self._rows(user_only=True):
             cwd = (row["cwd"] or "").strip() or "(no project)"
             rec = by_cwd.get(cwd)
+            # Float epoch like claude/grok — ISO strings break multi merge sort
+            # and Android ProjectDto (last_active: Double).
+            ts = float(row["updated_at"] or row["created_at"] or 0)
             if rec is None:
                 by_cwd[cwd] = {
                     "id": _munge_cwd(cwd if cwd != "(no project)" else ""),
                     "cwd": "" if cwd == "(no project)" else cwd,
                     "name": Path(cwd).name if cwd not in ("", "(no project)") else "no-project",
                     "session_count": 1,
-                    "last_active": _iso_from_unix(row["updated_at"] or row["created_at"]),
-                    "_ts": int(row["updated_at"] or row["created_at"] or 0),
+                    "last_active": ts,
                 }
             else:
                 rec["session_count"] += 1
-                ts = int(row["updated_at"] or row["created_at"] or 0)
-                if ts > rec["_ts"]:
-                    rec["_ts"] = ts
-                    rec["last_active"] = _iso_from_unix(ts)
-        out = sorted(by_cwd.values(), key=lambda p: p["_ts"], reverse=True)
-        for p in out:
-            p.pop("_ts", None)
-        return out
+                if ts > float(rec.get("last_active") or 0):
+                    rec["last_active"] = ts
+        return sorted(by_cwd.values(), key=lambda p: p["last_active"], reverse=True)
 
     def list_sessions(self, project_id=None, limit=25, user_only=True):
         project_cwd = None
@@ -425,8 +422,15 @@ class CodexRunner:
         """Type a message into a session's live interactive TUI (\"\" or err)."""
         return self._interactive_mgr().type_text(session_id, text)
 
+    def capture_tui(self, session_id: str) -> dict:
+        return self._interactive_mgr().capture_tui(session_id)
+
+    def send_tui_keys(self, session_id: str, keys=None, text: str = "") -> str:
+        return self._interactive_mgr().send_tui_keys(session_id, keys=keys, text=text)
+
     def capabilities(self):
         from .codex_interactive import tmux_available
+        has_tmux = tmux_available()
         return {
             "queue": True,
             "stop": True,
@@ -441,7 +445,8 @@ class CodexRunner:
             "turns": True,
             # "interactive" permission mode: turns run in a host tmux TUI.
             # Requires tmux on the host (same as Claude/Grok interactive).
-            "interactive": tmux_available(),
+            "interactive": has_tmux,
+            "live_tui": has_tmux,
         }
 
     # Verified in codex's own TUI command list: /compact and /exit are
