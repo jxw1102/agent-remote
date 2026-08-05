@@ -15,14 +15,28 @@ NavigationPane {
     Menu.definition: MenuDefinition {
         actions: [
             ActionItem {
-                title: (nav.api && nav.api.queuedCount > 0)
-                       ? qsTr("Queue (%1)").arg(nav.api.queuedCount)
-                       : qsTr("Queue")
-                imageSource: "asset:///images/ic_queue.png"
-                // Interactive mode has no daemon queue: messages sent mid-turn
-                // go straight into the host TUI, which queues them itself.
-                enabled: nav.api ? nav.api.queueSupported : true
-                onTriggered: queueSheet.show()
+                // One menu slot: Live TUI in Interactive mode, Queue in Headless.
+                // (ActionItem has no `visible` in Cascades — only title/image/enabled.)
+                title: (nav.api && nav.api.liveTuiMenu)
+                       ? qsTr("Live TUI")
+                       : ((nav.api && nav.api.queuedCount > 0)
+                          ? qsTr("Queue (%1)").arg(nav.api.queuedCount)
+                          : qsTr("Queue"))
+                imageSource: (nav.api && nav.api.liveTuiMenu)
+                             ? "asset:///images/ic_tui.png"
+                             : "asset:///images/ic_queue.png"
+                // Interactive: need an open session. Headless: daemon queue always.
+                enabled: nav.api
+                         ? (nav.api.liveTuiMenu
+                            ? nav.api.liveTuiEnabled
+                            : nav.api.queueSupported)
+                         : true
+                onTriggered: {
+                    if (nav.api && nav.api.liveTuiMenu)
+                        liveTuiSheet.show();
+                    else
+                        queueSheet.show();
+                }
             },
             ActionItem {
                 // Next-turn options: permission mode, model, reasoning
@@ -536,6 +550,10 @@ NavigationPane {
             },
             QueueSheet {
                 id: queueSheet
+                api: nav.api
+            },
+            LiveTuiSheet {
+                id: liveTuiSheet
                 api: nav.api
             },
             SessionSheet {

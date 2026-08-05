@@ -29,7 +29,7 @@ via the interactive manager’s paste path).
 |----------|-------|---------|--------|
 | Web | Chat header icon | Mono pane + bar | Pane focus = keys; line box; Esc bar |
 | Android | Transcript ⋮ → Live TUI | Full screen | Soft keys + line box |
-| BB10 | (planned) | — | — |
+| BB10 | Bezel menu **Live TUI** (Interactive mode only; Headless keeps **Queue**) | Sheet, mono pane | Soft keys + line box |
 
 ## Notes
 

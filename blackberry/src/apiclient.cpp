@@ -275,6 +275,7 @@ ApiClient::ApiClient(QObject *parent)
     , m_capShowUsage(false)
     // Both providers host a TUI; an older daemon's ping clears this.
     , m_capInteractive(true)
+    , m_capLiveTui(true)
     , m_capRewind(false)
     , m_pingState(0)
     , m_usageRev(0)
@@ -367,6 +368,16 @@ ApiClient::ApiClient(QObject *parent)
 
     m_pollTimer.setInterval(POLL_INTERVAL_MS);
     connect(&m_pollTimer, SIGNAL(timeout()), this, SLOT(pollJob()));
+
+    m_tuiOpen = false;
+    m_tuiInFlight = false;
+    m_tuiSeq = 0;
+    m_tuiRev = 0;
+    m_tuiAttached = false;
+    m_tuiLive = false;
+    m_tuiStatus = tr("Host TUI");
+    m_tuiTimer.setInterval(400);
+    connect(&m_tuiTimer, SIGNAL(timeout()), this, SLOT(pollTui()));
 
     m_searchDebounce.setSingleShot(true);
     m_searchDebounce.setInterval(SEARCH_DEBOUNCE_MS);
@@ -1225,7 +1236,11 @@ void ApiClient::setPermissionMode(const QString &mode)
     QSettings settings(BRAND_SETTINGS_ORG, BRAND_SETTINGS_APP);
     settings.setValue("permissionMode", m_permissionMode);
     settings.sync();
+    // Headless has no Live TUI menu slot — stop polling if we switched away.
+    if (!interactiveMode() && m_tuiOpen)
+        stopLiveTui();
     emit settingsChanged();
+    emit currentSessionChanged();
 }
 
 void ApiClient::setModelOverride(const QString &model)
@@ -1344,10 +1359,14 @@ void ApiClient::updateCaps(const QVariantMap &caps)
     bool setEffort = caps.value("can_set_effort", QVariant(false)).toBool();
     bool showUsage = caps.value("can_show_usage", QVariant(false)).toBool();
     bool interactive = caps.value("interactive", QVariant(false)).toBool();
+    // live_tui is the explicit cap (daemon ≥ 2.4); older hosts still expose
+    // interactive, which is enough to open the sheet (pane may be empty).
+    bool liveTui = caps.value("live_tui", QVariant(interactive)).toBool();
     bool rewind = caps.value("rewind", QVariant(false)).toBool();
     if (perms == m_capPermissions && needsCwd == m_capRequiresCwd
             && setModel == m_capSetModel && setEffort == m_capSetEffort
             && showUsage == m_capShowUsage && interactive == m_capInteractive
+            && liveTui == m_capLiveTui
             && rewind == m_capRewind)
         return;
     m_capPermissions = perms;
@@ -1356,8 +1375,10 @@ void ApiClient::updateCaps(const QVariantMap &caps)
     m_capSetEffort = setEffort;
     m_capShowUsage = showUsage;
     m_capInteractive = interactive;
+    m_capLiveTui = liveTui;
     m_capRewind = rewind;
     emit capsChanged();
+    emit currentSessionChanged(); // liveTuiEnabled may flip with caps
 }
 
 // ---------------------------------------------------------------- requests
@@ -2447,6 +2468,83 @@ void ApiClient::stopJob()
 
 // ------------------------------------------------------------- attachments
 
+// ---------------------------------------------------------------- Live TUI
+
+void ApiClient::startLiveTui()
+{
+    if (m_currentSessionId.isEmpty()) {
+        m_tuiText = tr("Open a session first.");
+        m_tuiStatus = tr("No session");
+        m_tuiAttached = false;
+        m_tuiLive = false;
+        m_tuiRev++;
+        emit tuiChanged();
+        return;
+    }
+    m_tuiOpen = true;
+    m_tuiInFlight = false;
+    m_tuiSeq = 0;
+    m_tuiText = tr("Connecting to host TUI…");
+    m_tuiStatus = tr("Host TUI");
+    m_tuiAttached = false;
+    m_tuiLive = false;
+    m_tuiRev++;
+    emit tuiChanged();
+    pollTui();
+    if (!m_tuiTimer.isActive())
+        m_tuiTimer.start();
+}
+
+void ApiClient::stopLiveTui()
+{
+    m_tuiOpen = false;
+    m_tuiInFlight = false;
+    m_tuiTimer.stop();
+}
+
+void ApiClient::pollTui()
+{
+    if (!m_tuiOpen || m_currentSessionId.isEmpty())
+        return;
+    if (m_tuiInFlight)
+        return;
+    m_tuiInFlight = true;
+    const QString path = QString("/api/sessions/%1/tui")
+            .arg(QString::fromUtf8(QUrl::toPercentEncoding(m_currentSessionId)));
+    QNetworkReply *reply = get(path, "tui");
+    reply->setProperty("sid", m_currentSessionId);
+}
+
+void ApiClient::sendTuiKey(const QString &key)
+{
+    if (!m_tuiOpen || m_currentSessionId.isEmpty() || key.trimmed().isEmpty())
+        return;
+    QVariantMap body;
+    QVariantList keys;
+    keys.append(key.trimmed());
+    body["keys"] = keys;
+    const QString path = QString("/api/sessions/%1/tui/keys")
+            .arg(QString::fromUtf8(QUrl::toPercentEncoding(m_currentSessionId)));
+    post(path, body, "tui_keys");
+}
+
+void ApiClient::sendTuiLine(const QString &text)
+{
+    if (!m_tuiOpen || m_currentSessionId.isEmpty())
+        return;
+    const QString t = text; // allow trailing spaces; trim only all-empty
+    if (t.trimmed().isEmpty())
+        return;
+    QVariantMap body;
+    body["text"] = t;
+    QVariantList keys;
+    keys.append(QLatin1String("Enter"));
+    body["keys"] = keys;
+    const QString path = QString("/api/sessions/%1/tui/keys")
+            .arg(QString::fromUtf8(QUrl::toPercentEncoding(m_currentSessionId)));
+    post(path, body, "tui_keys");
+}
+
 void ApiClient::uploadAttachment(const QString &fileUrl)
 {
     QString localPath = fileUrl;
@@ -3502,6 +3600,70 @@ void ApiClient::onFinished(QNetworkReply *reply)
                     + httpErrorText(httpStatus, data, parseOk, networkError);
             m_dropRev++;
             emit dropChanged();
+        }
+        return;
+    }
+
+    if (kind == "tui") {
+        m_tuiInFlight = false;
+        if (!m_tuiOpen)
+            return;
+        if (reply->property("sid").toString() != m_currentSessionId)
+            return;
+        if (!ok) {
+            m_tuiLive = false;
+            m_tuiAttached = false;
+            m_tuiStatus = tr("Error");
+            m_tuiText = httpErrorText(httpStatus, data, parseOk, networkError);
+            m_tuiRev++;
+            emit tuiChanged();
+            return;
+        }
+        const QVariantMap map = data.toMap();
+        const bool attached = map.value("attached").toBool();
+        const qint64 seq = map.value("seq").toLongLong();
+        const QString err = map.value("error").toString();
+        const QString text = map.value("text").toString();
+        const QString jobId = map.value("job_id").toString();
+        if (!attached) {
+            m_tuiAttached = false;
+            m_tuiLive = false;
+            m_tuiStatus = err.isEmpty() ? tr("No host TUI attached") : err;
+            if (m_tuiSeq == 0) {
+                m_tuiText = err.isEmpty()
+                        ? tr("No interactive TUI for this session. Start a turn in Interactive mode.")
+                        : err;
+                m_tuiRev++;
+                emit tuiChanged();
+            } else {
+                m_tuiRev++;
+                emit tuiChanged();
+            }
+            return;
+        }
+        m_tuiAttached = true;
+        m_tuiLive = true;
+        if (seq != m_tuiSeq || m_tuiSeq == 0) {
+            m_tuiSeq = seq;
+            m_tuiText = text.isEmpty() ? tr("(empty pane)") : text;
+        }
+        // ASCII only in status — TitleBar mojibakes UTF-8 middle dots.
+        if (!jobId.isEmpty())
+            m_tuiStatus = tr("job %1").arg(jobId.left(8));
+        else
+            m_tuiStatus = tr("Live");
+        m_tuiRev++;
+        emit tuiChanged();
+        return;
+    }
+
+    if (kind == "tui_keys") {
+        // Next pollTui tick refreshes the pane; surface hard failures.
+        if (!ok && m_tuiOpen) {
+            m_tuiStatus = tr("Key send failed: ")
+                    + httpErrorText(httpStatus, data, parseOk, networkError);
+            m_tuiRev++;
+            emit tuiChanged();
         }
         return;
     }

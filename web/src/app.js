@@ -1636,7 +1636,15 @@ function modal({ title, build, actions = [], wide = false }) {
   host.querySelector(".modal-card").style.width = wide ? "min(900px, 100%)" : "";
   return { body, foot };
 }
-function closeModal() { $("modal").classList.add("hidden"); }
+function closeModal() {
+  $("modal").classList.add("hidden");
+  // New-session (and other) modals may recolor chrome via applyAccent(harness);
+  // restore the open session's brand, or neutral multi chrome when idle.
+  if (state.open) {
+    const p = profileById(state.open.profileId);
+    applyAccent(sessionProvider(state.open.session, p));
+  }
+}
 
 // ---------------------------------------------------------------- daemons
 
@@ -1844,6 +1852,9 @@ function openNewSession() {
   let projects = [];
 
   const render = () => {
+    // Form chrome (Execution / Model / Effort / Start) follows the selected harness.
+    applyAccent(harness);
+    const harnessPal = providerOf(harness);
     const m = modal({
       title: "New session",
       wide: true,
@@ -1890,8 +1901,9 @@ function openNewSession() {
           bar.style.marginBottom = "10px";
           (hs.length ? hs : ["claude", "grok"]).forEach((h) => {
             const pal = providerOf(h);
-            const b = el("button", "pill", pal.label);
+            const b = el("button", "pill pill-brand", pal.label);
             b.type = "button";
+            // Own brand always — selected fill uses --pc, not session --accent.
             b.style.setProperty("--pc", pal.accent);
             b.setAttribute("aria-pressed", String(h === harness));
             b.addEventListener("click", () => {
@@ -1921,6 +1933,8 @@ function openNewSession() {
         projects.slice(0, 40).forEach((proj) => {
           const b = el("button", "pcard");
           b.type = "button";
+          // Project dots / selection rim follow the active harness colour.
+          b.style.setProperty("--pc", harnessPal.accent);
           b.appendChild(el("span", "pdot"));
           const col = el("div");
           col.style.flex = "1";

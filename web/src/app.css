@@ -896,7 +896,18 @@ button.icon-btn.danger:hover:not(:disabled) {
 .field .help { font-size: 11.5px; color: var(--dim); margin-top: 4px; }
 .pillbar { display: flex; flex-wrap: wrap; gap: 6px; }
 .pill { font-size: 12px; padding: 4px 10px; border-radius: 8px; }
-.pill[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #0b0b0d; font-weight: 600; }
+/* --pc is per-button brand (harness chips); falls back to session --accent. */
+.pill[aria-pressed="true"] {
+  background: var(--pc, var(--accent));
+  border-color: var(--pc, var(--accent));
+  color: #0b0b0d;
+  font-weight: 600;
+}
+/* Unselected harness chips keep a quiet brand hint so each colour is visible. */
+.pill.pill-brand:not([aria-pressed="true"]) {
+  border-color: color-mix(in srgb, var(--pc, var(--line)) 55%, var(--line));
+  color: var(--pc, var(--text));
+}
 
 .plist { display: flex; flex-direction: column; gap: 8px; }
 .pcard {

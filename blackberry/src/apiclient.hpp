@@ -106,6 +106,8 @@ class ApiClient : public QObject
     Q_PROPERTY(bool capShowUsage READ capShowUsage NOTIFY capsChanged)
     // The daemon can run turns in a host tmux TUI ("interactive" mode).
     Q_PROPERTY(bool capInteractive READ capInteractive NOTIFY capsChanged)
+    // Live TUI pane capture/keys (daemon ≥ 2.4; falls back to interactive).
+    Q_PROPERTY(bool capLiveTui READ capLiveTui NOTIFY capsChanged)
     // "/rewind N" works in that TUI (claude only; grok's takes a prompt).
     Q_PROPERTY(bool capRewind READ capRewind NOTIFY capsChanged)
     // Same flag resolved for the open session's harness — what the long-press
@@ -175,6 +177,15 @@ class ApiClient : public QObject
     // Interactive turns run in a host TUI that queues its own input, so the
     // daemon queue (and its menu entry) does not apply.
     Q_PROPERTY(bool queueSupported READ queueSupported NOTIFY settingsChanged)
+    // Drag-down menu: Live TUI when interactive + open session; Queue when headless.
+    Q_PROPERTY(bool liveTuiMenu READ liveTuiMenu NOTIFY settingsChanged)
+    Q_PROPERTY(bool liveTuiEnabled READ liveTuiEnabled NOTIFY currentSessionChanged)
+    // Live TUI sheet state (poll ~400 ms while open).
+    Q_PROPERTY(int tuiRev READ tuiRev NOTIFY tuiChanged)
+    Q_PROPERTY(QString tuiText READ tuiText NOTIFY tuiChanged)
+    Q_PROPERTY(QString tuiStatus READ tuiStatus NOTIFY tuiChanged)
+    Q_PROPERTY(bool tuiAttached READ tuiAttached NOTIFY tuiChanged)
+    Q_PROPERTY(bool tuiLive READ tuiLive NOTIFY tuiChanged)
     // [{id, prompt}] - the QueueSheet lists these with a cancel button each.
     Q_PROPERTY(QVariantList queuedPrompts READ queuedPrompts NOTIFY queueChanged)
     // Execution mode: "interactive" (host TUI) or "headless" (CLI). Both
@@ -239,6 +250,7 @@ public:
     bool capSetEffort() const { return m_capSetEffort; }
     bool capShowUsage() const { return m_capShowUsage; }
     bool capInteractive() const { return m_capInteractive; }
+    bool capLiveTui() const { return m_capLiveTui; }
     bool capRewind() const { return m_capRewind; }
     bool usageOpensBrowser() const;
     QStringList slashCommands() const { return m_slashCommands; }
@@ -285,6 +297,20 @@ public:
     bool interactiveMode() const
     { return m_permissionMode == QLatin1String("interactive"); }
     bool queueSupported() const { return !interactiveMode(); }
+    // Menu slot shows Live TUI instead of Queue when the user chose Interactive.
+    bool liveTuiMenu() const { return interactiveMode(); }
+    // Live TUI needs an open session and a daemon that can host a TUI.
+    bool liveTuiEnabled() const
+    {
+        return interactiveMode()
+                && !m_currentSessionId.isEmpty()
+                && (m_capLiveTui || m_capInteractive);
+    }
+    int tuiRev() const { return m_tuiRev; }
+    QString tuiText() const { return m_tuiText; }
+    QString tuiStatus() const { return m_tuiStatus; }
+    bool tuiAttached() const { return m_tuiAttached; }
+    bool tuiLive() const { return m_tuiLive; }
 
     QString permissionMode() const { return m_permissionMode; }
     bool permissionPending() const { return !m_permissionRequestId.isEmpty(); }
@@ -398,6 +424,11 @@ public:
     Q_INVOKABLE void stopJob();
     // Upload a picked file to the daemon; attachRev bumps with the path.
     Q_INVOKABLE void uploadAttachment(const QString &fileUrl);
+    // Live TUI (Interactive): poll host tmux pane + inject keys/text.
+    Q_INVOKABLE void startLiveTui();
+    Q_INVOKABLE void stopLiveTui();
+    Q_INVOKABLE void sendTuiKey(const QString &key);
+    Q_INVOKABLE void sendTuiLine(const QString &text);
     // Host->phone drop: list / download / delete files the agent staged.
     Q_INVOKABLE void fetchDropFiles();
     Q_INVOKABLE void downloadDropFile(const QString &name);
@@ -434,11 +465,13 @@ Q_SIGNALS:
     void newSessionRequestChanged();
     void attachChanged();
     void dropChanged();
+    void tuiChanged();
     void errorLogChanged();
 
 private Q_SLOTS:
     void onFinished(QNetworkReply *reply);
     void pollJob();
+    void pollTui();
     void onStatusFrame(const QByteArray &payload);
     // Frames from the unified variant's secondary per-profile streams;
     // sender()->property("profileIndex") says which daemon spoke.
@@ -552,6 +585,16 @@ private:
 
     QNetworkAccessManager m_nam;
     QTimer m_pollTimer;
+    // Live TUI pane poll while the sheet is open (~400 ms).
+    QTimer m_tuiTimer;
+    bool m_tuiOpen;
+    bool m_tuiInFlight;
+    qint64 m_tuiSeq;
+    int m_tuiRev;
+    QString m_tuiText;
+    QString m_tuiStatus;
+    bool m_tuiAttached;
+    bool m_tuiLive;
     // Coalesce session-search keystrokes (50ms after last change).
     QTimer m_searchDebounce;
     QString m_pendingSearchQuery;
@@ -608,6 +651,7 @@ private:
     bool m_capSetEffort;
     bool m_capShowUsage;
     bool m_capInteractive;
+    bool m_capLiveTui;
     bool m_capRewind;
     QStringList m_slashCommands;
     QStringList m_models;

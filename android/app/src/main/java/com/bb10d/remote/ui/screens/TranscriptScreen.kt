@@ -38,6 +38,8 @@ import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Stop
+import androidx.compose.material.icons.outlined.Tag
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -173,8 +175,11 @@ private fun TranscriptScreenBody(
                 context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
             }.getOrNull()
             if (bytes == null) return@launch
+            // Same marker the BB10 / web clients insert so the agent (and
+            // host-side tooling) can spot uploaded paths in the prompt.
             vm.attachUpload(name, bytes) { path ->
-                composerText = (composerText.trimEnd() + " " + path).trim()
+                val sep = if (composerText.isBlank()) "" else " "
+                composerText = composerText.trimEnd() + sep + "[attached: $path]"
             }
         }
     }
@@ -274,6 +279,7 @@ private fun TranscriptScreenBody(
                                 if (showLiveTui) {
                                     DropdownMenuItem(
                                         text = { Text("Live TUI") },
+                                        leadingIcon = { Icon(Icons.Outlined.Terminal, null) },
                                         onClick = {
                                             menuOpen = false
                                             onLiveTui()
@@ -290,6 +296,7 @@ private fun TranscriptScreenBody(
                                 )
                                 DropdownMenuItem(
                                     text = { Text("Session id") },
+                                    leadingIcon = { Icon(Icons.Outlined.Tag, null) },
                                     onClick = {
                                         menuOpen = false
                                         clipboard.copy(ref.sessionId)
