@@ -3,7 +3,7 @@
 #
 # Triggers:
 #   - workflow_dispatch (manual)
-#   - push to main when daemon version or packaging inputs change
+#   - push to main when packaging inputs change
 #
 # Assets:
 #   - agent-remote.html          web client (single file)
@@ -16,7 +16,8 @@ name: Release
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - "daemon/agentremoted/__init__.py"
       - "daemon/**"
@@ -42,8 +43,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: v
+        name: Read daemon version
         run: |
-          VER=$(python3 -c "import re,pathlib; t=pathlib.Path('daemon/agentremoted/__init__.py').read_text(); print(re.search(r'__version__\s*=\s*[\"\\']([^\"\\']+)', t).group(1))")
+          VER=$(grep -E '^__version__\s*=' daemon/agentremoted/__init__.py \
+            | head -1 \
+            | sed -E 's/^__version__[[:space:]]*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/')
+          if [ -z "$VER" ]; then
+            echo "Could not parse daemon/agentremoted/__init__.py __version__" >&2
+            exit 1
+          fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "tag=v$VER" >> "$GITHUB_OUTPUT"
           echo "Daemon version: $VER (tag v$VER)"
@@ -60,7 +68,6 @@ jobs:
         run: |
           cd web
           python3 build.py
-          # build.py may copy to $HOME/Public; keep a stable path for upload
           mkdir -p "$GITHUB_WORKSPACE/dist"
           cp -f dist/agent-remote.html "$GITHUB_WORKSPACE/dist/agent-remote.html"
           ls -la "$GITHUB_WORKSPACE/dist/agent-remote.html"
@@ -79,7 +86,6 @@ jobs:
         run: |
           VER="${{ needs.version.outputs.version }}"
           mkdir -p dist
-          # Ship the runnable tree: daemon sources + deploy helpers + docs.
           tar -czf "dist/agentremoted-${VER}.tar.gz" \
             --exclude='__pycache__' \
             --exclude='*.pyc' \
@@ -106,7 +112,7 @@ jobs:
           java-version: "17"
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-      - name: Accept licenses & platform
+      - name: Accept licenses and install platform
         run: |
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-36" "build-tools;35.0.0" "platform-tools"
@@ -120,7 +126,6 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/dist"
           cp -f app/build/outputs/apk/release/app-release.apk \
             "$GITHUB_WORKSPACE/dist/AgentRemote.apk"
-# re-copy workflow after edit via rsync later
           ls -la "$GITHUB_WORKSPACE/dist/AgentRemote.apk"
       - uses: actions/upload-artifact@v4
         with:
@@ -142,12 +147,10 @@ jobs:
           OUTDIR: ${{ github.workspace }}/dist
         run: |
           mkdir -p "$OUTDIR"
-          # Prefer the same image the local docker build uses.
           if docker pull delaya73/bbndk:latest; then
             ./build-bar-docker.sh unified || true
           fi
           if [ ! -f "$OUTDIR/AgentRemote.bar" ]; then
-            # Fallback image name used by the script
             docker pull accupara/bbndk:latest || true
             ./build-bar-docker.sh unified || true
           fi
@@ -167,8 +170,12 @@ jobs:
   publish:
     needs: [version, web, daemon, android, blackberry]
     runs-on: ubuntu-latest
-    # Publish even if BAR failed (continue-on-error still marks job success for needs).
-    if: always() && needs.version.result == 'success' && needs.web.result == 'success' && needs.daemon.result == 'success' && needs.android.result == 'success'
+    if: >-
+      always()
+      && needs.version.result == 'success'
+      && needs.web.result == 'success'
+      && needs.daemon.result == 'success'
+      && needs.android.result == 'success'
     steps:
       - uses: actions/checkout@v4
       - name: Download artifacts
@@ -179,16 +186,16 @@ jobs:
         run: |
           VER="${{ needs.version.outputs.version }}"
           mkdir -p release
-          cp -f artifacts/web-html/agent-remote.html release/ || true
-          cp -f artifacts/daemon-tarball/agentremoted-*.tar.gz release/ || true
-          cp -f artifacts/android-apk/AgentRemote.apk release/ || true
+          cp -f artifacts/web-html/agent-remote.html release/
+          cp -f artifacts/daemon-tarball/agentremoted-*.tar.gz release/
+          cp -f artifacts/android-apk/AgentRemote.apk release/
           if [ -f artifacts/blackberry-bar/AgentRemote.bar ]; then
             cp -f artifacts/blackberry-bar/AgentRemote.bar release/
           fi
           ls -la release/
           test -f release/agent-remote.html
           test -f release/AgentRemote.apk
-          test -f release/agentremoted-${VER}.tar.gz
+          test -f "release/agentremoted-${VER}.tar.gz"
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -208,8 +215,7 @@ jobs:
             Get started: extract the daemon tarball, run `agentremoted`, then open the web HTML (or install APK/BAR) and **Add a daemon** with the host URL and token from `~/.agentremoted/token`.
 
             Repo: https://github.com/jxw1102/agent-remote
-          files: |
-            release/*
+          files: release/*
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
