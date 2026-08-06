@@ -30,6 +30,9 @@ TARGET=AgentRemote
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUTDIR="${OUTDIR:-$(cd "$APP_DIR/.." && pwd)/dist}"
 mkdir -p "$OUTDIR"
+# Container users (e.g. admin in delaya73/bbndk) often cannot write a 0755
+# host mount owned by the CI runner — world-writable output fixes that on GHA.
+chmod a+rwx "$OUTDIR" 2>/dev/null || true
 
 IMAGES="${BB10_NDK_IMAGE:-delaya73/bbndk:latest accupara/bbndk:latest}"
 
@@ -91,9 +94,13 @@ for c in arm/o.le-v7/__TARGET__ arm/o.le-v7-g/__TARGET__ __TARGET__; do
 done
 [ -n "$BIN" ] || { log "FATAL: no binary"; exit 4; }
 log "binary: $BIN"
-cp -a "$BIN" /out/__TARGET__.symbols.elf
+# Keep unstripped ELF for crash symbolication; never fail the bar on this.
+cp -a "$BIN" /tmp/__TARGET__.symbols.elf
+cp -a /tmp/__TARGET__.symbols.elf /out/__TARGET__.symbols.elf 2>/dev/null \
+  || log "note: could not write symbols.elf to /out (permission?)"
 
 # 4. Package (unsigned, dev-mode — the flow proven on-device)
+# Build the .bar under /tmp first so a non-writable /out cannot abort packaging.
 STAGE=/tmp/stage
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 cp -a "$BIN" "$STAGE/__TARGET__"
@@ -101,12 +108,16 @@ cp -a variant/__VARIANT__/bar-descriptor.xml "$STAGE/"
 cp -a assets "$STAGE/assets"
 cp -a variant/__VARIANT__/icon.png "$STAGE/icon.png"
 cd "$STAGE"
-blackberry-nativepackager -package /out/__TARGET__.bar \
+blackberry-nativepackager -package /tmp/__TARGET__.bar \
     -devMode \
     bar-descriptor.xml \
     -e __TARGET__ app \
     -e icon.png icon.png \
     -C . assets
+cp -a /tmp/__TARGET__.bar /out/__TARGET__.bar \
+  || { log "FATAL: cannot write /out/__TARGET__.bar"; ls -la /out || true; exit 5; }
+# Retry symbols now that /out may have been fixed
+cp -a /tmp/__TARGET__.symbols.elf /out/__TARGET__.symbols.elf 2>/dev/null || true
 log "OK: __TARGET__.bar"
 '
 INNER="${INNER//__VARIANT__/$VARIANT}"

@@ -151,6 +151,8 @@ jobs:
           OUTDIR: ${{ github.workspace }}/dist
         run: |
           mkdir -p "$OUTDIR"
+          # Docker image user must be able to write the host-mounted out dir.
+          chmod a+rwx "$OUTDIR"
           if docker pull delaya73/bbndk:latest; then
             ./build-bar-docker.sh unified || true
           fi
