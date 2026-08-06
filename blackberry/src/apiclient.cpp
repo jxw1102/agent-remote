@@ -3645,10 +3645,14 @@ void ApiClient::onFinished(QNetworkReply *reply)
         m_tuiLive = true;
         if (seq != m_tuiSeq || m_tuiSeq == 0) {
             m_tuiSeq = seq;
-            // Daemon may send ANSI SGR for web/Android; BB Label stays B&W.
+            // Default GET …/tui is already plain (no ?ansi=1). Keep a light
+            // residual-escape strip for older daemons that always sent SGR.
             QString plain = text;
             plain.remove(QRegExp(QString::fromLatin1("\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)")));
-            plain.remove(QRegExp(QString::fromLatin1("\x1b\\[[0-9;?]*[A-Za-z]")));
+            plain.remove(QRegExp(QString::fromLatin1("\x1b\\[[0-9;:<=>?]*[ -/]*[@-~]")));
+            plain.remove(QRegExp(QString::fromLatin1("\x1b.")));
+            plain.replace(QLatin1String("\r\n"), QLatin1String("\n"));
+            plain.replace(QLatin1Char('\r'), QLatin1Char('\n'));
             m_tuiText = plain.isEmpty() ? tr("(empty pane)") : plain;
         }
         // ASCII only in status — TitleBar mojibakes UTF-8 middle dots.

@@ -7,6 +7,7 @@ input and builds capture payloads.
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 
 # Client key names (case-insensitive) → tmux send-keys tokens.
@@ -82,8 +83,90 @@ def map_keys(keys) -> list:
     return out
 
 
+# Residual ESC sequences (belt-and-suspenders after capture-pane without -e).
+_ANSI_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC … BEL/ST
+    r"|\x1bP[^\x1b]*(?:\x1b\\)?"          # DCS
+    r"|\x1b\[[0-9;:<=>?]*[ -/]*[@-~]"     # CSI (incl. colon RGB)
+    r"|\x1b[()][0-9A-Za-z]"               # charset
+    r"|\x1b."                             # other 2-byte ESC
+)
+
+
+def _box_approx(code: int) -> str:
+    """Map a Box Drawing / Block Elements code point to plain ASCII."""
+    if code in (0x2500, 0x2501, 0x2504, 0x2505, 0x2508, 0x2509,
+                0x254C, 0x254D, 0x2550, 0x2574, 0x2576, 0x2578, 0x257A):
+        return "-"
+    if code in (0x2502, 0x2503, 0x2506, 0x2507, 0x250A, 0x250B,
+                0x254E, 0x254F, 0x2551, 0x2575, 0x2577, 0x2579, 0x257B):
+        return "|"
+    if code == 0x2571:
+        return "/"
+    if code == 0x2572:
+        return "\\"
+    if 0x2580 <= code <= 0x259F:  # block elements / shades
+        return "#" if code >= 0x2588 else "."
+    return "+"  # corners, tees, crosses
+
+
+def plain_tui_text(text: str) -> str:
+    """Readable plain pane for BB and other non-ANSI clients.
+
+    Strips residual escapes, maps box-drawing / braille / private-use
+    chrome to ASCII, keeps real letters (incl. CJK) and newlines.
+    """
+    if not text:
+        return ""
+    s = text.replace("\r\n", "\n").replace("\r", "\n")
+    s = _ANSI_RE.sub("", s)
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch in ("\n", "\t"):
+            out.append(ch)
+            continue
+        if o < 32 or o == 0x7F:
+            continue
+        # zero-width / soft hyphen / BOM
+        if o in (0x00AD, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF):
+            continue
+        if 0x2500 <= o <= 0x259F:  # Box Drawing + Block Elements
+            out.append(_box_approx(o))
+            continue
+        if 0x2800 <= o <= 0x28FF:  # Braille (spinners)
+            out.append(" ")
+            continue
+        if 0xE000 <= o <= 0xF8FF or 0xF0000 <= o <= 0xFFFFD:  # PUA / powerline
+            out.append(" ")
+            continue
+        # Common TUI punctuation / bullets → ASCII
+        if o in (0x2022, 0x25CF, 0x25CB, 0x25A0, 0x25A1, 0x25AA,
+                 0x25AB, 0x25B6, 0x25C0, 0x25E6, 0x2219, 0x30FB):
+            out.append("*")
+            continue
+        if o in (0x2013, 0x2014, 0x2212):
+            out.append("-")
+            continue
+        if o in (0x2018, 0x2019, 0x2032):
+            out.append("'")
+            continue
+        if o in (0x201C, 0x201D):
+            out.append('"')
+            continue
+        if o == 0x2026:
+            out.append("...")
+            continue
+        if o in (0x00A0, 0x2007, 0x202F):  # nbsp variants
+            out.append(" ")
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 def frame_payload(session_id: str, text: str, attached: bool,
-                  job_id: str = "", error: str = "") -> dict:
+                  job_id: str = "", error: str = "",
+                  *, ansi: bool = False) -> dict:
     """Build the GET /tui JSON body."""
     body = text if attached else ""
     seq = int(hashlib.sha1(body.encode("utf-8", errors="replace")).hexdigest()[:12], 16)
@@ -97,6 +180,7 @@ def frame_payload(session_id: str, text: str, attached: bool,
         "rows": body.count("\n") + 1 if body else 0,
         "cursor": None,
         "error": error or "",
+        "ansi": bool(ansi),
         "ts": time.time(),
     }
 
@@ -120,26 +204,35 @@ def _find_tui(mgr, session_id: str):
     return None
 
 
-def capture_session(mgr, session_id: str) -> dict:
-    """Capture the tmux pane for a session via an interactive manager."""
+def capture_session(mgr, session_id: str, *, ansi: bool = False) -> dict:
+    """Capture the tmux pane for a session via an interactive manager.
+
+    Default is plain text (no SGR, decorative chrome simplified) so BB and
+    other mono clients stay readable. Pass ``ansi=True`` when the client
+    can render colours (web / Android request ``?ansi=1``).
+    """
     tui = _find_tui(mgr, session_id)
     if tui is None:
         return frame_payload(session_id, "", False,
-                             error="no interactive TUI for this session")
+                             error="no interactive TUI for this session",
+                             ansi=ansi)
     alive = mgr._tmux_alive(tui.name)
     if not alive:
         return frame_payload(session_id, "", False,
-                             error="the host TUI has exited")
-    # Prefer ANSI capture so web/Android can render colours; BB strips SGR.
+                             error="the host TUI has exited",
+                             ansi=ansi)
+    want_ansi = bool(ansi)
     try:
-        text = mgr._pane_text(tui.name, ansi=True) or ""
+        text = mgr._pane_text(tui.name, ansi=want_ansi) or ""
     except TypeError:
         text = mgr._pane_text(tui.name) or ""
+    if not want_ansi:
+        text = plain_tui_text(text)
     job_id = ""
     job = getattr(tui, "job", None)
     if job is not None:
         job_id = getattr(job, "id", "") or ""
-    return frame_payload(session_id, text, True, job_id=job_id)
+    return frame_payload(session_id, text, True, job_id=job_id, ansi=want_ansi)
 
 
 def send_to_session(mgr, session_id: str, keys=None, text: str = "") -> str:

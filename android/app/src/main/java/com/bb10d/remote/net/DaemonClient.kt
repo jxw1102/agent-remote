@@ -340,9 +340,17 @@ class DaemonClient(
         )
     }
 
-    /** Live TUI pane capture for a session. */
-    suspend fun tui(sessionId: String): TuiFrameDto = call(
-        request(url("api/sessions/$sessionId/tui")).get().build(),
+    /**
+     * Live TUI pane capture for a session.
+     * [ansi] requests coloured SGR (web/Android). Default plain is for BB.
+     */
+    suspend fun tui(sessionId: String, ansi: Boolean = true): TuiFrameDto = call(
+        request(
+            url(
+                "api/sessions/$sessionId/tui",
+                if (ansi) mapOf("ansi" to "1") else emptyMap(),
+            ),
+        ).get().build(),
         TuiFrameDto.serializer(),
         timeoutSeconds = 15,
     )

@@ -1529,8 +1529,8 @@ class ClaudeRunner:
         """Type a message into a session's live interactive TUI ("" or err)."""
         return self._interactive_mgr().type_text(session_id, text)
 
-    def capture_tui(self, session_id: str) -> dict:
-        return self._interactive_mgr().capture_tui(session_id)
+    def capture_tui(self, session_id: str, *, ansi: bool = False) -> dict:
+        return self._interactive_mgr().capture_tui(session_id, ansi=ansi)
 
     def send_tui_keys(self, session_id: str, keys=None, text: str = "") -> str:
         return self._interactive_mgr().send_tui_keys(session_id, keys=keys, text=text)

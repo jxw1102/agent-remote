@@ -603,10 +603,10 @@ class InteractiveManager:
                              daemon=True).start()
         return ""
 
-    def capture_tui(self, session_id: str) -> dict:
-        """Live pane frame for Live TUI clients."""
+    def capture_tui(self, session_id: str, *, ansi: bool = False) -> dict:
+        """Live pane frame for Live TUI clients (plain by default; ansi=True for colours)."""
         from ..live_tui import capture_session
-        return capture_session(self, session_id)
+        return capture_session(self, session_id, ansi=ansi)
 
     def send_tui_keys(self, session_id: str, keys=None, text: str = "") -> str:
         """Key/text injection for Live TUI (no Enter unless keys include it)."""

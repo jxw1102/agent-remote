@@ -603,7 +603,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         m = _SESSION_TUI.match(path)
         if m:
-            self._handle_tui_capture(m.group(1))
+            self._handle_tui_capture(m.group(1), query)
             return
 
         m = _SESSION_ONE.match(path)
@@ -781,10 +781,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             if b is None:
                 # TUI may exist for a brand-new session before store indexes it.
                 # Still try every harness.
-                self._handle_tui_capture(m.group(1))
+                self._handle_tui_capture(m.group(1), query)
                 return
             self._bind_bundle(name)
-            self._handle_tui_capture(m.group(1))
+            self._handle_tui_capture(m.group(1), query)
             return
         m = _SESSION_ONE.match(path)
         if m:
@@ -1223,9 +1223,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return r
         return self.runner if hasattr(self.runner or object(), "capture_tui") else None
 
-    def _handle_tui_capture(self, session_id: str):
-        """GET /api/sessions/<id>/tui — live host TUI pane text."""
+    def _handle_tui_capture(self, session_id: str, query=None):
+        """GET /api/sessions/<id>/tui — live host TUI pane text.
+
+        Default text is plain (no SGR, simplified chrome) for BB and simple
+        clients. Colour clients pass ``?ansi=1`` (or true/yes/on).
+        """
         from .live_tui import frame_payload
+        want_ansi = self._flag(query or {}, "ansi")
         last = None
         # Multi: try every harness so an attached TUI is found regardless of
         # path binding; keep the last unattached frame for a useful error.
@@ -1234,7 +1239,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 r = b.runner
                 if not hasattr(r, "capture_tui"):
                     continue
-                frame = r.capture_tui(session_id)
+                frame = r.capture_tui(session_id, ansi=want_ansi)
                 last = frame
                 if frame.get("attached"):
                     self._send_json(frame)
@@ -1243,11 +1248,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(last)
                 return
         if self.runner is not None and hasattr(self.runner, "capture_tui"):
-            self._send_json(self.runner.capture_tui(session_id))
+            self._send_json(self.runner.capture_tui(session_id, ansi=want_ansi))
             return
         self._send_json(frame_payload(
             session_id, "", False,
             error="live TUI not available on this daemon",
+            ansi=want_ansi,
         ))
 
     def _handle_tui_keys(self, session_id, body):

@@ -114,10 +114,16 @@
     <!-- Live TUI: host tmux pane + keyboard capture (hidden by default). -->
     <div id="live-tui" class="live-tui hidden" tabindex="0">
       <div class="live-tui-bar">
-        <span id="live-tui-status" class="live-tui-status">Host TUI</span>
-        <span class="live-tui-hint">Click pane to capture keys · Esc Esc releases</span>
-        <div class="live-tui-keys">
+        <!-- Meta row (status may change length) — never shares a line with keys. -->
+        <div class="live-tui-meta">
+          <span id="live-tui-status" class="live-tui-status">Host TUI</span>
+          <span class="live-tui-hint">Click pane to capture keys · Esc Esc releases</span>
+          <button id="btn-live-tui-close" type="button" class="ghost">Transcript</button>
+        </div>
+        <!-- Soft keys: fixed-size buttons on their own row so layout never shifts. -->
+        <div class="live-tui-keys" role="toolbar" aria-label="Live TUI keys">
           <button type="button" data-tui-key="Escape" title="Escape">Esc</button>
+          <button type="button" data-tui-key="Enter" title="Enter">Enter</button>
           <button type="button" data-tui-key="Tab" title="Tab">Tab</button>
           <button type="button" data-tui-key="Up" title="Up">↑</button>
           <button type="button" data-tui-key="Down" title="Down">↓</button>
@@ -125,7 +131,6 @@
           <button type="button" data-tui-key="Right" title="Right">→</button>
           <button type="button" data-tui-key="Ctrl+C" title="Ctrl+C">^C</button>
         </div>
-        <button id="btn-live-tui-close" type="button" class="ghost">Transcript</button>
       </div>
       <pre id="live-tui-pane" class="live-tui-pane" aria-live="polite"></pre>
       <div class="live-tui-line">

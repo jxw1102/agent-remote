@@ -722,19 +722,34 @@ button.icon-btn.danger:hover:not(:disabled) {
 }
 .live-tui.hidden { display: none !important; }
 .live-tui-bar {
+  /* Two fixed rows: meta (status/hint) then keys. Status text length must
+     never reflow the soft-key strip (mis-clicks when job id appears). */
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
+  flex-direction: column;
+  gap: 6px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
   flex: none;
 }
+.live-tui-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+  min-height: 28px;
+  min-width: 0;
+}
 .live-tui-status {
   font-size: 12px;
   font-weight: 600;
   color: var(--accent);
+  /* Reserve room for "● " live prefix + longer job status; ellipsis if longer. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .live-tui-status.live::before {
   content: "● ";
@@ -743,19 +758,51 @@ button.icon-btn.danger:hover:not(:disabled) {
 .live-tui-hint {
   font-size: 11px;
   color: var(--dim);
-  flex: 1;
-  min-width: 120px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.live-tui-meta > .ghost {
+  flex: none;
+  white-space: nowrap;
 }
 .live-tui-keys {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 4px;
+  flex: none;
+  /* Horizontal scroll on narrow panes instead of wrapping (which shifts hits). */
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
 }
 .live-tui-keys button {
-  padding: 4px 8px;
+  /* Fixed hit targets — equal width for Esc/Enter/Tab; square for arrows. */
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 3.25rem;
+  height: 1.75rem;
+  padding: 0;
+  margin: 0;
   font-size: 11px;
+  line-height: 1;
   font-family: var(--mono, ui-monospace, monospace);
-  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+/* Arrow / ^C stay the same footprint as Esc/Tab. */
+.live-tui-keys button[data-tui-key="Up"],
+.live-tui-keys button[data-tui-key="Down"],
+.live-tui-keys button[data-tui-key="Left"],
+.live-tui-keys button[data-tui-key="Right"],
+.live-tui-keys button[data-tui-key="Ctrl+C"] {
+  width: 2.25rem;
 }
 .live-tui-pane {
   flex: 1;

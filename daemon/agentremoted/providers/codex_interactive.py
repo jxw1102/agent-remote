@@ -502,9 +502,9 @@ class CodexInteractiveManager:
                              daemon=True).start()
         return ""
 
-    def capture_tui(self, session_id: str) -> dict:
+    def capture_tui(self, session_id: str, *, ansi: bool = False) -> dict:
         from ..live_tui import capture_session
-        return capture_session(self, session_id)
+        return capture_session(self, session_id, ansi=ansi)
 
     def send_tui_keys(self, session_id: str, keys=None, text: str = "") -> str:
         from ..live_tui import send_to_session

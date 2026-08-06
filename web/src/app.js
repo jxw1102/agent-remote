@@ -1076,9 +1076,10 @@ async function pollLiveTui(force) {
   const profile = profileById(state.open.profileId);
   if (!profile) return;
   try {
+    // Colour clients opt in; default daemon payload is plain for BB.
     const frame = await call(
       profile,
-      `/api/sessions/${encodeURIComponent(state.open.sessionId)}/tui`,
+      `/api/sessions/${encodeURIComponent(state.open.sessionId)}/tui?ansi=1`,
     );
     if (!state.liveTui) return;
     const status = $("live-tui-status");
@@ -1099,9 +1100,9 @@ async function pollLiveTui(force) {
     pane.dataset.hadFrame = "1";
     pane.classList.remove("empty-tui");
     const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
-    // Coloured SGR from tmux capture-pane -e (BB keeps plain text).
+    // Coloured SGR when ?ansi=1 (default plain has no escapes).
     const raw = frame.text || "(empty pane)";
-    if (raw.includes("\u001b[") || raw.includes("\x1b[")) {
+    if (frame.ansi || raw.includes("\u001b[") || raw.includes("\x1b[")) {
       pane.innerHTML = ansiToHtml(raw);
     } else {
       pane.textContent = raw;

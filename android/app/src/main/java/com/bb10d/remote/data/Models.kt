@@ -321,6 +321,8 @@ data class TuiFrameDto(
     val seq: Long = 0,
     val cols: Int = 0,
     val rows: Int = 0,
+    /** True when the client requested ?ansi=1 and the daemon kept SGR. */
+    val ansi: Boolean = false,
     val error: String = "",
     val ts: Double = 0.0,
 )
