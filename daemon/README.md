@@ -209,6 +209,44 @@ Cap `live_tui` on `/api/ping` when the harness can host a tmux TUI. Clients
 poll `GET …/tui` (~2–5 Hz; plain by default, `?ansi=1` for colour) and send
 keys via `POST …/tui/keys`.
 
+### Mid-turn resume after daemon restart
+
+Interactive turns (tmux TUIs) survive a clean daemon restart:
+
+1. Running job snapshots are written every few seconds to
+   `~/.agentremoted/active-jobs-<provider>.json`.
+2. On startup the daemon re-adopts live tmux sessions (`tuis.json` /
+   `grok-tuis.json` / `codex-tuis.json`), then rehydrates those jobs and
+   continues watching the same host TUI **without re-sending the prompt**.
+3. Clients keep polling the same `job_id` — Live TUI and the status banner
+   reconnect automatically.
+
+Headless (`-p` / subprocess) turns cannot resume: the CLI process dies with
+the old daemon. Those jobs finish as `error` with a short notice.
+
+Use systemd `KillMode=process` (see `deploy/agentremoted.service`) so restart
+does not kill the tmux server.
+
+### Rewind
+
+A prompt of `/rewind [N]` (N defaults to 1) never reaches the harness: the
+daemon rewinds the session N user messages by editing the harness's own
+session journal, then the next turn resumes from the rewound point.
+
+* claude — the session transcript (`~/.claude/projects/…/<id>.jsonl`) is cut
+  at the Nth-last human message on the active `parentUuid` branch.
+* grok — the daemon appends grok's own `rewind_marker` record (the same one
+  its TUI /rewind writes) to `updates.jsonl`; grok honors it on `--resume`.
+* codex — the rollout JSONL is truncated at the turn boundary of the
+  Nth-last `user_message`.
+
+Conversation only: file changes on the host are never reverted. Works in
+BOTH execution modes (the journals are what `--resume` replays); a live
+interactive TUI for the session is killed first and the next turn respawns
+it resumed. A one-deep `*.rewind-bak` copy is left next to claude/codex
+files as a safety net. Advertised as the per-harness `rewind` cap and as
+`/rewind` in `slash_commands`.
+
 ### Whose sessions get listed
 
 Human-started sessions only (subagents / empty shells filtered). `&all=1`

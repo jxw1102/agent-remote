@@ -606,7 +606,7 @@ class TranscriptViewModel(
     /**
      * Harness of the OPEN session. A multi-harness host tags every row with
      * its provider, and its /api/ping root caps are a UNION of all of them —
-     * so per-session gating (rewind, slash commands) must ask the row, not
+     * so per-session gating (slash commands) must ask the row, not
      * the root. Null when the list has not loaded yet, which makes the caps
      * helpers fall back to the daemon-level answer.
      */
@@ -619,12 +619,15 @@ class TranscriptViewModel(
     private fun slashRefusal(text: String, profile: Profile): String? {
         val command = text.substringBefore(' ').trim()
         if (!Regex("^/[A-Za-z][A-Za-z0-9_-]*$").matches(command)) return null
-        if (profile.effectiveExecMode() != ExecMode.INTERACTIVE) {
+        // /rewind never reaches the harness — the daemon (≥ 2.5) rewinds the
+        // session journal itself — so it is exempt from the interactive-only
+        // rule. The advertised-list check below still gates old daemons.
+        if (profile.effectiveExecMode() != ExecMode.INTERACTIVE && command != "/rewind") {
             return "$command needs interactive execution — headless turns cannot run commands"
         }
         // No hardcoded whitelist: the daemon advertises what each harness
-        // really has (claude/grok: /compact /exit /rewind — codex has no
-        // rewind), so anything off THIS session's list is refused here.
+        // really has (claude/grok/codex: /compact /exit /rewind), so
+        // anything off THIS session's list is refused here.
         val known = profile.caps.slashFor(sessionHarness())
         if (known.contains(command)) return null
         return if (known.isEmpty()) {
@@ -711,6 +714,7 @@ class TranscriptViewModel(
         val c = client ?: return
         val pending = job.value.pendingPermission ?: return
         val jobId = job.value.jobId
+        watcher.clearPendingPermission()
         viewModelScope.launch {
             runCatching { c.answerPermission(jobId, pending.requestId, allow) }
                 .onFailure { setStatus(repo.reason(it)) }
@@ -721,6 +725,9 @@ class TranscriptViewModel(
         val c = client ?: return
         val pending = job.value.pendingQuestion ?: return
         val jobId = job.value.jobId
+        // Drop the sheet now — daemon may still report pending until resolve
+        // races the interactive driver; a lagging poll must not re-open it.
+        watcher.clearPendingQuestion()
         viewModelScope.launch {
             runCatching { c.answerQuestion(jobId, pending.requestId, answers, notes) }
                 .onFailure { setStatus(repo.reason(it)) }
@@ -731,6 +738,7 @@ class TranscriptViewModel(
         val c = client ?: return
         val pending = job.value.pendingQuestion ?: return
         val jobId = job.value.jobId
+        watcher.clearPendingQuestion()
         viewModelScope.launch {
             runCatching { c.answerQuestion(jobId, pending.requestId, null) }
                 .onFailure { setStatus(repo.reason(it)) }
@@ -748,26 +756,21 @@ class TranscriptViewModel(
     }
 
     /**
-     * Whether rewinding is possible at all, or why not.
-     *
-     * The TUI's checkpoint picker only exists for interactive turns, and grok
-     * takes a prompt rather than a count — so both are hard requirements, not
-     * hints.
+     * Whether rewinding is possible at all, or why not. The daemon (≥ 2.5)
+     * rewinds by editing the harness's own session journal, so both exec
+     * modes qualify — only the harness capability gates it.
      */
     fun rewindBlockedReason(): String? {
         val profile = profile.value ?: return "No profile"
         if (!profile.caps.rewindFor(sessionHarness())) {
-            return "${sessionHarness() ?: "This daemon"} cannot rewind"
-        }
-        if (profile.effectiveExecMode() != ExecMode.INTERACTIVE) {
-            return "Rewind needs interactive execution"
+            return "${sessionHarness() ?: "this daemon"} cannot rewind (needs daemon 2.5+)"
         }
         return null
     }
 
     /**
-     * How many user messages back this row is — the argument the TUI's picker
-     * expects, counted from the end. 0 means the row is not in the transcript.
+     * How many user messages back this row is — the N in "/rewind N",
+     * counted from the end. 0 means the row is not in the transcript.
      */
     fun rewindSteps(itemId: String): Int {
         var back = 0
@@ -780,8 +783,8 @@ class TranscriptViewModel(
     }
 
     /**
-     * Rewind the session to a message. Destructive and not undoable — grok
-     * additionally reverts uncommitted file changes — so the UI must confirm
+     * Rewind the session to a message. Destructive and not undoable
+     * (conversation only — host file changes stay), so the UI must confirm
      * before calling this.
      */
     fun rewindTo(itemId: String) {

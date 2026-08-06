@@ -615,10 +615,73 @@ class CodexInteractiveManager:
             return
         with tui.lock:
             tui.job = job
+            job.tui_name = tui.name
             try:
-                self._run_turn(job, tui, launched_at)
+                self._run_turn(job, tui, launched_at, resume=False)
             finally:
                 tui.job = None
+
+    def resume(self, job) -> None:
+        """Re-attach a mid-turn job after daemon restart (tmux TUI adopted)."""
+        if not tmux_available():
+            self._fail(job, "interactive mode needs tmux (brew install tmux)")
+            return
+        sid = (job.new_session_id or job.session_id or "").strip()
+        tui = None
+        with self._lock:
+            if job.tui_name and job.tui_name in self._tuis:
+                tui = self._tuis.get(job.tui_name)
+            if tui is None and sid:
+                for t in self._tuis.values():
+                    if t.session_id == sid:
+                        tui = t
+                        break
+        if tui is None or not self._tmux_alive(tui.name):
+            cwd = os.path.expanduser(job.cwd or "")
+            if not cwd or not os.path.isdir(cwd):
+                self._fail(job, "interrupted by daemon restart: cwd missing")
+                return
+            tui, err = self._ensure_tui(cwd, sid, job.model)
+            if err:
+                self._fail(job, "interrupted by daemon restart: %s" % err)
+                return
+        job.tui_name = tui.name
+        with tui.lock:
+            tui.job = job
+            try:
+                job.add_event("tool", name="daemon",
+                              detail="resumed mid-turn after daemon restart")
+                job.set_phase("thinking", "resumed")
+                self._run_turn(job, tui, time.time(), resume=True)
+            finally:
+                tui.job = None
+
+    def close_for_session(self, session_id: str) -> bool:
+        """Kill the live TUI hosting this session, if any. Rewind truncates
+        the rollout on disk — a running CLI would neither see the edit nor
+        survive under it — so the TUI dies first and the next turn resumes
+        the rewound session. Refuses mid-turn."""
+        sid = (session_id or "").strip()
+        if not sid:
+            return False
+        with self._lock:
+            victim = None
+            for t in self._tuis.values():
+                if t.session_id == sid:
+                    victim = t
+                    break
+            if victim is None:
+                return False
+            if victim.job is not None:
+                from . import RunnerError
+                raise RunnerError("finish or stop the running turn first")
+            try:
+                self._tmux("kill-session", "-t", victim.name)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            del self._tuis[victim.name]
+            self._save_state()
+        return True
 
     def _fail(self, job, message: str):
         with job.lock:
@@ -636,35 +699,41 @@ class CodexInteractiveManager:
                           duration_ms=int((time.time() - job.started_at) * 1000),
                           cost_usd=0)
 
-    def _run_turn(self, job, tui: _Tui, launched_at: float):
+    def _run_turn(self, job, tui: _Tui, launched_at: float, resume: bool = False):
         state = job.runner_state
         state.clear()
         state.update({"parts": [], "full": [], "turn_done": False})
         with job.lock:
             job.status = "running"
             if tui.session_id:
-                job.new_session_id = tui.session_id
-        job.add_event("init", session_id=tui.session_id or "",
-                      model=job.model or "interactive")
+                job.new_session_id = tui.session_id or job.new_session_id
+            job.tui_name = tui.name
+        if not resume:
+            job.add_event("init", session_id=tui.session_id or "",
+                          model=job.model or "interactive")
 
         # Resume: start tailing after existing bytes so old messages don't replay.
         if tui.session_id and not tui.rollout_path:
             tui.rollout_path = self._rollout_for(tui.session_id)
-        if tui.rollout_path and tui.session_id == job.session_id:
+        if tui.rollout_path:
             try:
                 tui.rollout_offset = Path(tui.rollout_path).stat().st_size
             except OSError:
                 tui.rollout_offset = 0
 
-        before = self._count_user_messages(
-            tui.rollout_path or self._rollout_for(tui.session_id))
-        err = self._send_prompt(tui, job.prompt)
-        if err:
-            self._fail(job, err)
-            return
+        if not resume:
+            before = self._count_user_messages(
+                tui.rollout_path or self._rollout_for(tui.session_id))
+            err = self._send_prompt(tui, job.prompt)
+            if err:
+                self._fail(job, err)
+                return
+        else:
+            log.info("codex TUI %s: resume watch for job %s", tui.name, job.id)
+            before = -1
 
-        # New sessions: discover id after submit.
-        if not tui.session_id:
+        # New sessions: discover id after submit (not on mid-turn resume).
+        if not resume and not tui.session_id:
             job.set_phase("thinking", "starting session")
             if not self._discover_session(tui, launched_at):
                 # Still try to stream from pane quiet-timeout later.
@@ -679,15 +748,19 @@ class CodexInteractiveManager:
                     # for a brand-new file; for an existing one keep current.
                     pass
 
-        if before >= 0:
-            self._confirm_submit(tui, before)
-        elif tui.rollout_path:
-            self._confirm_submit(tui, 0)
+        if not resume:
+            if before >= 0:
+                self._confirm_submit(tui, before)
+            elif tui.rollout_path:
+                self._confirm_submit(tui, 0)
 
         prompt = (job.prompt or "").strip()
         local = prompt.startswith("/")
         timeout_s = float(getattr(self.config, "turn_timeout", 0) or 0)
-        deadline = job.started_at + timeout_s if timeout_s > 0 else None
+        if resume and timeout_s > 0:
+            deadline = time.time() + timeout_s
+        else:
+            deadline = job.started_at + timeout_s if timeout_s > 0 else None
         quiet_since = time.time()
         interrupted = False
         tui.typed_ahead = 0

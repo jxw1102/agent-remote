@@ -99,14 +99,6 @@ def tmux_available() -> bool:
     """Whether this host can run TUIs at all (interactive mode, /usage)."""
     return bool(shutil.which("tmux")) or os.path.exists(_TMUX_FALLBACK)
 
-# "/rewind [N]" drives grok's checkpoint picker rather than being pasted as a
-# prompt (it needs arrow keys). Its two screens have no journal trail while
-# open — no model turn runs — so these markers are the only signal.
-_REWIND_RE = re.compile(r"^/rewind(?:\s+(\d+))?\s*$")
-_REWIND_PICKER = "Rewind to which turn?"
-_REWIND_SCOPE = "What do you want to rewind?"
-_REWIND_OPEN_S = 8.0
-
 # tmux name -> grok session mapping, persisted so a daemon restart re-adopts
 # the running TUIs instead of killing them.
 _STATE_FILE = CONFIG_DIR / "grok-tuis.json"
@@ -571,22 +563,69 @@ class GrokInteractiveManager:
             return
         with tui.lock:  # serialize turns per TUI
             tui.job = job
+            job.tui_name = tui.name
             try:
-                m = _REWIND_RE.match((job.prompt or "").strip())
-                if m:
-                    self._run_rewind(job, tui, int(m.group(1) or 1))
-                else:
-                    self._run_turn(job, tui)
+                self._run_turn(job, tui, resume=False)
             finally:
                 tui.job = None
 
-    def _await_pane(self, tui: _Tui, needle: str, limit: float) -> bool:
-        end = time.time() + limit
-        while time.time() < end:
-            if needle in self._pane_text(tui.name):
-                return True
-            time.sleep(_POLL_S)
-        return False
+    def resume(self, job) -> None:
+        """Re-attach a mid-turn job after daemon restart (tmux TUI adopted)."""
+        if not tmux_available():
+            self._fail(job, "interactive mode needs tmux (brew install tmux)")
+            return
+        sid = (job.new_session_id or job.session_id or "").strip()
+        tui = None
+        with self._lock:
+            if job.tui_name and job.tui_name in self._tuis:
+                tui = self._tuis.get(job.tui_name)
+            if tui is None and sid:
+                for t in self._tuis.values():
+                    if t.session_id == sid:
+                        tui = t
+                        break
+        if tui is None or not self._tmux_alive(tui.name):
+            cwd = os.path.expanduser(job.cwd or "") or self.runner._default_cwd()
+            tui, err = self._ensure_tui(cwd, sid, job.model, job.effort)
+            if err:
+                self._fail(job, "interrupted by daemon restart: %s" % err)
+                return
+        job.tui_name = tui.name
+        with tui.lock:
+            tui.job = job
+            try:
+                job.add_event("tool", name="daemon",
+                              detail="resumed mid-turn after daemon restart")
+                job.set_phase("thinking", "resumed")
+                self._run_turn(job, tui, resume=True)
+            finally:
+                tui.job = None
+
+    def close_for_session(self, session_id: str) -> bool:
+        """Kill the live TUI hosting this session, if any. Rewind appends a
+        marker the running CLI would not replay — so the TUI dies first and
+        the next turn --resume's the rewound session. Refuses mid-turn."""
+        sid = (session_id or "").strip()
+        if not sid:
+            return False
+        with self._lock:
+            victim = None
+            for t in self._tuis.values():
+                if t.session_id == sid:
+                    victim = t
+                    break
+            if victim is None:
+                return False
+            if victim.job is not None:
+                from . import RunnerError
+                raise RunnerError("finish or stop the running turn first")
+            try:
+                self._tmux("kill-session", "-t", victim.name)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            del self._tuis[victim.name]
+            self._save_state()
+        return True
 
     def _fail(self, job, message: str):
         with job.lock:
@@ -823,81 +862,6 @@ class GrokInteractiveManager:
             state["full"].append(note)
             state["turn_done"] = True
 
-    # -- /rewind (checkpoint picker) -----------------------------------------
-
-    def _rewind_rows(self, name: str) -> list:
-        """The picker's turn rows, newest first (they are bulleted "· …")."""
-        rows = []
-        for row in _pane_rows(self._pane_text(name)):
-            body = row.lstrip("┃ ").strip()
-            if body.startswith("· "):
-                rows.append(body[2:].strip())
-        return rows
-
-    def _run_rewind(self, job, tui: _Tui, steps: int):
-        """Drive grok's /rewind picker: N turns back, conversation only.
-
-        The picker lists one point per human prompt, newest first, with the
-        cursor on row 1 — so "N back" is N-1 Downs then Enter, matching the
-        phone's /rewind N (and claude's). grok then asks what to rewind:
-        `a` both, `c` conversation only, `f` files only. We always send `c`:
-        reverting files is grok's own default but those changes are gone for
-        good unless they were committed, and the phone's affordance only
-        promises to rewind the conversation.
-
-        This one panel has no journal trail while it is open (no model turn
-        runs), so unlike plan/ask it has to be driven off the pane."""
-        with job.lock:
-            job.status = "running"
-            job.new_session_id = tui.session_id
-        job.add_event("init", session_id=tui.session_id, model="interactive")
-        steps = max(1, steps)
-        job.add_event("tool", name="/rewind",
-                      detail="%d turn%s back" % (steps, "" if steps == 1 else "s"))
-        job.set_phase("tool", "/rewind")
-        err = self._send_prompt(tui, "/rewind")
-        if err:
-            self._fail(job, err)
-            return
-        try:
-            if not self._await_pane(tui, _REWIND_PICKER, _REWIND_OPEN_S):
-                self._fail(job, "the rewind picker did not open — screen: %s"
-                           % self._pane_tail(tui.name))
-                return
-            rows = self._rewind_rows(tui.name)
-            if steps > len(rows) and rows:
-                log.info("rewind: only %d point(s), clamping from %d",
-                         len(rows), steps)
-                steps = len(rows)
-            target = rows[steps - 1] if steps - 1 < len(rows) else ""
-            for _ in range(steps - 1):
-                self._tmux("send-keys", "-t", tui.name, "Down")
-                time.sleep(0.15)
-            self._tmux("send-keys", "-t", tui.name, "Enter")
-            if not self._await_pane(tui, _REWIND_SCOPE, _REWIND_OPEN_S):
-                self._fail(job, "the rewind scope prompt did not open — "
-                           "screen: %s" % self._pane_tail(tui.name))
-                return
-            self._tmux("send-keys", "-t", tui.name, "c")
-            time.sleep(1.5)
-            # grok refills the prompt with the rewound message. Escape and
-            # Ctrl+U both leave it (the cursor sits at column 0, and Ctrl+U
-            # kills leftwards); Ctrl+A then Ctrl+K clears it either way.
-            self._tmux("send-keys", "-t", tui.name, "C-a")
-            time.sleep(0.2)
-            self._tmux("send-keys", "-t", tui.name, "C-k")
-        except (OSError, subprocess.TimeoutExpired) as e:
-            self._fail(job, "rewind failed: %s" % e)
-            return
-        msg = "Rewound %d turn%s (conversation only)" % (
-            steps, "" if steps == 1 else "s")
-        if target:
-            msg += " — restored to before: “%s”" % target[:120]
-        job.add_event("text", text=msg, blocks=markdown_to_blocks(msg))
-        with job.lock:
-            job.new_session_id = tui.session_id or job.new_session_id
-        self._done(job, msg)
-
     # -- ask_user_question (selection panel) ---------------------------------
 
     _OTHER_LABEL = "Type my own answer"
@@ -1030,7 +994,7 @@ class GrokInteractiveManager:
                       duration_ms=int((time.time() - job.started_at) * 1000),
                       cost_usd=0)
 
-    def _run_turn(self, job, tui: _Tui):
+    def _run_turn(self, job, tui: _Tui, resume: bool = False):
         runner = self.runner
         state = job.runner_state
         state.clear()
@@ -1050,8 +1014,11 @@ class GrokInteractiveManager:
                       "ask_asked": "", "ask_thread": None})
         with job.lock:
             job.status = "running"
-            job.new_session_id = tui.session_id
-        job.add_event("init", session_id=tui.session_id, model="interactive")
+            if tui.session_id:
+                job.new_session_id = tui.session_id or job.new_session_id
+            job.tui_name = tui.name
+        if not resume:
+            job.add_event("init", session_id=tui.session_id, model="interactive")
         # Tail from the journal's current end so earlier turns don't replay.
         runner._bind_updates(job, from_start=False)
 
@@ -1093,15 +1060,21 @@ class GrokInteractiveManager:
                 state["turn_done"] = False
             time.sleep(_PASTE_SETTLE_S)
 
-        err = self._submit(tui, job.prompt)
-        if err:
-            self._fail(job, err)
-            return
+        if not resume:
+            err = self._submit(tui, job.prompt)
+            if err:
+                self._fail(job, err)
+                return
+        else:
+            log.info("grok TUI %s: resume watch for job %s", tui.name, job.id)
 
         prompt = (job.prompt or "").strip()
         local = prompt.startswith("/")
         timeout_s = float(getattr(self.config, "turn_timeout", 0) or 0)
-        deadline = job.started_at + timeout_s if timeout_s > 0 else None
+        if resume and timeout_s > 0:
+            deadline = time.time() + timeout_s
+        else:
+            deadline = job.started_at + timeout_s if timeout_s > 0 else None
         quiet_since = time.time()
         interrupted = False
         ask_wait_from = None

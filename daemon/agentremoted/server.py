@@ -1373,7 +1373,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(404, "no matching pending question")
 
     def _handle_attachment(self, query):
-        """Store a phone upload where the agent CLI can read it by path."""
+        """Store a phone upload where the agent CLI can read it by path.
+
+        Prefers Content-Length (Android/OkHttp always set it after 2.4.7).
+        Without a length, read with a short socket timeout so keep-alive
+        connections cannot hang the worker forever.
+        """
+        import socket
         name = os.path.basename((query.get("name") or ["file"])[0]).strip()
         name = "".join(ch if (ch.isalnum() or ch in "-_.") else "_"
                        for ch in name) or "file"
@@ -1382,34 +1388,93 @@ class ApiHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             length = 0
         max_bytes = int(getattr(self.config, "max_upload_mb", 16) or 16) * 1024 * 1024
-        if length <= 0:
-            self._error(400, "empty upload")
-            return
         if length > max_bytes:
             self.close_connection = True
             self._error(413, "attachment too large (max %d MB)"
                         % (max_bytes // (1024 * 1024)))
             return
         upload_dir = self.config.upload_path
+        dest = None
         try:
             upload_dir.mkdir(parents=True, exist_ok=True)
             dest = upload_dir / ("%s-%s" % (uuid.uuid4().hex[:8], name))
-            remaining = length
+            written = 0
             with open(dest, "wb") as f:
-                while remaining > 0:
-                    chunk = self.rfile.read(min(remaining, 64 * 1024))
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    remaining -= len(chunk)
-            if remaining > 0:
-                dest.unlink()
-                self._error(400, "upload truncated")
-                return
+                if length > 0:
+                    remaining = length
+                    while remaining > 0:
+                        chunk = self.rfile.read(min(remaining, 256 * 1024))
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        remaining -= len(chunk)
+                        written += len(chunk)
+                    if remaining > 0:
+                        try:
+                            dest.unlink()
+                        except OSError:
+                            pass
+                        self._error(
+                            400,
+                            "upload truncated (%d of %d bytes) — network dropped mid-transfer"
+                            % (written, length),
+                        )
+                        return
+                else:
+                    # No Content-Length: drain with a timeout so HTTP keep-alive
+                    # does not block forever waiting for a body that never ends.
+                    sock = getattr(self, "connection", None)
+                    prev_to = None
+                    if sock is not None:
+                        try:
+                            prev_to = sock.gettimeout()
+                            sock.settimeout(30.0)
+                        except (OSError, AttributeError):
+                            prev_to = None
+                    try:
+                        while written <= max_bytes:
+                            try:
+                                chunk = self.rfile.read(256 * 1024)
+                            except socket.timeout:
+                                break
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            written += len(chunk)
+                    finally:
+                        if sock is not None and prev_to is not None:
+                            try:
+                                sock.settimeout(prev_to)
+                            except (OSError, AttributeError):
+                                pass
+                    if written == 0:
+                        try:
+                            dest.unlink()
+                        except OSError:
+                            pass
+                        self._error(
+                            400,
+                            "empty upload (missing Content-Length and no body)",
+                        )
+                        return
+                    if written > max_bytes:
+                        try:
+                            dest.unlink()
+                        except OSError:
+                            pass
+                        self.close_connection = True
+                        self._error(413, "attachment too large (max %d MB)"
+                                    % (max_bytes // (1024 * 1024)))
+                        return
         except OSError as e:
+            if dest is not None:
+                try:
+                    dest.unlink()
+                except OSError:
+                    pass
             self._error(500, "could not store attachment: %s" % e)
             return
-        self._send_json({"ok": True, "path": str(dest), "size": length},
+        self._send_json({"ok": True, "path": str(dest), "size": written},
                         status=201)
 
     def _resolve_drop_file(self, raw_name):

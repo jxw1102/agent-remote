@@ -277,6 +277,8 @@ ApiClient::ApiClient(QObject *parent)
     , m_capInteractive(true)
     , m_capLiveTui(true)
     , m_capRewind(false)
+    , m_rewindConfirmRev(0)
+    , m_rewindConfirmSteps(0)
     , m_pingState(0)
     , m_usageRev(0)
     , m_projectsRev(0)
@@ -476,8 +478,7 @@ QStringList ApiClient::profileHarnesses() const
 // One capability of ONE harness, straight from the profile's cached
 // provider_details. A multi-harness daemon answers /api/ping with a UNION at
 // the root (so single-harness clients see what the box can do at all), which
-// is the wrong thing to gate a session's UI on: claude and grok rewind, codex
-// cannot, and the union says yes for all three.
+// is the wrong thing to gate a session's UI on when harnesses differ.
 bool ApiClient::harnessCap(const QString &harness, const QString &cap,
                            bool fallback) const
 {
@@ -495,8 +496,7 @@ bool ApiClient::harnessCap(const QString &harness, const QString &cap,
 
 // The slash commands of the OPEN session's harness. A multi-harness daemon
 // lists them per provider (and its root list is only the default harness's),
-// so validating against the root list would ban grok's /rewind on a grok
-// session, or wave through codex's missing one.
+// so validate against the OPEN session's own list.
 QStringList ApiClient::sessionSlashCommands() const
 {
     const QString h = m_sessionProvider.trimmed().toLower();
@@ -515,13 +515,15 @@ QStringList ApiClient::sessionSlashCommands() const
     return m_slashCommands;
 }
 
-// Can the harness of the OPEN session rewind? Falls back to the daemon-level
-// flag when the session's harness is unknown (single-harness daemons).
+// Can the harness of the OPEN session rewind? The daemon (>= 2.5) rewinds
+// the session journal itself, so any execution mode qualifies. Falls back to
+// the daemon-level flag when the session's harness is unknown
+// (single-harness daemons); an old daemon advertises nothing and stays off.
 bool ApiClient::sessionCanRewind() const
 {
     if (m_sessionProvider.isEmpty())
         return m_capRewind;
-    return harnessCap(m_sessionProvider, QLatin1String("rewind"), false);
+    return harnessCap(m_sessionProvider, QLatin1String("rewind"), m_capRewind);
 }
 
 bool ApiClient::harnessRequiresCwd(const QString &harness) const
@@ -2151,18 +2153,18 @@ void ApiClient::fetchMessages(int offset, int limit, bool older)
 
 // Long-press "Rewind to here" on a user prompt: the daemon's /rewind N
 // restores to before the Nth-last user message, so N = how many user rows
-// sit at or after this one. Interactive only - headless turns leave no
-// checkpoints and `claude -p /rewind` answers "Unknown skill".
+// sit at or after this one. The daemon (>= 2.5) edits the harness's own
+// session journal, so this works in headless AND interactive execution.
+//
+// Destructive, so the gesture only STAGES the rewind: the page raises a
+// confirmation dialog off the rewindConfirmRev pin, and confirmRewind()
+// performs it.
 void ApiClient::rewindToRow(int rowId)
 {
     if (!sessionCanRewind()) {
         setTranscriptStatus(m_sessionProvider.isEmpty()
-                ? tr("This daemon can't rewind.")
-                : tr("%1 can't rewind.").arg(agentName()));
-        return;
-    }
-    if (m_permissionMode != QLatin1String("interactive")) {
-        setTranscriptStatus(tr("Rewind needs Interactive mode."));
+                ? tr("This daemon can't rewind (needs 2.5+).")
+                : tr("%1 can't rewind (needs daemon 2.5+).").arg(agentName()));
         return;
     }
     int back = 0;
@@ -2172,10 +2174,6 @@ void ApiClient::rewindToRow(int rowId)
             continue;
         ++back;
         if (item.value("rowId").toInt() == rowId) {
-            // NOT sendPrompt(): that routes a mid-turn message into the TUI
-            // (or, before the job id lands, into the local pending queue,
-            // where it sat silently and nothing ever happened). A rewind is
-            // a control action - it has to run as its own turn.
             if (jobRunning()) {
                 setTranscriptStatus(
                         tr("Finish or stop the turn before rewinding."));
@@ -2183,16 +2181,52 @@ void ApiClient::rewindToRow(int rowId)
             }
             if (m_currentSessionId.isEmpty())
                 return;
-            const QString p = QString("/rewind %1").arg(back);
-            m_messages.append(blockItem("gap", QString(), QString(), true));
-            appendLiveItem(userLiveItem(p));
-            m_jobEndStatus.clear();
-            setTranscriptStatus(QString());
-            postPrompt(p);
+            QString quote = item.value("text").toString();
+            if (quote.startsWith(QLatin1String("> ")))
+                quote = quote.mid(2);
+            quote = quote.section(QLatin1Char('\n'), 0, 0).left(120);
+            m_rewindConfirmSteps = back;
+            m_rewindConfirmText =
+                (back == 1
+                     ? tr("The conversation goes back to just before this "
+                          "message, dropping your last message and the "
+                          "reply to it.")
+                     : tr("The conversation goes back to just before this "
+                          "message, dropping the last %1 of your messages "
+                          "and everything after them.").arg(back))
+                + tr("\n\nThis cannot be undone. Conversation only - file "
+                     "changes on the host are not reverted.")
+                + QString("\n\n“%1”").arg(quote);
+            m_rewindConfirmRev++;
+            emit rewindConfirmChanged();
             return;
         }
     }
     setTranscriptStatus(tr("Can't rewind: message not found."));
+}
+
+// The confirmation dialog's Rewind button. Re-checks the guards - the world
+// may have moved on while the dialog sat open.
+void ApiClient::confirmRewind()
+{
+    const int back = m_rewindConfirmSteps;
+    m_rewindConfirmSteps = 0;
+    if (back <= 0 || m_currentSessionId.isEmpty())
+        return;
+    if (jobRunning()) {
+        setTranscriptStatus(tr("Finish or stop the turn before rewinding."));
+        return;
+    }
+    // NOT sendPrompt(): that routes a mid-turn message into the TUI (or,
+    // before the job id lands, into the local pending queue, where it sat
+    // silently and nothing ever happened). A rewind is a control action -
+    // it has to run as its own turn.
+    const QString p = QString("/rewind %1").arg(back);
+    m_messages.append(blockItem("gap", QString(), QString(), true));
+    appendLiveItem(userLiveItem(p));
+    m_jobEndStatus.clear();
+    setTranscriptStatus(QString());
+    postPrompt(p);
 }
 
 void ApiClient::sendPrompt(const QString &prompt)
@@ -2230,10 +2264,10 @@ void ApiClient::sendPrompt(const QString &prompt)
     // against the daemon's list before sending anything. Things like
     // "/root/x is missing" don't look like a command and pass through.
     // There is no hardcoded whitelist any more: the daemon advertises each
-    // harness's real built-ins (claude and grok: /compact /exit /rewind;
-    // codex: /compact /exit — it has no rewind), so anything not on the OPEN
-    // session's list is refused here rather than wasting a turn on a command
-    // the harness would not understand.
+    // harness's real built-ins (claude/grok/codex: /compact /exit /rewind —
+    // /rewind is served by the daemon itself, so it works headless too), so
+    // anything not on the OPEN session's list is refused here rather than
+    // wasting a turn on a command the harness would not understand.
     if (p.startsWith(QLatin1Char('/'))) {
         QString cmd = p.section(QRegExp("\\s"), 0, 0);
         const QStringList allowed = sessionSlashCommands();
@@ -4164,16 +4198,27 @@ void ApiClient::updatePendingQuestion(const QVariantMap &snap)
 {
     QVariant qv = snap.value("pending_question");
     if (qv.isNull() || !qv.isValid()) {
-        clearPendingQuestion();
+        // Do not clear m_dismissedQuestionIds here — only clear the open panel.
+        if (!m_questionRequestId.isEmpty()) {
+            m_questionRequestId.clear();
+            m_questions.clear();
+            emit questionChanged();
+        }
         return;
     }
     QVariantMap q = qv.toMap();
     QString reqId = q.value("request_id").toString();
     QVariantList questions = q.value("questions").toList();
     if (reqId.isEmpty() || questions.isEmpty()) {
-        clearPendingQuestion();
+        if (!m_questionRequestId.isEmpty()) {
+            m_questionRequestId.clear();
+            m_questions.clear();
+            emit questionChanged();
+        }
         return;
     }
+    if (m_dismissedQuestionIds.contains(reqId))
+        return; // user already answered/cancelled this id
     if (reqId == m_questionRequestId)
         return; // already showing this one
     m_questionRequestId = reqId;
@@ -4183,7 +4228,9 @@ void ApiClient::updatePendingQuestion(const QVariantMap &snap)
 
 void ApiClient::clearPendingQuestion()
 {
-    if (m_questionRequestId.isEmpty())
+    if (!m_questionRequestId.isEmpty())
+        m_dismissedQuestionIds.insert(m_questionRequestId);
+    if (m_questionRequestId.isEmpty() && m_questions.isEmpty())
         return;
     m_questionRequestId.clear();
     m_questions.clear();

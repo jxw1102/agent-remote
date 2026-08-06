@@ -27,8 +27,6 @@ as a keypress (flipping the input into bash mode) before the rest is pasted,
 runs the model, so those turns may end on a quiet period after their
 transcript output instead of a Stop hook; a /command that shows a UI panel
 (/cost, /mcp...) gets snapshotted for the phone and dismissed with Escape.
-"/rewind [N]" is driven for real: the checkpoint panel is navigated with
-arrow keys to restore the conversation N user messages back.
 
 The TUI runs with --permission-mode bypassPermissions: permission prompts
 would render inside the pane where nobody can see them, so interactive mode
@@ -96,10 +94,6 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 # (grok's fleet is grk-*). Legacy bb10i-* sessions are still adopted/reaped.
 _PREFIX = "cld-"
 _OLD_PREFIXES = ("cld-", "bb10i-")
-
-# "/rewind" or "/rewind N": drive the TUI's checkpoint panel instead of
-# pasting the command as an ordinary turn (its panel needs arrow keys).
-_REWIND_RE = re.compile(r"^/rewind(?:\s+(\d+))?\s*$")
 
 # The AskUserQuestion panel's footer, i.e. "the panel is still up". Used to
 # tell "submitted, panel gone" from "still waiting" after the last pick.
@@ -499,14 +493,78 @@ class InteractiveManager:
             return
         with tui.lock:  # serialize turns per TUI
             tui.job = job
+            job.tui_name = tui.name
             try:
-                m = _REWIND_RE.match(job.prompt or "")
-                if m:
-                    self._run_rewind(job, tui, int(m.group(1) or 1))
-                else:
-                    self._run_turn(job, tui)
+                self._run_turn(job, tui, resume=False)
             finally:
                 tui.job = None
+
+    def resume(self, job) -> None:
+        """Re-attach a mid-turn interactive job after a daemon restart.
+
+        The host Claude process is still in tmux (adopted via tuis.json). We
+        do **not** re-submit the prompt — only rejoin transcript drain + Stop
+        hooks so the phone's job id keeps working.
+        """
+        if not shutil.which("tmux") and not os.path.exists("/opt/homebrew/bin/tmux"):
+            self._fail(job, "interactive mode needs tmux (brew install tmux)")
+            return
+        sid = (job.new_session_id or job.session_id or "").strip()
+        tui = None
+        with self._lock:
+            if job.tui_name and job.tui_name in self._tuis:
+                tui = self._tuis[job.tui_name]
+            if tui is None and sid:
+                for t in self._tuis.values():
+                    if t.session_id == sid:
+                        tui = t
+                        break
+        if tui is None or not self._tmux_alive(tui.name):
+            cwd = os.path.expanduser(job.cwd or "") or os.path.expanduser("~")
+            tui, err = self._ensure_tui(cwd, sid, job.model)
+            if err:
+                self._fail(job, "interrupted by daemon restart: %s" % err)
+                return
+        job.tui_name = tui.name
+        with tui.lock:
+            tui.job = job
+            try:
+                job.add_event(
+                    "tool",
+                    name="daemon",
+                    detail="resumed mid-turn after daemon restart",
+                )
+                job.set_phase("thinking", "resumed")
+                self._run_turn(job, tui, resume=True)
+            finally:
+                tui.job = None
+
+    def close_for_session(self, session_id: str) -> bool:
+        """Kill the live TUI hosting this session, if any. Rewind edits the
+        session journal on disk — a running CLI would neither see the edit
+        nor survive under it — so the TUI dies first and the next turn
+        --resume's the rewound session. Refuses mid-turn."""
+        sid = (session_id or "").strip()
+        if not sid:
+            return False
+        with self._lock:
+            victim = None
+            for t in self._tuis.values():
+                if t.session_id == sid:
+                    victim = t
+                    break
+            if victim is None:
+                return False
+            if victim.job is not None:
+                from . import RunnerError
+                raise RunnerError("finish or stop the running turn first")
+            try:
+                self._tmux("kill-session", "-t", victim.name)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            del self._tuis[victim.name]
+            self._save_state()
+        return True
 
     def _fail(self, job, message: str):
         with job.lock:
@@ -652,7 +710,7 @@ class InteractiveManager:
             return "tmux input failed: %s" % e
         return ""
 
-    # -- rewind (checkpoint panel) -------------------------------------------
+    # -- pane waiting ----------------------------------------------------------
 
     def _await_pane(self, tui: _Tui, needle: str, timeout: float) -> bool:
         end = time.time() + timeout
@@ -662,87 +720,27 @@ class InteractiveManager:
             time.sleep(_POLL_S)
         return False
 
-    def _input_text(self, name: str) -> str:
-        """Text sitting in the TUI's input box (the LAST ❯ line — earlier
-        ones are the transcript's user-turn echoes)."""
-        line = ""
-        for l in self._pane_text(name).splitlines():
-            if l.startswith("❯"):
-                line = l
-        return line[1:].strip()
-
-    def _run_rewind(self, job, tui: _Tui, steps: int):
-        """Drive the TUI's /rewind checkpoint panel: the list opens with the
-        cursor on "(current)" (checkpoints above it, oldest first), so N Up
-        keys select the point before the Nth-last user message; Enter opens
-        the confirm panel, whose default action ("1. Restore conversation",
-        or code+conversation when files changed) a second Enter applies.
-        The TUI then refills the input box with the rewound prompt — cleared
-        with the double Escape it asks for ("Esc again to clear")."""
-        with job.lock:
-            job.status = "running"
-            job.new_session_id = tui.session_id
-        job.add_event("init", session_id=tui.session_id, model="interactive")
-        steps = max(1, steps)
-        job.add_event("tool", name="/rewind",
-                      detail="%d message%s back" % (steps,
-                                                    "" if steps == 1 else "s"))
-        job.set_phase("tool", "/rewind")
-        err = self._send_prompt(tui, "/rewind")
-        if err:
-            self._fail(job, err)
-            return
-        try:
-            if not self._await_pane(tui, "Enter to continue", 8.0):
-                self._tmux("send-keys", "-t", tui.name, "Escape")
-                self._fail(job, "rewind panel did not open — screen: %s"
-                           % self._pane_tail(tui.name))
-                return
-            for _ in range(steps):
-                self._tmux("send-keys", "-t", tui.name, "Up")
-                time.sleep(0.15)
-            self._tmux("send-keys", "-t", tui.name, "Enter")
-            if not self._await_pane(tui, "Confirm you want to restore", 5.0):
-                self._tmux("send-keys", "-t", tui.name, "Escape")
-                self._fail(job, "rewind confirm did not open — screen: %s"
-                           % self._pane_tail(tui.name))
-                return
-            # The message being restored to — the first quoted "│ ..." row.
-            target = ""
-            for l in self._pane_text(tui.name).splitlines():
-                ls = l.strip()
-                if ls.startswith("│"):
-                    target = ls.strip("│ ").strip()
-                    break
-            self._tmux("send-keys", "-t", tui.name, "Enter")
-            time.sleep(1.0)
-            if self._input_text(tui.name):
-                self._tmux("send-keys", "-t", tui.name, "Escape")
-                time.sleep(0.4)
-                self._tmux("send-keys", "-t", tui.name, "Escape")
-        except (OSError, subprocess.TimeoutExpired) as e:
-            self._fail(job, "rewind failed: %s" % e)
-            return
-        from ..render_blocks import markdown_to_blocks
-        msg = "Rewound %d message%s" % (steps, "" if steps == 1 else "s")
-        if target:
-            msg += " — restored to before: “%s”" % target
-        job.add_event("text", text=msg, blocks=markdown_to_blocks(msg))
-        with job.lock:
-            job.new_session_id = tui.session_id or job.new_session_id
-            if job.status != "stopped":
-                job.result_text = msg
-                job.status = "done"
-        job.add_event("result", is_error=False,
-                      duration_ms=int((time.time() - job.started_at) * 1000),
-                      cost_usd=0)
-
     # -- AskUserQuestion (selection panel) -----------------------------------
 
+    @staticmethod
+    def _ask_fingerprint(questions: list) -> str:
+        """Stable id for a question set (hook + transcript must not double-fire)."""
+        import hashlib
+        import json
+        try:
+            blob = json.dumps(questions, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            blob = repr(questions)
+        return hashlib.sha1(blob.encode("utf-8", errors="replace")).hexdigest()[:20]
+
     def _ask_seen(self, job, tool_input: dict, state: dict):
-        """Record an AskUserQuestion the transcript just showed. Its input is
-        already on disk while the panel blocks the pane, so nothing needs to
-        be scraped — _run_turn hands these to the phone."""
+        """Record an AskUserQuestion the transcript (or PreToolUse hook) showed.
+
+        Hook fires while the panel is open; the JSONL tool_use line is often
+        written only *after* the user answers. Without dedupe, that late
+        transcript line re-queues the same panel on the phone even though
+        Live TUI already applied the picks.
+        """
         questions = []
         for q in tool_input.get("questions") or []:
             if not isinstance(q, dict):
@@ -757,9 +755,21 @@ class InteractiveManager:
                 "question": str(q.get("question") or ""),
                 "header": str(q.get("header") or ""),
                 "options": options,
-                "multi_select": bool(q.get("multiSelect")),
+                "multi_select": bool(q.get("multiSelect") or q.get("multi_select")),
             })
         if not questions:
+            return
+        fp = self._ask_fingerprint(questions)
+        done = state.setdefault("ask_done", set())
+        if fp in done:
+            return
+        # Already queued / in flight for this turn.
+        if state.get("ask") is not None and self._ask_fingerprint(state["ask"]) == fp:
+            return
+        thread = state.get("ask_thread")
+        if thread is not None and thread.is_alive():
+            return
+        if job.pending_question:
             return
         state["ask"] = questions
         headers = " · ".join(q["header"] or q["question"][:24] for q in questions)
@@ -839,33 +849,60 @@ class InteractiveManager:
                     % self._pane_tail(tui.name), "")
         return "", " · ".join(picks)
 
-    def _run_turn(self, job, tui: _Tui):
+    def _run_turn(self, job, tui: _Tui, resume: bool = False):
         with job.lock:
             job.status = "running"
-            job.new_session_id = tui.session_id
-        job.add_event("init", session_id=tui.session_id, model="interactive")
+            if tui.session_id:
+                job.new_session_id = tui.session_id or job.new_session_id
+            job.tui_name = tui.name
+        if not resume:
+            job.add_event("init", session_id=tui.session_id, model="interactive")
 
         transcript = tui.transcript
         offset = 0
         try:
-            offset = os.path.getsize(transcript)
+            # Resume: only watch *new* bytes so prior events are not replayed.
+            offset = os.path.getsize(transcript) if transcript else 0
         except OSError:
             pass
 
         tui.stop_event.clear()
-        err = self._submit(tui, job.prompt)
-        if err:
-            self._fail(job, err)
-            return
+        tui.stop_payload = {}
+        if not resume:
+            err = self._submit(tui, job.prompt)
+            if err:
+                self._fail(job, err)
+                return
+        else:
+            # Rejoin an in-flight host TUI; never re-paste the prompt.
+            log.info("TUI %s: resume watch for job %s (offset %d)",
+                     tui.name, job.id, offset)
 
         timeout_s = float(getattr(self.config, "turn_timeout", 0) or 0)
-        deadline = job.started_at + timeout_s if timeout_s > 0 else None
+        # On resume the original started_at is kept; extend deadline from now
+        # so a long pre-restart wait does not instantly time out.
+        if resume and timeout_s > 0:
+            deadline = time.time() + timeout_s
+        else:
+            deadline = job.started_at + timeout_s if timeout_s > 0 else None
         prompt = job.prompt or ""
         kind = ("bash" if prompt.startswith("!") else
                 "slash" if prompt.startswith("/") else "chat")
         state = {"last_text": "", "kind": kind,
                  "local_done": 0.0, "pending_local": "",
-                 "ask": None, "ask_thread": None}
+                 "ask": None, "ask_thread": None,
+                 "ask_done": set()}  # fingerprints already shown / answered
+        # Re-opened pending_question after restart has no waiter — clear it
+        # so the phone does not show a dead gate; a still-open panel will
+        # re-fire via hook / transcript.
+        if resume and job.pending_question:
+            with job.lock:
+                job.pending_question = None
+            job.cancel_question()
+        if resume and job.pending_permission:
+            with job.lock:
+                job.pending_permission = None
+            job.cancel_permission()
         submit_t = time.time()
         interrupted = False
         ask_wait_from = None
@@ -903,6 +940,10 @@ class InteractiveManager:
             thread = state["ask_thread"]
             if state["ask"] and not (thread and thread.is_alive()):
                 questions, state["ask"] = state["ask"], None
+                # Mark handled *before* the phone answers so a late JSONL
+                # tool_use for the same panel cannot re-open the sheet.
+                state.setdefault("ask_done", set()).add(
+                    self._ask_fingerprint(questions))
                 state["ask_thread"] = threading.Thread(
                     target=self._answer_questions, args=(job, tui, questions),
                     daemon=True)

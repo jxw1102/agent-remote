@@ -250,6 +250,7 @@ const state = {
   liveTuiEscArmed: false,
   askedQuestion: null,   // request_id already auto-opened (reopen via banner)
   askedPermission: null, // request_id already auto-opened (reopen via banner)
+  answeredQuestions: new Set(), // request_ids the user already submitted
   gen: 0,                // fan-out generation guard
 };
 
@@ -1374,11 +1375,10 @@ function renderMessage(item) {
     const tools = el("div", "msg-tools");
     tools.appendChild(copyButton(item.text));
     const profile = profileById(state.open.profileId);
-    // Rewind exists only where the TUI keeps checkpoints; offering an action
-    // that would fail is worse than not offering it.
+    // Rewind is daemon-side session-file surgery (daemon ≥ 2.5), so it works
+    // in BOTH execution modes — gate only on the harness's advertised cap.
     const rwHarness = sessionProvider(state.open && state.open.session, profile);
-    if (profile && capOf(profile, "rewind", false, rwHarness)
-        && execModeOf(profile) === "interactive") {
+    if (profile && capOf(profile, "rewind", false, rwHarness)) {
       const back = userStepsBack(item.id);
       if (back > 0) {
         const b = el("button", null, "Rewind to here");
@@ -1433,7 +1433,7 @@ function confirmRewind(item, back) {
         ? "The conversation goes back to just before this message, dropping your last message and the reply to it."
         : `The conversation goes back to just before this message, dropping the last ${back} of your messages and everything after them.`));
       const warn = el("p", null,
-        "This cannot be undone. On Grok it also reverts file changes made since then, and anything uncommitted is lost.");
+        "This cannot be undone. Conversation only — file changes on the host are not reverted.");
       warn.style.color = "var(--danger)";
       body.appendChild(warn);
       const quote = el("pre", null, item.text.split("\n")[0].slice(0, 160));
@@ -1479,14 +1479,18 @@ async function send(text) {
   if (/^\/[A-Za-z][A-Za-z0-9_-]*$/.test(raw.split(" ")[0])) {
     const cmd = raw.split(" ")[0];
     const interactive = execModeOf(profile) === "interactive";
-    if (!interactive) {
+    // /rewind never reaches the harness — the daemon rewinds the session
+    // journal itself (≥ 2.5) — so it is exempt from the interactive-only
+    // rule. The advertised-list check below still gates it (old daemons
+    // don't list it).
+    if (!interactive && cmd !== "/rewind") {
       composerNote(`${cmd} needs interactive execution — headless turns cannot run commands`, true);
       return;
     }
     // No hardcoded whitelist: the daemon advertises each harness's real
-    // built-ins (claude/grok: /compact /exit /rewind — codex has no rewind),
-    // so anything off the OPEN session's list is refused before it costs a
-    // turn on a command that harness would not understand.
+    // built-ins (claude/grok/codex: /compact /exit /rewind), so anything
+    // off the OPEN session's list is refused before it costs a turn on a
+    // command that harness would not understand.
     const known = slashOf(profile, sessionProvider(state.open && state.open.session, profile));
     if (!known.includes(cmd)) {
       composerNote(known.length
@@ -1662,16 +1666,20 @@ async function pollJob() {
   // Auto-open once per request_id. Dismissing the modal does NOT cancel the
   // ask on the daemon — renderBanner keeps an "Answer" / "Respond" CTA so
   // the user can reopen (same idea as the phone's QuestionSheet banner).
+  // Do not clear askedQuestion when pending flickers null (race while the
+  // daemon applies picks) — that reopened the same panel after Submit.
   if (!job.pendingPermission) state.askedPermission = null;
-  if (!job.pendingQuestion) state.askedQuestion = null;
   if (job.pendingPermission
       && job.pendingPermission.request_id !== state.askedPermission) {
     state.askedPermission = job.pendingPermission.request_id;
     showPermission(job.pendingPermission);
   }
+  const qid = job.pendingQuestion && job.pendingQuestion.request_id;
   if (job.pendingQuestion
-      && job.pendingQuestion.request_id !== state.askedQuestion) {
-    state.askedQuestion = job.pendingQuestion.request_id;
+      && qid
+      && qid !== state.askedQuestion
+      && !state.answeredQuestions.has(qid)) {
+    state.askedQuestion = qid;
     showQuestion(job.pendingQuestion);
   }
 
@@ -2401,6 +2409,10 @@ function showQuestion(pending) {
           try {
             await call(profile, `/api/jobs/${state.job.id}/question`,
               { method: "POST", body: { request_id: pending.request_id, cancel: true } });
+            state.answeredQuestions.add(pending.request_id);
+            state.askedQuestion = pending.request_id;
+            if (state.job) state.job.pendingQuestion = null;
+            renderBanner();
           } catch (e) { toast(e.message); }
         },
       },
@@ -2414,6 +2426,11 @@ function showQuestion(pending) {
               method: "POST",
               body: { request_id: pending.request_id, answers: picks, notes },
             });
+            // Optimistically dismiss so a lagging poll cannot re-open this id.
+            state.answeredQuestions.add(pending.request_id);
+            state.askedQuestion = pending.request_id;
+            if (state.job) state.job.pendingQuestion = null;
+            renderBanner();
           } catch (e) { toast(e.message); }
         },
       },

@@ -108,11 +108,19 @@ class ApiClient : public QObject
     Q_PROPERTY(bool capInteractive READ capInteractive NOTIFY capsChanged)
     // Live TUI pane capture/keys (daemon ≥ 2.4; falls back to interactive).
     Q_PROPERTY(bool capLiveTui READ capLiveTui NOTIFY capsChanged)
-    // "/rewind N" works in that TUI (claude only; grok's takes a prompt).
+    // "/rewind N" — the daemon (≥ 2.5) rewinds the session journal itself,
+    // any harness, any execution mode.
     Q_PROPERTY(bool capRewind READ capRewind NOTIFY capsChanged)
-    // Same flag resolved for the open session's harness — what the long-press
-    // action binds to, so the entry is gone on a codex session.
+    // Same flag resolved for the open session's harness — what the
+    // long-press action binds to (an old daemon advertises nothing).
     Q_PROPERTY(bool canRewindHere READ sessionCanRewind NOTIFY currentSessionChanged)
+    // Rewind is destructive: the gesture only opens a choice, and this pin
+    // (bumped by rewindToRow after its guards pass) tells the page to raise
+    // the confirmation dialog with the consequence in rewindConfirmText.
+    // confirmRewind() then performs it (pinned-property pattern: signals /
+    // Connections{} are unreliable on pushed/popped Cascades pages).
+    Q_PROPERTY(int rewindConfirmRev READ rewindConfirmRev NOTIFY rewindConfirmChanged)
+    Q_PROPERTY(QString rewindConfirmText READ rewindConfirmText NOTIFY rewindConfirmChanged)
     // GrokRemote: Usage opens the browser to BRAND_USAGE_URL instead of the
     // in-app sheet. Always true on the Grok build; false on Claude.
     Q_PROPERTY(bool usageOpensBrowser READ usageOpensBrowser CONSTANT)
@@ -252,6 +260,8 @@ public:
     bool capInteractive() const { return m_capInteractive; }
     bool capLiveTui() const { return m_capLiveTui; }
     bool capRewind() const { return m_capRewind; }
+    int rewindConfirmRev() const { return m_rewindConfirmRev; }
+    QString rewindConfirmText() const { return m_rewindConfirmText; }
     bool usageOpensBrowser() const;
     QStringList slashCommands() const { return m_slashCommands; }
     QStringList models() const { return m_models; }
@@ -372,9 +382,8 @@ public:
     Q_INVOKABLE bool harnessRequiresCwd(const QString &harness) const;
     bool harnessCap(const QString &harness, const QString &cap,
                     bool fallback) const;
-    // Rewind is per harness (claude and grok can, codex cannot), so the UI
-    // gates on the OPEN session's harness, not the daemon-level union that
-    // /api/ping reports at its root.
+    // Rewind is per harness (a multi host's root caps are a union), so the
+    // UI gates on the OPEN session's harness, not the daemon-level flag.
     Q_INVOKABLE bool sessionCanRewind() const;
     // Slash commands of the OPEN session's harness (multi daemons list them
     // per provider); the "/" panel and the send gate both use this.
@@ -414,8 +423,10 @@ public:
     Q_INVOKABLE void refreshTranscript();
     Q_INVOKABLE void loadOlder();
     Q_INVOKABLE void sendPrompt(const QString &prompt);
-    // "Rewind to here" on a user row -> /rewind N (interactive mode only).
+    // "Rewind to here" on a user row: guards, then stages the confirmation
+    // (rewindConfirmRev pin). confirmRewind() sends /rewind N for real.
     Q_INVOKABLE void rewindToRow(int rowId);
+    Q_INVOKABLE void confirmRewind();
     Q_INVOKABLE void cancelQueued(const QString &queueId);
     // provider: multi-harness root requires it (claude|grok|codex); empty =
     // single-provider / path-profile daemons.
@@ -446,6 +457,7 @@ Q_SIGNALS:
     void settingsChanged();
     void profilesChanged();
     void capsChanged();
+    void rewindConfirmChanged();
     void usageChanged();
     void jobTickerChanged();
     void liveStatusChanged();
@@ -653,6 +665,9 @@ private:
     bool m_capInteractive;
     bool m_capLiveTui;
     bool m_capRewind;
+    int m_rewindConfirmRev;
+    int m_rewindConfirmSteps;
+    QString m_rewindConfirmText;
     QStringList m_slashCommands;
     QStringList m_models;
     QStringList m_efforts;
@@ -736,6 +751,8 @@ private:
 
     QString m_questionRequestId;
     QVariantList m_questions;
+    // request_ids already answered/cancelled — lagging polls must not reopen.
+    QSet<QString> m_dismissedQuestionIds;
 
     int m_newSessionRequestRev;
     QString m_newSessionCwd;

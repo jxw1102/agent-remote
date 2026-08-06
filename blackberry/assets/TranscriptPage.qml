@@ -1,5 +1,6 @@
 import bb.cascades 1.4
 import bb.cascades.pickers 1.0
+import bb.system 1.2
 
 // Transcript of the session ApiClient currently has open.
 //
@@ -50,6 +51,24 @@ Page {
             return;
         var sep = promptField.text.length > 0 ? "\n" : "";
         promptField.text = promptField.text + sep + "[attached: " + path + "]";
+    }
+
+    // Rewind staged (long-press -> "Rewind to here" passed the C++ guards):
+    // destructive, so confirm again with the real consequence spelled out.
+    // Same first-change sync as attachPin (the api pin arriving).
+    property int rewindPin: transcriptPage.api
+                            ? transcriptPage.api.rewindConfirmRev : -1
+    property int seenRewindRev: -1
+    onRewindPinChanged: {
+        if (seenRewindRev < 0 || ! transcriptPage.api) {
+            seenRewindRev = rewindPin;
+            return;
+        }
+        if (rewindPin == seenRewindRev)
+            return;
+        seenRewindRev = rewindPin;
+        rewindConfirm.body = transcriptPage.api.rewindConfirmText;
+        rewindConfirm.show();
     }
 
     // AskUserQuestion arrived (interactive mode): the agent's turn is blocked
@@ -419,18 +438,19 @@ Page {
                                 ActionItem {
                                     title: qsTr("Rewind to here")
                                     imageSource: "asset:///images/ic_reload.png"
-                                    // Only harnesses that can actually rewind
-                                    // offer it (codex cannot). ActionItem has
-                                    // no `visible` in Cascades, so a harness
-                                    // without rewind shows it greyed instead
-                                    // of failing after the tap.
+                                    // The daemon (>= 2.5) rewinds the session
+                                    // journal itself, any harness, any exec
+                                    // mode. ActionItem has no `visible` in
+                                    // Cascades, so an old daemon shows it
+                                    // greyed instead of failing after the tap.
                                     enabled: ListItemData.api
                                              ? ListItemData.api.canRewindHere
                                              : false
                                     onTriggered: {
-                                        // Restores the conversation to just
-                                        // before this prompt (interactive
-                                        // mode; C++ guards and reports).
+                                        // Stages the rewind: C++ guards,
+                                        // then the rewindPin raises the
+                                        // confirmation dialog — nothing
+                                        // destructive happens on the tap.
                                         var a = ListItemData.api;
                                         if (a)
                                             a.rewindToRow(ListItemData.rowId | 0);
@@ -1165,6 +1185,18 @@ Page {
                 if (selectedFiles && selectedFiles.length > 0
                         && transcriptPage.api)
                     transcriptPage.api.uploadAttachment("" + selectedFiles[0]);
+            }
+        },
+        SystemDialog {
+            id: rewindConfirm
+            title: qsTr("Rewind the session?")
+            confirmButton.label: qsTr("Rewind")
+            cancelButton.label: qsTr("Cancel")
+            onFinished: {
+                if (value != SystemUiResult.ConfirmButtonSelection)
+                    return;
+                if (transcriptPage.api)
+                    transcriptPage.api.confirmRewind();
             }
         }
     ]

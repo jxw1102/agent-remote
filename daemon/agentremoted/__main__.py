@@ -91,6 +91,20 @@ def main():
     except OSError as e:
         log.warning("could not create drop folder %s: %s", config.drop_path, e)
 
+    # Force interactive managers to adopt surviving tmux TUIs *before*
+    # rehydrating mid-turn jobs so resume can rebind by session id.
+    for name, bundle in bundles.items():
+        force = getattr(bundle.runner, "_interactive_mgr", None)
+        if callable(force):
+            try:
+                force()
+            except Exception as e:  # noqa: BLE001
+                log.warning("interactive adopt for %s failed: %s", name, e)
+        try:
+            bundle.jobs.resume_jobs()
+        except Exception as e:  # noqa: BLE001
+            log.warning("job resume for %s failed: %s", name, e)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -429,9 +429,10 @@ data class Caps(
     }
 
     /**
-     * Can THIS harness rewind? claude and grok can, codex cannot, and a
-     * multi-harness host reports a union at its root — so gating a session's
-     * UI on the root flag offers an action that would fail.
+     * Can THIS harness rewind (daemon ≥ 2.5 does it via session-file
+     * surgery, so both exec modes qualify)? A multi-harness host reports a
+     * union at its root — gating a session's UI on the root flag would
+     * offer an action an old daemon cannot perform.
      */
     fun rewindFor(harness: String?): Boolean {
         val h = harness?.lowercase().orEmpty()

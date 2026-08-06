@@ -801,6 +801,22 @@ class CodexStore:
             return None
         return self._summary(row)
 
+    def rollout_path(self, session_id: str) -> str:
+        """rollout_path of one thread id ("" when unknown)."""
+        con = self._connect()
+        if con is None:
+            return ""
+        try:
+            r = con.execute(
+                "SELECT rollout_path FROM threads WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            return (r["rollout_path"] if r else "") or ""
+        except sqlite3.Error:
+            return ""
+        finally:
+            con.close()
+
     def get_messages(self, session_id: str, offset: int = None, limit: int = 50):
         sess = self.get_session(session_id)
         if sess is None:
@@ -989,6 +1005,77 @@ class CodexRunner:
         self._interactive_mgr().run(job)
         return True
 
+    def resume_alternate(self, job) -> None:
+        """Continue an interactive job after daemon restart (tmux TUI adopted)."""
+        self._interactive_mgr().resume(job)
+
+    def rewind_session(self, session_id: str, steps: int):
+        """Truncate the rollout JSONL back N user prompts (conversation only
+        — files on disk are not restored). ``codex exec resume`` and the TUI
+        rebuild context from the rollout, so the truncated file IS the
+        rewound session (verified: a resumed session forgets the dropped
+        turns). The sqlite threads index holds only metadata and stays
+        valid. Returns (steps_done, preview_of_first_dropped_prompt)."""
+        sid = (session_id or "").strip()
+        path_s = self.store.rollout_path(sid) if sid else ""
+        path = Path(path_s) if path_s else None
+        if path is None or not path.is_file():
+            raise providers.RunnerError("session rollout not found")
+        # A live TUI holds the pre-cut conversation in memory; close it so
+        # the next interactive turn resumes the rewound session.
+        self._interactive_mgr().close_for_session(sid)
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        lines = raw.splitlines()
+        # Human prompts are the event_msg/user_message records — the same
+        # rows the phone's transcript shows (harness-injected user
+        # response_items never get an event_msg).
+        marks = []
+        for i, line in enumerate(lines):
+            ev = _safe_json(line)
+            if not isinstance(ev, dict) or ev.get("type") != "event_msg":
+                continue
+            payload = ev.get("payload") or {}
+            if str(payload.get("type") or "") == "user_message":
+                text = str(payload.get("message") or "").strip()
+                if text:
+                    marks.append((i, text))
+        if not marks:
+            raise providers.RunnerError(
+                "nothing to rewind — no user messages yet")
+        steps = max(1, min(int(steps), len(marks)))
+        anchor, text = marks[-steps]
+        prev_mark = marks[-steps - 1][0] if steps < len(marks) else -1
+        # Walk back over the prompt's own turn scaffolding (its user
+        # response_item, turn_context, world_state, task_started) so the cut
+        # lands on the turn boundary, not mid-turn.
+        cut = anchor
+        j = anchor - 1
+        while j > prev_mark:
+            ev = _safe_json(lines[j]) or {}
+            etype = ev.get("type")
+            payload = ev.get("payload") or {}
+            ptype = str(payload.get("type") or "")
+            if (etype == "response_item" and ptype == "message"
+                    and payload.get("role") == "user"):
+                cut = j
+            elif etype in ("turn_context", "world_state"):
+                cut = j
+            elif etype == "event_msg" and ptype == "task_started":
+                cut = j
+            else:
+                break
+            j -= 1
+        backup = path.parent / (path.name + ".rewind-bak")
+        try:
+            backup.write_text(raw, encoding="utf-8")
+        except OSError:
+            pass  # safety net only; the rewind itself still proceeds
+        with open(path, "w", encoding="utf-8") as f:
+            if cut:
+                f.write("\n".join(lines[:cut]) + "\n")
+        preview = " ".join(text.split())[:120]
+        return steps, preview
+
     def type_into_tui(self, session_id: str, text: str) -> str:
         """Type a message into a session's live interactive TUI (\"\" or err)."""
         return self._interactive_mgr().type_text(session_id, text)
@@ -1023,11 +1110,17 @@ class CodexRunner:
             # Requires tmux on the host (same as Claude/Grok interactive).
             "interactive": has_tmux,
             "live_tui": has_tmux,
+            # "/rewind N": the daemon truncates the rollout JSONL back N
+            # user prompts (conversation only) and the next turn resumes
+            # from there. Works in BOTH exec modes — codex's own TUI has no
+            # rewind, but the daemon does not need one.
+            "rewind": True,
         }
 
     # Verified in codex's own TUI command list: /compact and /exit are
-    # there, /rewind and /undo are NOT (its "Rewind" string is a sort enum).
-    _BUILTIN_SLASH = ["/compact", "/exit"]
+    # there. /rewind is served by the DAEMON (rollout truncation in
+    # jobs.py), so it works on headless turns too.
+    _BUILTIN_SLASH = ["/compact", "/exit", "/rewind"]
 
     def slash_commands(self):
         out = list(self._BUILTIN_SLASH)

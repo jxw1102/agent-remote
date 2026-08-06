@@ -11,15 +11,21 @@ the interface. The queue, permission bridge, stop/kill handling, and the
 chain of follow-up jobs are provider-agnostic.
 """
 
+import json
+import logging
 import os
 import queue
+import re
 import signal
 import subprocess
 import threading
 import time
 import uuid
 
+from .config import CONFIG_DIR
 from .providers import RunnerError
+
+log = logging.getLogger(__name__)
 
 _STDERR_TAIL = 4000
 
@@ -29,6 +35,14 @@ _MAX_QUEUED = 10
 # How long the stream loop sleeps waiting for output before running
 # housekeeping (runner.tick, deadline check).
 _READ_TIMEOUT = 0.25
+
+# How often to flush active interactive jobs to disk for mid-turn resume.
+_PERSIST_INTERVAL_S = 2.0
+
+# "/rewind [N]" is a daemon control action, not a model turn: the provider
+# rewrites the harness's own session journal on disk (works for headless AND
+# interactive execution), so it is intercepted before any CLI is spawned.
+_REWIND_RE = re.compile(r"^/rewind(?:\s+(\d+))?\s*$")
 
 
 class Job:
@@ -53,6 +67,9 @@ class Job:
 
         # Scratch space owned by the provider runner for this job.
         self.runner_state = {}
+
+        # tmux session name when interactive (helps rebind after restart).
+        self.tui_name = ""
 
         # Prompts queued behind this job. The daemon owns the queue (the
         # phone may die or lose Wi-Fi at any time): when this job finishes
@@ -83,6 +100,88 @@ class Job:
         self._q_event = threading.Event()
         self._q_answers = None             # [[label, ...], ...] or None
         self.question_notes = []           # free text typed with the picks
+
+        # Set when this Job was rehydrated after a daemon restart.
+        self.resumed = False
+
+    def to_dict(self) -> dict:
+        """JSON-serializable snapshot for mid-turn resume across restarts."""
+        with self.lock:
+            return {
+                "id": self.id,
+                "session_id": self.session_id,
+                "new_session_id": self.new_session_id,
+                "prompt": self.prompt,
+                "cwd": self.cwd,
+                "status": self.status,
+                "error": self.error,
+                "result_text": self.result_text,
+                "events": list(self.events),
+                "phase": self.phase,
+                "phase_detail": self.phase_detail,
+                "permission_mode": self.permission_mode,
+                "model": self.model,
+                "effort": self.effort,
+                "queued": [dict(q) for q in self.queued],
+                "next_job_id": self.next_job_id,
+                "dropped_queued": self.dropped_queued,
+                "queue_seq": self._queue_seq,
+                "started_at": self.started_at,
+                "tui_name": self.tui_name,
+                "perm_nonce": self.perm_nonce,
+                "perm_seq": self._perm_seq,
+                "q_seq": self._q_seq,
+                # Pending gates: re-published for the client; waiters are gone.
+                "pending_permission": dict(self.pending_permission)
+                if self.pending_permission else None,
+                "pending_question": dict(self.pending_question)
+                if self.pending_question else None,
+            }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Job":
+        job = cls(
+            str(data.get("id") or uuid.uuid4().hex[:12]),
+            str(data.get("session_id") or ""),
+            str(data.get("prompt") or ""),
+            str(data.get("cwd") or ""),
+        )
+        job.new_session_id = str(data.get("new_session_id") or "")
+        job.status = str(data.get("status") or "running")
+        job.error = str(data.get("error") or "")
+        job.result_text = str(data.get("result_text") or "")
+        events = data.get("events")
+        job.events = list(events) if isinstance(events, list) else []
+        job.phase = str(data.get("phase") or "")
+        job.phase_detail = str(data.get("phase_detail") or "")
+        job.permission_mode = str(data.get("permission_mode") or "")
+        job.model = str(data.get("model") or "")
+        job.effort = str(data.get("effort") or "")
+        queued = data.get("queued")
+        job.queued = [dict(q) for q in queued] if isinstance(queued, list) else []
+        job.next_job_id = str(data.get("next_job_id") or "")
+        job.dropped_queued = int(data.get("dropped_queued") or 0)
+        try:
+            job._queue_seq = int(data.get("queue_seq") or 0)
+        except (TypeError, ValueError):
+            job._queue_seq = 0
+        try:
+            job.started_at = float(data.get("started_at") or time.time())
+        except (TypeError, ValueError):
+            job.started_at = time.time()
+        job.tui_name = str(data.get("tui_name") or "")
+        job.perm_nonce = str(data.get("perm_nonce") or uuid.uuid4().hex)
+        try:
+            job._perm_seq = int(data.get("perm_seq") or 0)
+            job._q_seq = int(data.get("q_seq") or 0)
+        except (TypeError, ValueError):
+            pass
+        pp = data.get("pending_permission")
+        job.pending_permission = dict(pp) if isinstance(pp, dict) else None
+        pq = data.get("pending_question")
+        job.pending_question = dict(pq) if isinstance(pq, dict) else None
+        job.resumed = True
+        return job
 
     @staticmethod
     def _clip_mid(text, max_len: int) -> str:
@@ -234,13 +333,19 @@ class Job:
     def resolve_question(self, request_id: str, answers, notes=None) -> bool:
         """Record the phone's picks (or None to cancel) and wake the wait.
         notes carries the free text typed alongside a pick, one per
-        question, for options that accept one."""
+        question, for options that accept one.
+
+        Clears ``pending_question`` immediately so clients stop re-showing
+        the panel while the interactive driver types into the TUI.
+        """
         with self.lock:
             pending = self.pending_question
             if not pending or pending["request_id"] != request_id:
                 return False
             self._q_answers = answers
             self.question_notes = list(notes) if notes else []
+            # Drop the phone-facing gate now — the waiter still has answers.
+            self.pending_question = None
             self._q_event.set()
         return True
 
@@ -270,6 +375,109 @@ class JobManager:
         self.runner = runner
         self.jobs = {}
         self.lock = threading.Lock()
+        self._persist_name = "active-jobs-%s.json" % (
+            getattr(runner, "name", None) or "agent")
+        self._persist_stop = threading.Event()
+        threading.Thread(target=self._persist_loop, daemon=True,
+                         name="job-persist-%s" % self._persist_name).start()
+
+    def _jobs_path(self):
+        return CONFIG_DIR / self._persist_name
+
+    def _persist_loop(self):
+        while not self._persist_stop.wait(_PERSIST_INTERVAL_S):
+            try:
+                self._flush_active()
+            except Exception:  # never kill the flusher
+                log.exception("job persist failed")
+
+    def _flush_active(self):
+        """Write starting/running jobs so a restart can resume them."""
+        with self.lock:
+            active = [j for j in self.jobs.values()
+                      if j.status in ("starting", "running")]
+            rows = [j.to_dict() for j in active]
+        path = self._jobs_path()
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = str(path) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(rows, f)
+            os.replace(tmp, str(path))
+        except OSError as e:
+            log.warning("could not write %s: %s", path, e)
+
+    def resume_jobs(self):
+        """Rehydrate jobs saved before the last daemon exit.
+
+        Interactive mid-turn jobs rebind to adopted tmux TUIs and keep
+        watching. Headless subprocess jobs cannot resume — the CLI died with
+        the old process — so they become error notices the client can see.
+        """
+        path = self._jobs_path()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, list):
+            return
+        resumed = 0
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status") or "")
+            if status not in ("starting", "running"):
+                continue
+            job = Job.from_dict(entry)
+            with self.lock:
+                if job.id in self.jobs:
+                    continue
+                self.jobs[job.id] = job
+            mode = (job.permission_mode or "").strip() or "default"
+            if mode == "interactive":
+                log.info("resuming interactive job %s (session %s)",
+                         job.id, (job.new_session_id or job.session_id)[:8])
+                threading.Thread(
+                    target=self._resume, args=(job,), daemon=True,
+                    name="job-resume-%s" % job.id,
+                ).start()
+                resumed += 1
+            else:
+                with job.lock:
+                    job.status = "error"
+                    job.error = (
+                        "interrupted by daemon restart "
+                        "(headless turn cannot resume mid-flight)"
+                    )
+                job.add_event(
+                    "text",
+                    text=job.error,
+                )
+                job.add_event("result", is_error=True, duration_ms=0, cost_usd=0)
+                log.info("closed headless job %s after restart (not resumable)",
+                         job.id)
+        if resumed:
+            log.info("resuming %d interactive job(s) for %s",
+                     resumed, getattr(self.runner, "name", "?"))
+        # Rewrite file so finished-as-error headless rows drop out.
+        self._flush_active()
+
+    def _resume(self, job: Job):
+        """Continue an interactive job after re-adopt of its TUI."""
+        resume = getattr(self.runner, "resume_alternate", None)
+        try:
+            if resume is None:
+                self._fail_early(
+                    job,
+                    "interrupted by daemon restart (provider cannot resume)",
+                )
+            else:
+                resume(job)
+        except Exception as e:  # noqa: BLE001
+            self._fail_early(job, "resume failed: %s" % e)
+        finally:
+            self._flush_active()
+            self._dispatch_next(job)
 
     def start_job(self, prompt: str, cwd: str, session_id: str = "",
                   permission_mode: str = "", model: str = "", effort: str = "",
@@ -283,6 +491,7 @@ class JobManager:
         with self.lock:
             self.jobs[job.id] = job
             self._prune_locked()
+        self._flush_active()
         thread = threading.Thread(target=self._run, args=(job, permission_mode), daemon=True)
         thread.start()
         return job
@@ -451,6 +660,10 @@ class JobManager:
 
     def _run(self, job: Job, permission_mode: str):
         mode = permission_mode or self.config.permission_mode
+        m = _REWIND_RE.match((job.prompt or "").strip())
+        if m and hasattr(self.runner, "rewind_session"):
+            self._run_rewind(job, int(m.group(1) or 1))
+            return
         # A runner may claim the whole job (claude's "interactive" mode runs
         # in a tmux TUI, not a subprocess). It sets the final status itself.
         alt = getattr(self.runner, "run_alternate", None)
@@ -461,6 +674,7 @@ class JobManager:
                 self._fail_early(job, "interactive run failed: %s" % e)
                 return
             if handled:
+                self._flush_active()
                 self._dispatch_next(job)
                 return
         try:
@@ -496,6 +710,7 @@ class JobManager:
         with job.lock:
             job.proc = proc
             job.status = "running"
+        self._flush_active()
 
         # Drain stderr concurrently: if the CLI fills the 64 KB stderr pipe
         # while we are still reading stdout, both processes deadlock.
@@ -546,6 +761,45 @@ class JobManager:
                 job.status = "error"
                 job.error = job.error or (stderr_tail.strip()
                                           or "%s exited with code %s" % (self.runner.name, code))
+        self._flush_active()
+        self._dispatch_next(job)
+
+    def _run_rewind(self, job: Job, steps: int):
+        """Rewind the session N user messages via the provider's session-file
+        surgery (conversation only — files on disk are not restored). Any
+        live TUI hosting the session is closed first; the next turn resumes
+        the rewound session by id, so this works in both execution modes."""
+        steps = max(1, steps)
+        with job.lock:
+            job.status = "running"
+            job.new_session_id = job.session_id
+        job.add_event("init", session_id=job.session_id, model="rewind")
+        job.add_event("tool", name="/rewind",
+                      detail="%d message%s back" % (steps,
+                                                    "" if steps == 1 else "s"))
+        job.set_phase("tool", "/rewind")
+        try:
+            done, preview = self.runner.rewind_session(job.session_id, steps)
+        except RunnerError as e:
+            self._fail_early(job, str(e))
+            return
+        except Exception as e:  # noqa: BLE001 — surface, never hang the job
+            log.exception("rewind failed")
+            self._fail_early(job, "rewind failed: %s" % e)
+            return
+        msg = "Rewound %d message%s" % (done, "" if done == 1 else "s")
+        if preview:
+            msg += " — dropped from: “%s”" % preview
+        from .render_blocks import markdown_to_blocks
+        job.add_event("text", text=msg, blocks=markdown_to_blocks(msg))
+        with job.lock:
+            if job.status != "stopped":
+                job.result_text = msg
+                job.status = "done"
+        job.add_event("result", is_error=False,
+                      duration_ms=int((time.time() - job.started_at) * 1000),
+                      cost_usd=0)
+        self._flush_active()
         self._dispatch_next(job)
 
     def _fail_early(self, job: Job, message: str):

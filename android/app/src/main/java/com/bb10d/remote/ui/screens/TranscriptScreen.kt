@@ -494,8 +494,8 @@ private fun TranscriptScreenBody(
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        text = "This cannot be undone. On Grok it also reverts file changes " +
-                            "made since then, and anything uncommitted is lost.",
+                        text = "This cannot be undone. Conversation only — file changes " +
+                            "on the host are not reverted.",
                         style = MaterialTheme.typography.bodySmall,
                         color = pal.danger,
                     )
@@ -933,8 +933,8 @@ private fun Composer(
 
 /**
  * What a long press offers. Copy is always here; rewind only appears on your
- * own messages, and only when the daemon and the current execution mode can
- * actually do it — an option that would fail is worse than no option.
+ * own messages, and only when the session's harness advertises it — an
+ * option that would fail is worse than no option.
  */
 @Composable
 private fun MessageActionsSheet(

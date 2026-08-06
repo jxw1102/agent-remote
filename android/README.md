@@ -38,7 +38,9 @@ Profiles                      Unified session list           Transcript
   some options take — are mirrored to the phone and drive the real host TUI.
 - **Everything else the BB10 apps had:** the daemon-side prompt queue,
   stop, `/command` gating, `!shell` escapes fed back as context, attachment
-  upload, host→phone drop downloads, subscription usage, and rewind.
+  upload, host→phone drop downloads, subscription usage, and rewind
+  (long-press one of your messages; daemon ≥ 2.5 rewinds the session
+  journal itself, any harness, any execution mode).
 - **Notifications.** A foreground service keeps the status streams alive while
   turns run, and alerts when one finishes or blocks on you — including turns
   you started from the desktop TUI or another phone.

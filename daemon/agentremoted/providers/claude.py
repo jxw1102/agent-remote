@@ -44,6 +44,7 @@ from pathlib import Path
 
 from ..config import CONFIG_DIR
 from ..render_blocks import inline_to_rich, markdown_to_blocks
+from .. import providers
 from .. import search_util
 
 log = logging.getLogger(__name__)
@@ -1633,6 +1634,88 @@ class ClaudeRunner:
         self._interactive_mgr().run(job)
         return True
 
+    def resume_alternate(self, job) -> None:
+        """Continue an interactive job after daemon restart (tmux TUI adopted)."""
+        self._interactive_mgr().resume(job)
+
+    def rewind_session(self, session_id: str, steps: int):
+        """Cut the session transcript back N human messages (conversation
+        only — files on disk are not restored). Claude Code rebuilds its
+        context from the JSONL on --resume, in -p and TUI modes alike, so
+        truncating the file IS the rewind (verified: a truncated session
+        forgets the dropped turns and keeps its id). Returns
+        (steps_done, preview_of_first_dropped_message)."""
+        sid = (session_id or "").strip()
+        if not sid or not _is_safe_id(sid):
+            raise providers.RunnerError("rewind needs an existing session")
+        path = None
+        projects_dir = self.config.projects_path
+        if projects_dir.is_dir():
+            for entry in projects_dir.iterdir():
+                candidate = entry / (sid + ".jsonl")
+                if entry.is_dir() and candidate.is_file():
+                    path = candidate
+                    break
+        if path is None:
+            raise providers.RunnerError("session transcript not found")
+        # A live TUI holds the pre-cut conversation in memory; close it so
+        # the next interactive turn --resume's the rewound session.
+        self._interactive_mgr().close_for_session(sid)
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        lines = raw.splitlines()
+        records = []
+        for idx, line in enumerate(lines):
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                records.append((idx, obj))
+        # Human prompts on the ACTIVE branch only: a host-side TUI rewind
+        # leaves abandoned turns in the file (the transcript is a parentUuid
+        # tree), and those must not count — the same walk get_messages uses.
+        chain, last_uuid = {}, None
+        for _, obj in records:
+            u = obj.get("uuid")
+            if u and obj.get("type") in ("user", "assistant"):
+                chain[u] = obj.get("parentUuid")
+                last_uuid = u
+        active, broken = set(), False
+        node = last_uuid
+        while node:
+            if node in active:
+                break  # cycle guard
+            active.add(node)
+            parent = chain.get(node)
+            if parent is not None and parent not in chain:
+                broken = True  # link lost — the walk would drop early turns
+                break
+            node = parent
+        human = []
+        for idx, obj in records:
+            if obj.get("type") != "user":
+                continue
+            u = obj.get("uuid")
+            if not broken and active and u and u not in active:
+                continue
+            if _human_user_text(obj):
+                human.append((idx, obj))
+        if not human:
+            raise providers.RunnerError(
+                "nothing to rewind — no user messages yet")
+        steps = max(1, min(int(steps), len(human)))
+        cut_idx, target = human[-steps]
+        backup = path.parent / (path.name + ".rewind-bak")
+        try:
+            backup.write_text(raw, encoding="utf-8")
+        except OSError:
+            pass  # safety net only; the rewind itself still proceeds
+        with open(path, "w", encoding="utf-8") as f:
+            if cut_idx:
+                f.write("\n".join(lines[:cut_idx]) + "\n")
+        preview = " ".join(_human_user_text(target).split())[:120]
+        return steps, preview
+
     def type_into_tui(self, session_id: str, text: str) -> str:
         """Type a message into a session's live interactive TUI ("" or err)."""
         return self._interactive_mgr().type_text(session_id, text)
@@ -1666,8 +1749,9 @@ class ClaudeRunner:
             "interactive": True,
             # Live TUI: clients can capture the pane and send keys.
             "live_tui": True,
-            # "/rewind N" (N user messages back) is driven in that TUI. Not a
-            # grok capability: its /rewind takes a prompt, not a count.
+            # "/rewind N": the daemon cuts the session transcript back N
+            # user messages (conversation only) and the next turn resumes
+            # from there. Session-file surgery — works in BOTH exec modes.
             "rewind": True,
         }
 
@@ -1708,6 +1792,8 @@ class ClaudeRunner:
     # /clear is deliberately absent: wiping the conversation from a phone
     # is a footgun, and the daemon is the only whitelist now — clients
     # ban anything not advertised here.
+    # /rewind is served by the DAEMON (session-file surgery in jobs.py), so
+    # unlike the TUI built-ins it also works on headless turns.
     _BUILTIN_SLASH = ["/compact", "/exit", "/rewind"]
 
     def slash_commands(self) -> list:

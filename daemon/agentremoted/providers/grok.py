@@ -30,8 +30,10 @@ import os
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
+from .. import providers
 from ..render_blocks import (
     COLOR_META,
     COLOR_META_THOUGHT,
@@ -860,6 +862,116 @@ class GrokRunner:
         self._interactive_mgr().run(job)
         return True
 
+    def resume_alternate(self, job) -> None:
+        """Continue an interactive job after daemon restart (tmux TUI adopted)."""
+        self._interactive_mgr().resume(job)
+
+    def rewind_session(self, session_id: str, steps: int):
+        """Cut the session back N human prompts (conversation only — files
+        on disk are not restored).
+
+        grok's working context is chat_history.jsonl (typed entries; every
+        human prompt is a `user` entry wrapping `<user_query>` and stamped
+        with grok's own prompt_index), rebuilt on --resume — so truncating
+        that file IS the rewind (verified: a resumed session forgets the
+        dropped turns). updates.jsonl is only the UI journal: a matching
+        rewind_marker is appended there so the phone's transcript drops the
+        same turns, exactly like grok's own TUI /rewind does. Returns
+        (steps_done, preview_of_first_dropped_prompt)."""
+        sid = (session_id or "").strip()
+        sdir = self.store.find_session_dir(sid) if sid else None
+        history = (sdir / "chat_history.jsonl") if sdir is not None else None
+        if history is None or not history.is_file():
+            raise providers.RunnerError("session history not found")
+        # A live TUI holds the pre-cut conversation in memory; close it so
+        # the next interactive turn --resume's the rewound session.
+        self._interactive_mgr().close_for_session(sid)
+        raw = history.read_text(encoding="utf-8", errors="replace")
+        lines = raw.splitlines()
+
+        def entry_text(content):
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return " ".join(b.get("text", "") for b in content
+                                if isinstance(b, dict))
+            return ""
+
+        queries = []  # (line_idx, prompt_index, human_text)
+        for i, line in enumerate(lines):
+            ev = _safe_json(line)
+            if not isinstance(ev, dict) or ev.get("type") != "user":
+                continue
+            text = entry_text(ev.get("content"))
+            m = re.search(r"<user_query>\s*(.*?)\s*</user_query>", text, re.S)
+            if m:
+                queries.append((i, ev.get("prompt_index"), m.group(1)))
+            elif _human_text(text):
+                # Unwrapped human prompt (older grok) — same treatment.
+                queries.append((i, ev.get("prompt_index"), _human_text(text)))
+        if not queries:
+            raise providers.RunnerError(
+                "nothing to rewind — no user messages yet")
+        steps = max(1, min(int(steps), len(queries)))
+        cut_idx, target_prompt, preview_text = queries[-steps]
+        backup = history.parent / (history.name + ".rewind-bak")
+        try:
+            backup.write_text(raw, encoding="utf-8")
+        except OSError:
+            pass  # safety net only; the rewind itself still proceeds
+        with open(history, "w", encoding="utf-8") as f:
+            if cut_idx:
+                f.write("\n".join(lines[:cut_idx]) + "\n")
+        # Tell the transcript the same story. grok numbers prompts with the
+        # post-rewind counter, which is exactly the phone parser's effective
+        # index, so the entry's own prompt_index is the right target.
+        updates = sdir / "updates.jsonl"
+        last_seq = -1
+        try:
+            with open(updates, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    ev = _safe_json(line)
+                    if not ev:
+                        continue
+                    eid = str(((ev.get("params") or {}).get("_meta") or {})
+                              .get("eventId") or "")
+                    if eid.startswith(sid + "-"):
+                        try:
+                            last_seq = max(last_seq,
+                                           int(eid.rsplit("-", 1)[1]))
+                        except ValueError:
+                            pass
+        except OSError:
+            pass
+        try:
+            idx = int(target_prompt)
+        except (TypeError, ValueError):
+            idx = max(0, len(queries) - steps)
+        now = time.time()
+        marker = {
+            "timestamp": int(now),
+            "method": "_x.ai/session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "rewind_marker",
+                    "target_prompt_index": idx,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+                "_meta": {
+                    "eventId": "%s-%d" % (sid, last_seq + 1),
+                    "agentTimestampMs": int(now * 1000),
+                },
+            },
+        }
+        try:
+            with open(updates, "a", encoding="utf-8") as f:
+                f.write(json.dumps(marker, ensure_ascii=False) + "\n")
+        except OSError as e:
+            log.warning("could not append rewind_marker: %s", e)
+        preview = " ".join(preview_text.split())[:120]
+        return steps, preview
+
     def type_into_tui(self, session_id: str, text: str) -> str:
         """Type a message into a session's live interactive TUI ("" or err)."""
         return self._interactive_mgr().type_text(session_id, text)
@@ -896,10 +1008,9 @@ class GrokRunner:
             # "interactive" permission mode: turns run in a host tmux TUI.
             "interactive": True,
             "live_tui": tmux_available(),
-            # "/rewind N" is driven in that TUI: grok's picker lists one point
-            # per prompt, newest first, so N back == the Nth row. Conversation
-            # only — reverting files is grok's default but the changes are
-            # unrecoverable unless committed.
+            # "/rewind N": the daemon appends grok's own rewind_marker to
+            # the session journal (conversation only) and the next turn
+            # resumes from there. Works in BOTH exec modes.
             "rewind": True,
         }
 
@@ -928,7 +1039,8 @@ class GrokRunner:
         return out
 
     # Interactive built-ins verified in grok's own TUI: /compact exists,
-    # /exit closes it, /rewind opens the checkpoint picker.
+    # /exit closes it. /rewind is served by the DAEMON (marker append in
+    # jobs.py), so unlike the others it also works on headless turns.
     _BUILTIN_SLASH = ["/compact", "/exit", "/rewind"]
 
     def slash_commands(self) -> list:

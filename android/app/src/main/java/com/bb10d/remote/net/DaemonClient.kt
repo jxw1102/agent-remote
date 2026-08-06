@@ -75,6 +75,9 @@ class DaemonClient(
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         private val OCTET_MEDIA = "application/octet-stream".toMediaType()
 
+        /** Multi-MB uploads over cellular / CF need a long *write* budget. */
+        private const val UPLOAD_TIMEOUT_SEC = 180
+
         /**
          * Accept what a person types: "10.0.0.5", "10.0.0.5:8473",
          * "http://host:2095/", "https://nerd.example.com".
@@ -106,9 +109,30 @@ class DaemonClient(
         Request.Builder().url(url).header("X-Auth-Token", token)
             .header("Accept", "application/json")
 
-    private fun clientFor(timeoutSeconds: Int): OkHttpClient =
-        if (timeoutSeconds <= 0) http
-        else http.newBuilder().readTimeout(timeoutSeconds.toLong(), TimeUnit.SECONDS).build()
+    /**
+     * Per-call timeouts. Upload paths must raise **write** as well as read —
+     * the shared client defaults to 30s write, which aborts multi-MB posts on
+     * cellular and surfaces as daemon "empty upload" / "truncated".
+     */
+    private fun clientFor(
+        readTimeoutSeconds: Int = 0,
+        writeTimeoutSeconds: Int = -1,
+    ): OkHttpClient {
+        val writeSec = when {
+            writeTimeoutSeconds >= 0 -> writeTimeoutSeconds
+            readTimeoutSeconds > 0 -> readTimeoutSeconds
+            else -> -1
+        }
+        if (readTimeoutSeconds <= 0 && writeSec < 0) return http
+        val b = http.newBuilder()
+        if (readTimeoutSeconds > 0) {
+            b.readTimeout(readTimeoutSeconds.toLong(), TimeUnit.SECONDS)
+        }
+        if (writeSec > 0) {
+            b.writeTimeout(writeSec.toLong(), TimeUnit.SECONDS)
+        }
+        return b.build()
+    }
 
     private suspend fun <T> call(
         req: Request,
@@ -126,12 +150,20 @@ class DaemonClient(
         }
     }
 
-    private suspend fun raw(req: Request, timeoutSeconds: Int = 0): ByteArray =
+    private suspend fun raw(
+        req: Request,
+        timeoutSeconds: Int = 0,
+        writeTimeoutSeconds: Int = -1,
+    ): ByteArray =
         withContext(Dispatchers.IO) {
             val response: Response = try {
-                clientFor(timeoutSeconds).newCall(req).execute()
+                clientFor(timeoutSeconds, writeTimeoutSeconds).newCall(req).execute()
             } catch (e: SocketTimeoutException) {
-                throw DaemonException(0, "The daemon did not answer in time", transport = true)
+                throw DaemonException(
+                    0,
+                    "Upload timed out — try again on a stronger network, or a smaller file",
+                    transport = true,
+                )
             } catch (e: IOException) {
                 throw DaemonException(
                     0,
@@ -450,17 +482,47 @@ class DaemonClient(
      * POST raw bytes to /api/attachments?name=… → host path for the prompt.
      * Parses path defensively (same idea as [parseJobId]) so R8/extra fields
      * cannot leave the composer without an `[attached: …]` marker.
+     *
+     * Always sets a fixed [Content-Length] body (no chunked encoding) so the
+     * daemon never sees "empty upload", and uses a long write timeout for
+     * multi-MB photos over cellular. One automatic retry on transport errors.
      */
     suspend fun uploadAttachment(name: String, bytes: ByteArray): AttachmentDto {
         val safe = name.ifBlank { "file" }
-        val body = raw(
-            request(url("api/attachments", mapOf("name" to safe)))
-                .post(bytes.toRequestBody(OCTET_MEDIA))
-                .header("Content-Type", "application/octet-stream")
-                .build(),
-            timeoutSeconds = 120,
-        )
-        return parseAttachment(body)
+        require(bytes.isNotEmpty()) { "empty file" }
+        // Fixed-length body: Content-Length = size. Chunked uploads hit the
+        // daemon as length 0 ("empty upload") behind some proxies.
+        val body = object : RequestBody() {
+            override fun contentType() = OCTET_MEDIA
+            override fun contentLength() = bytes.size.toLong()
+            override fun writeTo(sink: okio.BufferedSink) {
+                sink.write(bytes)
+            }
+        }
+        val req = request(url("api/attachments", mapOf("name" to safe)))
+            .post(body)
+            .header("Content-Type", "application/octet-stream")
+            .header("Content-Length", bytes.size.toString())
+            .build()
+        var last: Exception? = null
+        repeat(2) { attempt ->
+            try {
+                val raw = raw(
+                    req,
+                    timeoutSeconds = UPLOAD_TIMEOUT_SEC,
+                    writeTimeoutSeconds = UPLOAD_TIMEOUT_SEC,
+                )
+                return parseAttachment(raw)
+            } catch (e: DaemonException) {
+                last = e
+                // Retry only transport / timeout; 4xx means the daemon understood.
+                if (!e.transport || attempt == 1) throw e
+            } catch (e: Exception) {
+                last = e
+                if (attempt == 1) throw e
+            }
+        }
+        throw last ?: DaemonException(0, "Upload failed", transport = true)
     }
 
     private fun parseAttachment(body: ByteArray): AttachmentDto {

@@ -59,6 +59,9 @@ class JobWatcher(
     private var loop: Job? = null
     private var since = 0
     private var failures = 0
+    /** request_ids the user already answered/cancelled — ignore lagging polls. */
+    private val dismissedQuestionIds = mutableSetOf<String>()
+    private val dismissedPermissionIds = mutableSetOf<String>()
 
     fun markStarting() {
         _state.value = _state.value.copy(starting = true, error = "", droppedQueued = 0)
@@ -74,6 +77,8 @@ class JobWatcher(
         loop?.cancel()
         since = 0
         failures = 0
+        dismissedQuestionIds.clear()
+        dismissedPermissionIds.clear()
         _state.value = JobState(
             jobId = jobId,
             sessionId = sessionId,
@@ -86,7 +91,24 @@ class JobWatcher(
     fun detach() {
         loop?.cancel()
         loop = null
+        dismissedQuestionIds.clear()
+        dismissedPermissionIds.clear()
         _state.value = JobState()
+    }
+
+    /** After the user answers/cancels a question, drop the sheet immediately. */
+    fun clearPendingQuestion() {
+        _state.value.pendingQuestion?.requestId?.takeIf { it.isNotBlank() }
+            ?.let { dismissedQuestionIds += it }
+        if (_state.value.pendingQuestion == null) return
+        _state.value = _state.value.copy(pendingQuestion = null)
+    }
+
+    fun clearPendingPermission() {
+        _state.value.pendingPermission?.requestId?.takeIf { it.isNotBlank() }
+            ?.let { dismissedPermissionIds += it }
+        if (_state.value.pendingPermission == null) return
+        _state.value = _state.value.copy(pendingPermission = null)
     }
 
     private suspend fun run(initialJobId: String) {
@@ -192,13 +214,19 @@ class JobWatcher(
             _state.value = _state.value.copy(sessionId = fork)
             sessionIdChanged.emit(fork)
         }
+        val pendingQ = snapshot.pendingQuestion?.let { q ->
+            if (q.requestId.isNotBlank() && q.requestId in dismissedQuestionIds) null else q
+        }
+        val pendingP = snapshot.pendingPermission?.let { p ->
+            if (p.requestId.isNotBlank() && p.requestId in dismissedPermissionIds) null else p
+        }
         _state.value = _state.value.copy(
             status = snapshot.status,
             error = snapshot.error.ifBlank { _state.value.error },
             queued = snapshot.queued,
             droppedQueued = snapshot.droppedQueued,
-            pendingPermission = snapshot.pendingPermission,
-            pendingQuestion = snapshot.pendingQuestion,
+            pendingPermission = pendingP,
+            pendingQuestion = pendingQ,
             starting = false,
         )
     }
