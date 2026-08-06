@@ -72,8 +72,8 @@ Sheet {
             verticalAlignment: VerticalAlignment.Fill
             layout: StackLayout {}
 
-            // Soft keys — one compact row; symbols only (same Button chrome).
-            // Esc=⎋ Tab=⇥ Enter=↵  (BMP symbols that Cascades draws fine)
+            // Soft keys — one compact row (same Button chrome).
+            // Esc as ASCII: ⎋ is missing from BB system fonts and shows as tofu.
             Container {
                 horizontalAlignment: HorizontalAlignment.Fill
                 leftPadding: 4
@@ -85,7 +85,7 @@ Sheet {
                 }
 
                 Button {
-                    text: "\u238B"   // ⎋ Escape
+                    text: "Esc"
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
                     preferredHeight: 48
                     minHeight: 48

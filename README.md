@@ -16,6 +16,11 @@ starting a session.
 | Web (single HTML file) | `web/` |
 | Android | `android/` |
 
+**Releases** (APK, BAR, single-file web HTML, and a packaged daemon tarball) are
+published on GitHub when the daemon version changes — see
+[github.com/jxw1102/agent-remote/releases](https://github.com/jxw1102/agent-remote/releases).
+The release tag matches `agentremoted`’s `__version__` (for example `v2.4.5`).
+
 ```
 [Agent Remote client: BB10 / Android / web]
         ↕  HTTP + JSON  (X-Auth-Token; SSE and/or WebSocket for live status)

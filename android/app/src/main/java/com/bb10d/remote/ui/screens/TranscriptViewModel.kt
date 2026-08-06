@@ -15,6 +15,7 @@ import com.bb10d.remote.data.SessionRef
 import com.bb10d.remote.data.Time
 import com.bb10d.remote.net.DaemonClient
 import com.bb10d.remote.net.DaemonException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -795,20 +796,65 @@ class TranscriptViewModel(
         send("/rewind $back")
     }
 
-    fun attachUpload(name: String, bytes: ByteArray, onPath: (String) -> Unit) {
-        val c = client ?: return
-        setStatus("Uploading $name…", sticky = false)
+    /**
+     * Composer draft lives here (not in Compose remember) so attachment
+     * inserts survive the document-picker Activity Result lifecycle.
+     * Local `remember { mutableStateOf }` was losing the `[attached: …]` splice.
+     */
+    private val _composerText = MutableStateFlow("")
+    val composerText: StateFlow<String> = _composerText.asStateFlow()
+
+    fun updateComposer(text: String) {
+        _composerText.value = text
+    }
+
+    fun clearComposer() {
+        _composerText.value = ""
+    }
+
+    private fun appendAttachedMarker(path: String) {
+        val marker = "[attached: $path]"
+        val cur = _composerText.value
+        _composerText.value = when {
+            cur.isBlank() -> marker
+            cur.endsWith(' ') || cur.endsWith('\n') -> cur + marker
+            else -> cur.trimEnd() + " " + marker
+        }
+    }
+
+    fun attachUpload(name: String, bytes: ByteArray) {
+        val c = client ?: run {
+            setStatus("Not connected to a daemon")
+            return
+        }
+        if (bytes.isEmpty()) {
+            setStatus("Empty file")
+            return
+        }
+        val safeName = name.ifBlank { "file" }
+        setStatus("Uploading $safeName…", sticky = false)
         viewModelScope.launch {
-            runCatching { c.uploadAttachment(name, bytes) }
-                .onSuccess {
-                    setStatus("")
-                    onPath(it.path)
+            try {
+                val dto = c.uploadAttachment(safeName, bytes)
+                val path = dto.path.trim()
+                if (path.isEmpty()) {
+                    setStatus("Upload ok but daemon returned no path")
+                    return@launch
                 }
-                .onFailure { setStatus(repo.reason(it)) }
+                appendAttachedMarker(path)
+                setStatus("Attached $safeName", sticky = false)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                setStatus(repo.reason(e))
+            }
         }
     }
 
     fun clearStatus() = setStatus("")
+
+    /** Surface a short note under the composer (e.g. file-picker read errors). */
+    fun note(text: String, sticky: Boolean = true) = setStatus(text, sticky = sticky)
 
     // -- per-profile turn settings (shared by every session on that daemon) --
 

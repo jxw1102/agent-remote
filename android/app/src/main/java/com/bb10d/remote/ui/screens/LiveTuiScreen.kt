@@ -1,7 +1,11 @@
 package com.bb10d.remote.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -15,6 +19,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -26,7 +31,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -38,9 +42,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bb10d.remote.data.AgentRepository
@@ -151,36 +157,31 @@ fun LiveTuiScreen(
                 .imePadding()
                 .navigationBarsPadding(),
         ) {
-            // One compact row — symbols match BB10 Live TUI (⎋ ⇥ ↑ ↓ ← → ^C ↵).
+            // Soft keys as real chrome buttons (surface + border) so they stay
+            // readable on the near-black TUI pane — flat TextButtons vanish in dark.
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 listOf(
-                    "\u238B" to listOf("Escape"),  // ⎋ Esc
-                    "\u21E5" to listOf("Tab"),     // ⇥ Tab
-                    "\u2191" to listOf("Up"),      // ↑
-                    "\u2193" to listOf("Down"),    // ↓
-                    "\u2190" to listOf("Left"),    // ←
-                    "\u2192" to listOf("Right"),   // →
+                    "Esc" to listOf("Escape"),
+                    "Tab" to listOf("Tab"),
+                    "\u2191" to listOf("Up"),
+                    "\u2193" to listOf("Down"),
+                    "\u2190" to listOf("Left"),
+                    "\u2192" to listOf("Right"),
                     "^C" to listOf("Ctrl+C"),
-                    "\u21B5" to listOf("Enter"),   // ↵ Enter
+                    "\u21B5" to listOf("Enter"),
                 ).forEach { (label, keys) ->
-                    TextButton(
+                    LiveTuiKeyButton(
+                        label = label,
                         onClick = { sendKeys(keys) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .defaultMinSize(minWidth = 1.dp, minHeight = 40.dp),
-                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-                    ) {
-                        Text(
-                            text = label,
-                            fontSize = 15.sp,
-                            maxLines = 1,
-                        )
-                    }
+                        modifier = Modifier.weight(1f),
+                    )
                 }
             }
             // Coloured SGR from daemon tmux capture-pane -e.
@@ -209,6 +210,7 @@ fun LiveTuiScreen(
             Row(
                 Modifier
                     .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surface)
                     .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -233,5 +235,36 @@ fun LiveTuiScreen(
                 ) { Text("Send") }
             }
         }
+    }
+}
+
+/** Compact mono keycap for the Live TUI toolbar. */
+@Composable
+private fun LiveTuiKeyButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val pal = palette
+    val shape = RoundedCornerShape(8.dp)
+    Box(
+        modifier = modifier
+            .defaultMinSize(minHeight = 40.dp)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .border(1.dp, pal.hairline, shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            textAlign = TextAlign.Center,
+        )
     }
 }

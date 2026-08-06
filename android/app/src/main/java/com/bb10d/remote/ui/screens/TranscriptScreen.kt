@@ -156,7 +156,9 @@ private fun TranscriptScreenBody(
     val clipboard = rememberClip()
     val context = LocalContext.current
 
-    var composerText by remember { mutableStateOf("") }
+    // Composer draft is owned by the ViewModel so attachment inserts survive
+    // the system file picker (local remember state was dropped on return).
+    val composerText by vm.composerText.collectAsStateWithLifecycle()
     var menuOpen by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showOptions by remember { mutableStateOf(false) }
@@ -174,13 +176,12 @@ private fun TranscriptScreenBody(
             val bytes = runCatching {
                 context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
             }.getOrNull()
-            if (bytes == null) return@launch
-            // Same marker the BB10 / web clients insert so the agent (and
-            // host-side tooling) can spot uploaded paths in the prompt.
-            vm.attachUpload(name, bytes) { path ->
-                val sep = if (composerText.isBlank()) "" else " "
-                composerText = composerText.trimEnd() + sep + "[attached: $path]"
+            if (bytes == null) {
+                vm.note("Could not read that file")
+                return@launch
             }
+            // ViewModel uploads and splices [attached: path] into composerText.
+            vm.attachUpload(name, bytes)
         }
     }
 
@@ -409,14 +410,14 @@ private fun TranscriptScreenBody(
 
             Composer(
                 text = composerText,
-                onText = { composerText = it },
+                onText = vm::updateComposer,
                 running = jobState.running,
                 interactive = profile?.effectiveExecMode() == ExecMode.INTERACTIVE,
                 accent = accent.tint,
                 onAccent = accent.onTint,
                 onSend = {
                     val text = composerText
-                    composerText = ""
+                    vm.clearComposer()
                     vm.send(text)
                 },
                 onStop = vm::stop,
@@ -823,10 +824,17 @@ private fun Composer(
                     .weight(1f)
                     .heightIn(max = 160.dp),
             )
-            if (running) {
-                IconButton(onClick = onStop) {
-                    Icon(Icons.Outlined.Stop, contentDescription = "Stop", tint = pal.danger)
-                }
+            // Always reserve the Stop slot so Send never slides when a turn
+            // starts — same mis-click class as web Live TUI vs Stop.
+            IconButton(
+                onClick = onStop,
+                enabled = running,
+            ) {
+                Icon(
+                    Icons.Outlined.Stop,
+                    contentDescription = "Stop",
+                    tint = if (running) pal.danger else Color.Transparent,
+                )
             }
             IconButton(
                 onClick = onSend,

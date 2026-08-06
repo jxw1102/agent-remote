@@ -717,6 +717,79 @@ const effortsOf = (profile, harness = null) => {
   return (profile && profile.efforts) || [];
 };
 
+// ----------------------------------------------------------- onboarding
+
+const DAEMON_REPO = "https://github.com/jxw1102/agent-remote";
+
+/**
+ * First-run / empty-list guide: clients need a running agentremoted.
+ * @param {{ compact?: boolean }} opts
+ */
+function buildDaemonGuide(opts = {}) {
+  const empty = el("div", opts.compact ? "empty guide" : "empty welcome");
+  if (!opts.compact) {
+    const logo = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    logo.setAttribute("class", "empty-logo");
+    logo.setAttribute("viewBox", "0 0 108 108");
+    logo.setAttribute("aria-hidden", "true");
+    logo.innerHTML = '<path d="M34 40 L48 54 L34 68" stroke="#d97757" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M56 68 L76 68" stroke="#00d4ff" stroke-width="7" stroke-linecap="round"/>';
+    empty.appendChild(logo);
+  }
+  empty.appendChild(el("h2", null, "Connect a daemon to start"));
+  const lead = el("p");
+  lead.innerHTML = "This page is only a <strong>client</strong>. Install "
+    + "<strong>agentremoted</strong> next to Claude Code, Grok, or Codex on "
+    + "your Mac or a server, then add it here with its URL and token.";
+  empty.appendChild(lead);
+  const steps = document.createElement("ol");
+  steps.className = "welcome-steps";
+  [
+    "Clone or download the daemon from the project repo.",
+    "Run it (<code>cd daemon && PYTHONPATH=. python3 -m agentremoted</code> or the launchd/systemd install).",
+    "Copy the token from <code>~/.agentremoted/token</code> and add a profile.",
+  ].forEach((html) => {
+    const li = document.createElement("li");
+    li.innerHTML = html;
+    steps.appendChild(li);
+  });
+  empty.appendChild(steps);
+  const actions = el("div", "welcome-actions");
+  const add = el("button", "primary", "Add a daemon");
+  add.type = "button";
+  add.addEventListener("click", openProfiles);
+  actions.appendChild(add);
+  const link = document.createElement("a");
+  link.className = "welcome-link";
+  link.href = DAEMON_REPO;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "Get the daemon →";
+  actions.appendChild(link);
+  empty.appendChild(actions);
+  const hint = el("p", "welcome-hint");
+  hint.innerHTML = "Source &amp; releases: "
+    + `<a href="${DAEMON_REPO}" target="_blank" rel="noopener noreferrer">github.com/jxw1102/agent-remote</a>`;
+  empty.appendChild(hint);
+  return empty;
+}
+
+function showWelcomeIfNeeded() {
+  const tr = $("transcript");
+  if (!tr) return;
+  // Only replace the idle welcome; never clobber an open session view.
+  if (state.open) return;
+  tr.innerHTML = "";
+  if (!state.profiles.length) {
+    tr.appendChild(buildDaemonGuide());
+  } else {
+    const empty = el("div", "empty");
+    empty.appendChild(el("h2", null, "Pick a session"));
+    empty.appendChild(el("p", null,
+      "Every daemon you add shows up in one list on the left — Claude, Grok, and Codex side by side."));
+    tr.appendChild(empty);
+  }
+}
+
 // ----------------------------------------------------------- session list
 
 async function refreshSessions() {
@@ -848,15 +921,7 @@ function renderSessions() {
   const blocked = blockedKeys();
 
   if (!state.profiles.length) {
-    const empty = el("div", "empty");
-    empty.appendChild(el("h2", null, "No daemons yet"));
-    empty.appendChild(el("p", null,
-      "Add a daemon and its token. Claude on your Mac, Grok on your server — both land in this one list."));
-    const b = el("button", "primary", "Add a daemon");
-    b.type = "button";
-    b.addEventListener("click", openProfiles);
-    empty.appendChild(b);
-    host.appendChild(empty);
+    host.appendChild(buildDaemonGuide({ compact: true }));
     return;
   }
   if (!rows.length && !state.loading) {
@@ -1016,21 +1081,29 @@ function profileSupportsLiveTui(profile, harness) {
     || !!capOf(profile, "interactive", false, harness);
 }
 
+function setIconIdle(btn, idle) {
+  if (!btn) return;
+  btn.classList.toggle("icon-idle", !!idle);
+  btn.setAttribute("aria-hidden", idle ? "true" : "false");
+  btn.tabIndex = idle ? -1 : 0;
+}
+
 function updateLiveTuiButton() {
   const btn = $("btn-live-tui");
   if (!btn) return;
   const open = state.open;
   if (!open || !open.sessionId) {
-    btn.classList.add("hidden");
+    setIconIdle(btn, true);
     return;
   }
   const profile = profileById(open.profileId);
   const harness = sessionProvider(open.session, profile);
   if (!profileSupportsLiveTui(profile, harness)) {
-    btn.classList.add("hidden");
+    setIconIdle(btn, true);
     return;
   }
-  btn.classList.remove("hidden");
+  // Always keep the slot; only the idle flag changes — never display:none.
+  setIconIdle(btn, false);
   btn.setAttribute("aria-pressed", state.liveTui ? "true" : "false");
   btn.title = state.liveTui
     ? "Back to transcript"
@@ -1503,7 +1576,7 @@ function attachJob(jobId) {
   // Allow an immediate status blip for the new turn (global gap timer).
   chimeLastStatusMs = 0;
   renderBanner();
-  $("btn-stop").classList.remove("hidden");
+  setIconIdle($("btn-stop"), false);
   state.jobTimer = setInterval(pollJob, 250);
   pollJob();
 }
@@ -1513,7 +1586,8 @@ function stopJobWatch() {
   state.jobTimer = null;
   state.job = null;
   state.jobLastFetch = 0;
-  $("btn-stop").classList.add("hidden");
+  // Keep the 34×34 slot so Live TUI (right of Stop) never shifts.
+  setIconIdle($("btn-stop"), true);
   renderBanner();
 }
 
@@ -1871,6 +1945,7 @@ function editProfile(index) {
           syncStreams();
           refreshSessions();
           renderFilters();
+          showWelcomeIfNeeded();
           openProfiles();
         },
       }] : []),
@@ -1922,6 +1997,7 @@ function editProfile(index) {
           syncStreams();
           renderFilters();
           refreshSessions();
+          showWelcomeIfNeeded();
           paintProfilesModal();
         },
       },
@@ -2943,12 +3019,20 @@ async function boot() {
 
   if (!state.profiles.length) await offerOwnOrigin();
 
+  showWelcomeIfNeeded();
+  $("btn-welcome-add")?.addEventListener("click", openProfiles);
+
   await Promise.all(state.profiles.map(pingProfile));
   renderFilters();
   syncStreams();
   await refreshSessions();
 
-  if (!state.profiles.length || state.profiles.every((p) => !p.token)) openProfiles();
+  // Guide first: open the daemon form when nothing is configured yet.
+  // Don't force the modal if they only need the on-page walkthrough.
+  if (state.profiles.length && state.profiles.every((p) => !p.token)) {
+    openProfiles();
+  }
+  showWelcomeIfNeeded();
 }
 
 /**

@@ -84,6 +84,8 @@ android {
  */
 val publicApk = tasks.register<Copy>("copyApkToPublic") {
     description = "Copies the release APK to ~/Public for sideloading."
+    // Skip on CI / hosts without ~/Public (GitHub Actions release workflow).
+    onlyIf { File(System.getProperty("user.home"), "Public").isDirectory }
     from(layout.buildDirectory.dir("outputs/apk/release")) {
         include("app-release.apk")
         rename { "AgentRemote.apk" }

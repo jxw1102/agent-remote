@@ -446,12 +446,44 @@ class DaemonClient(
 
     // -- files -------------------------------------------------------------
 
-    suspend fun uploadAttachment(name: String, bytes: ByteArray): AttachmentDto = call(
-        request(url("api/attachments", mapOf("name" to name)))
-            .post(bytes.toRequestBody(OCTET_MEDIA)).build(),
-        AttachmentDto.serializer(),
-        timeoutSeconds = 120,
-    )
+    /**
+     * POST raw bytes to /api/attachments?name=… → host path for the prompt.
+     * Parses path defensively (same idea as [parseJobId]) so R8/extra fields
+     * cannot leave the composer without an `[attached: …]` marker.
+     */
+    suspend fun uploadAttachment(name: String, bytes: ByteArray): AttachmentDto {
+        val safe = name.ifBlank { "file" }
+        val body = raw(
+            request(url("api/attachments", mapOf("name" to safe)))
+                .post(bytes.toRequestBody(OCTET_MEDIA))
+                .header("Content-Type", "application/octet-stream")
+                .build(),
+            timeoutSeconds = 120,
+        )
+        return parseAttachment(body)
+    }
+
+    private fun parseAttachment(body: ByteArray): AttachmentDto {
+        val text = body.decodeToString()
+        val obj = runCatching {
+            Json.parseToJsonElement(text) as? JsonObject
+        }.getOrNull()
+        if (obj != null) {
+            val path = primitiveString(obj["path"]).orEmpty()
+            if (path.isNotBlank()) {
+                val size = (obj["size"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L
+                val ok = (obj["ok"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: true
+                return AttachmentDto(ok = ok, path = path, size = size)
+            }
+            val err = primitiveString(obj["error"])
+            if (!err.isNullOrBlank()) throw DaemonException(0, err)
+        }
+        val typed = runCatching {
+            Json.decodeFromString(AttachmentDto.serializer(), text)
+        }.getOrNull()
+        if (typed != null && typed.path.isNotBlank()) return typed
+        throw DaemonException(0, unreadMessage(text))
+    }
 
     suspend fun dropList(): DropListDto =
         call(request(url("api/drop")).get().build(), DropListDto.serializer())

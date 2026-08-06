@@ -347,7 +347,7 @@ button.tag.session-id-tag:hover {
   padding: 6px 8px;
 }
 .chat-actions { display: flex; gap: 6px; flex: none; align-items: center; }
-/* Square icon controls in the chat header (options / refresh / stop). */
+/* Square icon controls in the chat header (options / refresh / stop / Live TUI). */
 button.icon-btn {
   display: inline-flex;
   align-items: center;
@@ -375,6 +375,12 @@ button.icon-btn.danger:hover:not(:disabled) {
   color: var(--danger);
   border-color: var(--danger);
   background: rgba(229, 112, 107, 0.12);
+}
+/* Keep the hit target reserved; do not use .hidden (display:none) here —
+   that reflows siblings and causes mis-clicks (Stop stealing Live TUI). */
+button.icon-btn.icon-idle {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .banner {
@@ -476,6 +482,51 @@ button.icon-btn.danger:hover:not(:disabled) {
 }
 .empty-logo { width: 54px; height: 54px; opacity: 0.7; }
 .empty h2 { color: var(--text); font-size: 17px; margin: 14px 0 6px; }
+.empty p { margin: 0 0 10px; line-height: 1.45; }
+.empty strong { color: var(--text); font-weight: 600; }
+.empty code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--surface-3);
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--text);
+}
+.welcome { max-width: 460px; padding: 0 16px; }
+.welcome-steps {
+  text-align: left;
+  margin: 14px auto 18px;
+  padding: 0 0 0 1.25em;
+  color: var(--dim);
+  line-height: 1.55;
+  max-width: 360px;
+}
+.welcome-steps li { margin: 6px 0; }
+.welcome-steps strong { color: var(--text); }
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  align-items: center;
+  margin: 12px 0 8px;
+}
+.welcome-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.welcome-link:hover { text-decoration: underline; }
+.welcome-hint {
+  margin-top: 16px !important;
+  font-size: 12px;
+}
+.welcome-hint a { color: var(--dim); }
+.welcome-hint a:hover { color: var(--accent); }
+/* Session-list empty (no daemons) — same guide, slightly tighter. */
+.empty.guide { max-width: 440px; padding: 24px 16px; }
+.empty.guide .welcome-actions { margin-top: 16px; }
 
 /* -------------------------------------------------------------- markdown */
 
