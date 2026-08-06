@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<!--
+	agentremoted's own default config speaks plain HTTP and relies on the shared token + "a
+	trusted LAN" instead of transport encryption (see daemon/agentremoted/config.py's own comment
+	on the "bind"/tls_cert defaults) — that's a real, documented deployment shape, not just this
+	app's server. NSAllowsLocalNetworking permits plain HTTP to local/private IP ranges only (not
+	arbitrary internet hosts) so that setup keeps working without a blanket ATS exception.
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Agent Remote needs local network access to reach an agentremoted daemon running on your LAN.</string>
+</dict>
+</plist>

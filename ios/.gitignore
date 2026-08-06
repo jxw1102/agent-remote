@@ -1,0 +1,19 @@
+# XcodeGen-generated project (regenerate from project.yml) and command-line build output
+AgentRemote.xcodeproj/
+build/
+build-device/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+xcuserdata/
+DerivedData/
+*.xcuserstate
+
+# macOS
+.DS_Store

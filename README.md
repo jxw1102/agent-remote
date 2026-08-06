@@ -15,6 +15,7 @@ starting a session.
 | BlackBerry 10 (Cascades) | `blackberry/` → `AgentRemote.bar` |
 | Web (single HTML file) | `web/` |
 | Android | `android/` |
+| iOS (iPhone / iPad) | `ios/` → SwiftUI app + XcodeGen |
 
 **Releases** (APK, BAR, single-file web HTML, and a packaged daemon tarball) are
 published on GitHub when the daemon version changes — see
