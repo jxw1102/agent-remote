@@ -773,6 +773,12 @@ button.icon-btn.danger:hover:not(:disabled) {
   outline: none;
   cursor: text;
 }
+/* ANSI colour spans from ansiToHtml() — keep mono + pre-wrap on parent. */
+.live-tui-pane span {
+  white-space: inherit;
+  font-family: inherit;
+  font-size: inherit;
+}
 .live-tui-pane:focus {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
 }

@@ -26,6 +26,7 @@ commands ever ask.
 
 import hashlib
 import json
+import logging
 import os
 import queue
 import re
@@ -41,6 +42,8 @@ from pathlib import Path
 from ..config import CONFIG_DIR
 from ..render_blocks import inline_to_rich, markdown_to_blocks
 from .. import search_util
+
+log = logging.getLogger(__name__)
 
 # How much we read from the head/tail of a transcript when building the
 # session list. Enough for metadata without parsing multi-MB files.
@@ -129,6 +132,20 @@ _MODELS_TTL_S = 3600
 _ONE_M_CONTEXT = 1_000_000
 # (fetched_at, [{"id", "context"}]) — last good result, reused on any failure.
 _models_cache = {"at": 0.0, "models": []}
+
+# Usage cache: Anthropic rate-limits /api/oauth/usage aggressively (HTTP 429).
+# Fresh TTL avoids re-hitting on every Usage sheet open; stale TTL still
+# serves the last good bars when Anthropic is throttling.
+_USAGE_TTL_S = 90
+_USAGE_STALE_S = 30 * 60
+# After a 429, do not call Anthropic until Retry-After (capped) elapses.
+_USAGE_COOLDOWN_CAP_S = 60 * 60  # never sleep longer than 1h in our head
+_usage_cache = {
+    "at": 0.0,
+    "buckets": [],
+    "lock": threading.Lock(),
+    "cooldown_until": 0.0,  # epoch: skip Anthropic until then
+}
 
 
 # ------------------------------------------------------------- session titles
@@ -351,10 +368,118 @@ def _buckets_from_usage(raw: dict) -> list:
     return buckets
 
 
+def _fmt_retry_after(seconds) -> str:
+    """Human wait line from Retry-After (seconds or HTTP-date)."""
+    secs = None
+    if seconds is None or seconds == "":
+        return ""
+    try:
+        secs = int(float(str(seconds).strip()))
+    except (TypeError, ValueError):
+        # HTTP-date form — ignore, rare
+        return ""
+    if secs <= 0:
+        return ""
+    if secs < 90:
+        return "Try again in about %d s." % secs
+    mins = (secs + 30) // 60
+    if mins < 90:
+        return "Try again in about %d min." % max(1, mins)
+    hours = (mins + 30) // 60
+    return "Try again in about %d hr." % max(1, hours)
+
+
+def _parse_retry_after_s(headers) -> int:
+    if not headers:
+        return 0
+    try:
+        ra = headers.get("Retry-After")
+    except Exception:
+        ra = None
+    if ra is None or ra == "":
+        return 300  # default 5 min cooldown if 429 without header
+    try:
+        return max(0, min(_USAGE_COOLDOWN_CAP_S, int(float(str(ra).strip()))))
+    except (TypeError, ValueError):
+        return 300
+
+
+def _usage_from_cache(allow_stale: bool, force_any: bool = False) -> dict | None:
+    """Return a copy of the cached ok response, or None if unusable.
+
+    force_any: during Anthropic cooldown, serve whatever we have even if older
+    than the normal stale window (better than empty bars).
+    """
+    with _usage_cache["lock"]:
+        buckets = list(_usage_cache["buckets"] or [])
+        at = float(_usage_cache["at"] or 0)
+    if not buckets or at <= 0:
+        return None
+    age = time.time() - at
+    if age <= _USAGE_TTL_S or (allow_stale and age <= _USAGE_STALE_S) or force_any:
+        out = {"ok": True, "buckets": buckets, "cached": True, "cache_age_s": int(age)}
+        return out
+    return None
+
+
+def _store_usage_cache(buckets: list) -> None:
+    with _usage_cache["lock"]:
+        _usage_cache["buckets"] = list(buckets or [])
+        _usage_cache["at"] = time.time()
+        _usage_cache["cooldown_until"] = 0.0
+
+
+def _set_usage_cooldown(seconds: int) -> None:
+    until = time.time() + max(0, int(seconds))
+    with _usage_cache["lock"]:
+        # Only extend, never shrink a longer cooldown already in effect.
+        if until > float(_usage_cache.get("cooldown_until") or 0):
+            _usage_cache["cooldown_until"] = until
+
+
+def _usage_cooldown_remaining() -> int:
+    with _usage_cache["lock"]:
+        until = float(_usage_cache.get("cooldown_until") or 0)
+    return max(0, int(until - time.time()))
+
+
 def fetch_usage(config) -> dict:
-    """Return {"ok": True, "buckets": [...]} or {"ok": False, "error": str}."""
+    """Return {"ok": True, "buckets": [...]} or {"ok": False, "error": str}.
+
+    Caches successful Anthropic responses. On HTTP 429 (Anthropic rate limit),
+    honors Retry-After as a local cooldown (no further Anthropic calls), serves
+    the last good snapshot when available, and phrases wait time in minutes.
+    """
+    # Fast path: fresh cache (multi /api/usage + repeated opens).
+    cached = _usage_from_cache(allow_stale=False)
+    if cached is not None:
+        return cached
+
+    # Respect Anthropic cooldown — do not burn more 429s.
+    cool = _usage_cooldown_remaining()
+    if cool > 0:
+        wait = _fmt_retry_after(cool)
+        stale = _usage_from_cache(allow_stale=True, force_any=True)
+        if stale is not None:
+            stale["stale"] = True
+            stale["error"] = (
+                "Anthropic usage cooldown — showing last snapshot. %s" % wait
+            ).strip()
+            return stale
+        return {
+            "ok": False,
+            "error": (
+                "Anthropic rate-limited the usage API (HTTP 429). "
+                "The daemon is fine. %s" % wait
+            ).strip(),
+        }
+
     token = _oauth_token(config)
     if not token:
+        stale = _usage_from_cache(allow_stale=True)
+        if stale is not None:
+            stale["error"] = "Using cached usage — no Claude sign-in for a refresh."
+            return stale
         return {"ok": False,
                 "error": "No Claude sign-in found — run `claude` on the Mac to log in."}
     headers = dict(_USAGE_HEADERS)
@@ -367,12 +492,50 @@ def fetch_usage(config) -> dict:
         if e.code in (401, 403):
             return {"ok": False,
                     "error": "Claude sign-in expired — run `claude` on the Mac."}
+        if e.code == 429:
+            # Anthropic rate-limited this host — not agentremoted.
+            cool_s = _parse_retry_after_s(getattr(e, "headers", None))
+            _set_usage_cooldown(cool_s)
+            wait = _fmt_retry_after(cool_s)
+            log.warning(
+                "claude usage: Anthropic 429; cooldown %ss (%s)",
+                cool_s, wait,
+            )
+            stale = _usage_from_cache(allow_stale=True, force_any=True)
+            if stale is not None:
+                stale["stale"] = True
+                stale["error"] = (
+                    "Anthropic rate-limited usage — showing last snapshot. %s" % wait
+                ).strip()
+                return stale
+            return {
+                "ok": False,
+                "error": (
+                    "Anthropic rate-limited the usage API (HTTP 429). "
+                    "The daemon is fine. %s" % wait
+                ).strip(),
+            }
+        log.warning("claude usage: HTTP %s", e.code)
+        stale = _usage_from_cache(allow_stale=True)
+        if stale is not None:
+            stale["stale"] = True
+            stale["error"] = "Usage refresh failed (HTTP %d); showing cache." % e.code
+            return stale
         return {"ok": False, "error": "Usage request failed (HTTP %d)" % e.code}
     except (urllib.error.URLError, OSError) as e:
+        stale = _usage_from_cache(allow_stale=True)
+        if stale is not None:
+            stale["stale"] = True
+            stale["error"] = "Could not reach Anthropic; showing cache."
+            return stale
         return {"ok": False, "error": "Could not reach Anthropic: %s" % e}
     except (json.JSONDecodeError, ValueError):
         return {"ok": False, "error": "Unexpected usage response"}
-    return {"ok": True, "buckets": _buckets_from_usage(raw)}
+
+    buckets = _buckets_from_usage(raw)
+    if buckets:
+        _store_usage_cache(buckets)
+    return {"ok": True, "buckets": buckets, "cached": False}
 
 
 def list_models(config) -> list:

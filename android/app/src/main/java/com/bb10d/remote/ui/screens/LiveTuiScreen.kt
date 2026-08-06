@@ -2,12 +2,11 @@ package com.bb10d.remote.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -46,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bb10d.remote.data.AgentRepository
 import com.bb10d.remote.data.SessionRef
+import com.bb10d.remote.ui.AnsiText
 import com.bb10d.remote.ui.theme.palette
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -55,7 +55,7 @@ import kotlinx.coroutines.launch
  * Live TUI — shows the host tmux pane for an Interactive session and
  * injects keys / line text via agentremoted.
  */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LiveTuiScreen(
     repo: AgentRepository,
@@ -151,27 +151,40 @@ fun LiveTuiScreen(
                 .imePadding()
                 .navigationBarsPadding(),
         ) {
-            FlowRow(
+            // One compact row — symbols match BB10 Live TUI (⎋ ⇥ ↑ ↓ ← → ^C ↵).
+            Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 listOf(
-                    "Esc" to listOf("Escape"),
-                    "Tab" to listOf("Tab"),
-                    "↑" to listOf("Up"),
-                    "↓" to listOf("Down"),
-                    "←" to listOf("Left"),
-                    "→" to listOf("Right"),
+                    "\u238B" to listOf("Escape"),  // ⎋ Esc
+                    "\u21E5" to listOf("Tab"),     // ⇥ Tab
+                    "\u2191" to listOf("Up"),      // ↑
+                    "\u2193" to listOf("Down"),    // ↓
+                    "\u2190" to listOf("Left"),    // ←
+                    "\u2192" to listOf("Right"),   // →
                     "^C" to listOf("Ctrl+C"),
-                    "Enter" to listOf("Enter"),
+                    "\u21B5" to listOf("Enter"),   // ↵ Enter
                 ).forEach { (label, keys) ->
-                    TextButton(onClick = { sendKeys(keys) }) { Text(label) }
+                    TextButton(
+                        onClick = { sendKeys(keys) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .defaultMinSize(minWidth = 1.dp, minHeight = 40.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
+                    ) {
+                        Text(
+                            text = label,
+                            fontSize = 15.sp,
+                            maxLines = 1,
+                        )
+                    }
                 }
             }
-            Text(
+            // Coloured SGR from daemon tmux capture-pane -e.
+            AnsiText(
                 text = text,
                 modifier = Modifier
                     .weight(1f)
@@ -180,7 +193,7 @@ fun LiveTuiScreen(
                     .horizontalScroll(rememberScrollState())
                     .background(Color(0xFF0A0C10))
                     .padding(12.dp),
-                color = Color(0xFFD0D4DC),
+                defaultColor = Color(0xFFD0D4DC),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp,
                 lineHeight = 16.sp,

@@ -3645,7 +3645,11 @@ void ApiClient::onFinished(QNetworkReply *reply)
         m_tuiLive = true;
         if (seq != m_tuiSeq || m_tuiSeq == 0) {
             m_tuiSeq = seq;
-            m_tuiText = text.isEmpty() ? tr("(empty pane)") : text;
+            // Daemon may send ANSI SGR for web/Android; BB Label stays B&W.
+            QString plain = text;
+            plain.remove(QRegExp(QString::fromLatin1("\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)")));
+            plain.remove(QRegExp(QString::fromLatin1("\x1b\\[[0-9;?]*[A-Za-z]")));
+            m_tuiText = plain.isEmpty() ? tr("(empty pane)") : plain;
         }
         // ASCII only in status — TitleBar mojibakes UTF-8 middle dots.
         if (!jobId.isEmpty())

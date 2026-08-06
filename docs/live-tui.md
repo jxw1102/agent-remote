@@ -27,12 +27,14 @@ via the interactive manager’s paste path).
 
 | Platform | Entry | Display | Input |
 |----------|-------|---------|--------|
-| Web | Chat header icon | Mono pane + bar | Pane focus = keys; line box; Esc bar |
-| Android | Transcript ⋮ → Live TUI | Full screen | Soft keys + line box |
-| BB10 | Bezel menu **Live TUI** (Interactive mode only; Headless keeps **Queue**) | Sheet, mono pane | Soft keys + line box |
+| Web | Chat header icon | Mono pane + **ANSI colour** | Pane focus = keys; line box; Esc bar |
+| Android | Transcript ⋮ → Live TUI | Full screen + **ANSI colour** | Soft keys + line box |
+| BB10 | Bezel menu **Live TUI** (Interactive only; Headless keeps **Queue**) | Sheet, mono **B&W** (SGR stripped) | Soft keys + line box |
 
 ## Notes
 
 - Requires **Interactive** execution so a tmux TUI exists for the session.
 - Poll ~400 ms while open; skip redraw when `seq` unchanged.
 - Double **Esc** on web releases keyboard capture from the pane.
+- Daemon ≥ **2.4.4** captures with `tmux capture-pane -e` (SGR kept). Web/Android
+  render colours; BB strips escapes for a plain Label.

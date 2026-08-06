@@ -687,6 +687,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     })
                     continue
                 if data.get("ok") is False:
+                    log.warning("usage %s: %s", name, data.get("error") or "not available")
                     sections.append({
                         "provider": name,
                         "ok": False,
@@ -708,11 +709,21 @@ class ApiHandler(BaseHTTPRequestHandler):
                         bucket["title"] = label
                     buckets.append(bucket)
                     flat.append(dict(bucket))
+                # Stale cache after Anthropic 429: still ok=true with bars + note.
+                note = ""
+                if data.get("stale") or data.get("error"):
+                    note = str(data.get("error") or "cached")
+                    log.info("usage %s: serving %s snapshot (%s)",
+                             name,
+                             "stale" if data.get("stale") else "cached",
+                             note[:80])
                 sections.append({
                     "provider": name,
                     "ok": True,
-                    "error": "",
+                    "error": note,
                     "buckets": buckets,
+                    "cached": bool(data.get("cached") or data.get("stale")),
+                    "stale": bool(data.get("stale")),
                 })
             any_ok = any(s.get("ok") for s in sections)
             self._send_json({

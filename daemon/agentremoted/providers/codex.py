@@ -18,12 +18,16 @@ Stdin is closed immediately so the CLI does not hang waiting for more input.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import sqlite3
+import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from .. import providers
@@ -35,6 +39,573 @@ log = logging.getLogger(__name__)
 _MAX_TITLE = 80
 _MAX_PREVIEW = 160
 _STATE_GLOB = "state_*.sqlite"
+
+# ------------------------------------------------------------------ usage
+#
+# Codex has no `codex usage` CLI flag. ChatGPT plan limits are exposed by the
+# local app-server RPC ``account/rateLimits/read`` (what the TUI /status uses)
+# and, as a fallback, HTTP ``/backend-api/codex/usage`` with OAuth from
+# ~/.codex/auth.json. Shape matches Claude/Grok for the Usage sheet.
+
+_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
+_TOKEN_URL = "https://auth.openai.com/oauth/token"
+# ChatGPT desktop / Codex CLI public client id (from access-token claims).
+_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+_TOKEN_SKEW_S = 120  # refresh a bit early
+_USAGE_UA = "codex_cli_rs/0.146.0"
+_APP_SERVER_INIT_S = 8
+_APP_SERVER_RPC_S = 12
+_usage_app_server_lock = threading.Lock()
+
+
+def _auth_path(config) -> Path:
+    home = Path(getattr(config, "codex_home_path", None) or
+                (Path.home() / ".codex")).expanduser()
+    return home / "auth.json"
+
+
+def _jwt_payload(token: str) -> dict:
+    try:
+        part = (token or "").split(".")[1]
+        part += "=" * (-len(part) % 4)
+        return json.loads(base64.urlsafe_b64decode(part.encode("ascii")))
+    except (IndexError, ValueError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _jwt_fresh(token: str) -> bool:
+    exp = _jwt_payload(token).get("exp")
+    try:
+        return float(exp) > time.time() + _TOKEN_SKEW_S
+    except (TypeError, ValueError):
+        return False
+
+
+def _write_auth(path: Path, data: dict) -> None:
+    tmp = path.parent / (path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.chmod(str(tmp), 0o600)
+        os.replace(str(tmp), str(path))
+    except OSError:
+        try:
+            os.unlink(str(tmp))
+        except OSError:
+            pass
+
+
+def _refresh_chatgpt_token(refresh_token: str, client_id: str = "") -> dict:
+    """Exchange refresh_token for a new access_token. Returns updated token
+    fields or {} on failure."""
+    body = json.dumps({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": client_id or _OAUTH_CLIENT_ID,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        _TOKEN_URL,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "codex_cli_rs",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+        return {}
+    access = str(raw.get("access_token") or "").strip()
+    if not access:
+        return {}
+    out = {"access_token": access}
+    new_refresh = str(raw.get("refresh_token") or "").strip()
+    if new_refresh:
+        out["refresh_token"] = new_refresh
+    id_tok = str(raw.get("id_token") or "").strip()
+    if id_tok:
+        out["id_token"] = id_tok
+    return out
+
+
+def _chatgpt_tokens(config) -> tuple[str, str]:
+    """Return (access_token, account_id) from ~/.codex/auth.json, refreshing
+    when the access JWT is near expiry. Empty strings if unavailable."""
+    path = _auth_path(config)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return "", ""
+    if not isinstance(data, dict):
+        return "", ""
+    # API-key mode has no ChatGPT plan limits via this endpoint.
+    if (data.get("auth_mode") or "").lower() == "apikey" and not (
+            data.get("tokens") or {}):
+        return "", ""
+    tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
+    access = str(tokens.get("access_token") or "").strip()
+    account_id = str(tokens.get("account_id") or "").strip()
+    refresh = str(tokens.get("refresh_token") or "").strip()
+    if access and _jwt_fresh(access):
+        if not account_id:
+            authc = _jwt_payload(access).get("https://api.openai.com/auth") or {}
+            account_id = str(authc.get("chatgpt_account_id") or "").strip()
+        return access, account_id
+    if refresh:
+        claims = _jwt_payload(access) if access else {}
+        client_id = str(claims.get("client_id") or _OAUTH_CLIENT_ID)
+        updated = _refresh_chatgpt_token(refresh, client_id)
+        if updated.get("access_token"):
+            tokens.update(updated)
+            data["tokens"] = tokens
+            data["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                                   time.gmtime())
+            _write_auth(path, data)
+            access = updated["access_token"]
+            if not account_id:
+                authc = _jwt_payload(access).get(
+                    "https://api.openai.com/auth") or {}
+                account_id = str(
+                    authc.get("chatgpt_account_id") or "").strip()
+            return access, account_id
+    return access, account_id
+
+
+def _clamp_pct(value) -> int:
+    try:
+        return max(0, min(100, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _severity(pct: int) -> str:
+    if pct >= 90:
+        return "critical"
+    if pct >= 75:
+        return "warning"
+    return "normal"
+
+
+def _window_title(window_seconds) -> str:
+    try:
+        secs = int(window_seconds or 0)
+    except (TypeError, ValueError):
+        secs = 0
+    if secs <= 0:
+        return "Usage limit"
+    hours = secs // 3600
+    if hours >= 24 * 6:  # ~weekly or monthly window
+        days = max(1, round(hours / 24))
+        if days >= 28:
+            return "Monthly limit"
+        if days >= 6:
+            return "Weekly limit"
+        return "%d-day limit" % days
+    if hours >= 1:
+        return "%d-hour limit" % hours
+    mins = max(1, secs // 60)
+    return "%d-min limit" % mins
+
+
+def _fmt_reset_after(reset_after_seconds, reset_at) -> str:
+    """Relative reset line; prefer reset_after_seconds, fall back to reset_at."""
+    secs = None
+    try:
+        if reset_after_seconds is not None:
+            secs = int(reset_after_seconds)
+    except (TypeError, ValueError):
+        secs = None
+    if secs is None and reset_at is not None:
+        try:
+            secs = int(float(reset_at) - time.time())
+        except (TypeError, ValueError):
+            secs = None
+    if secs is None:
+        return ""
+    if secs <= 0:
+        return "Resets soon"
+    days = secs // 86400
+    hours = (secs % 86400) // 3600
+    mins = (secs % 3600) // 60
+    if days and hours:
+        return "Resets in %d d %d hr" % (days, hours)
+    if days:
+        return "Resets in %d d" % days
+    if hours and mins:
+        return "Resets in %d hr %d min" % (hours, mins)
+    if hours:
+        return "Resets in %d hr" % hours
+    if mins:
+        return "Resets in %d min" % mins
+    return "Resets soon"
+
+
+def _bucket_from_window(title: str, window: dict) -> dict | None:
+    if not isinstance(window, dict):
+        return None
+    if window.get("used_percent") is None and window.get("usedPercent") is None:
+        return None
+    pct = _clamp_pct(window.get("used_percent", window.get("usedPercent")))
+    # App-server uses windowDurationMins; HTTP uses limit_window_seconds.
+    win_s = window.get("limit_window_seconds", window.get("limitWindowSeconds"))
+    if win_s is None:
+        mins = window.get("window_duration_mins",
+                          window.get("windowDurationMins"))
+        try:
+            win_s = int(mins) * 60 if mins is not None else None
+        except (TypeError, ValueError):
+            win_s = None
+    label = title or _window_title(win_s)
+    reset_at = window.get("reset_at", window.get("resetAt",
+                          window.get("resets_at", window.get("resetsAt"))))
+    return {
+        "title": label,
+        "percent": pct,
+        "resets_text": _fmt_reset_after(
+            window.get("reset_after_seconds", window.get("resetAfterSeconds")),
+            reset_at,
+        ),
+        "severity": _severity(pct),
+    }
+
+
+def _buckets_from_app_server_rate_limits(result: dict) -> list:
+    """Map account/rateLimits/read result → usage buckets."""
+    if not isinstance(result, dict):
+        return []
+    # Prefer the codex limit id when present.
+    by_id = result.get("rateLimitsByLimitId") or result.get(
+        "rate_limits_by_limit_id") or {}
+    rl = None
+    if isinstance(by_id, dict) and by_id.get("codex"):
+        rl = by_id.get("codex")
+    if rl is None:
+        rl = result.get("rateLimits") or result.get("rate_limits")
+    if not isinstance(rl, dict):
+        return []
+    plan = str(rl.get("planType") or rl.get("plan_type") or "").strip()
+    buckets = []
+    primary = rl.get("primary") or {}
+    b = _bucket_from_window(
+        _window_title(
+            (int(primary.get("windowDurationMins") or 0) * 60)
+            if isinstance(primary, dict) else None),
+        primary if isinstance(primary, dict) else {},
+    )
+    if b:
+        if plan:
+            b["title"] = "%s · %s" % (b["title"], plan)
+        buckets.append(b)
+    secondary = rl.get("secondary")
+    if isinstance(secondary, dict):
+        b2 = _bucket_from_window("Secondary limit", secondary)
+        if b2:
+            buckets.append(b2)
+    credits = rl.get("credits") if isinstance(rl.get("credits"), dict) else {}
+    if credits.get("unlimited"):
+        buckets.append({
+            "title": "Credits",
+            "percent": 0,
+            "resets_text": "Unlimited",
+            "severity": "normal",
+        })
+    return buckets
+
+
+def _codex_bin(config) -> str:
+    return str(getattr(config, "codex_bin", None) or "codex")
+
+
+def _fetch_usage_via_app_server(config) -> dict:
+    """Primary path: brief stdio session with ``codex app-server``.
+
+    Uses the same local auth/cache as the CLI and avoids ChatGPT edge/WAF
+    that sometimes 403s bare HTTP probes from the daemon.
+    """
+    bin_path = _codex_bin(config)
+    home = str(Path(getattr(config, "codex_home_path", None)
+                    or (Path.home() / ".codex")).expanduser())
+    env = os.environ.copy()
+    env["CODEX_HOME"] = home
+    # Keep noise down; we only need JSON-RPC on stdout.
+    env.setdefault("RUST_LOG", "error")
+
+    try:
+        proc = subprocess.Popen(
+            [bin_path, "app-server", "--listen", "stdio://"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            bufsize=1,
+        )
+    except FileNotFoundError:
+        return {"ok": False, "error": "codex CLI not found on PATH"}
+    except OSError as e:
+        return {"ok": False, "error": "Could not start codex app-server: %s" % e}
+
+    def _send(obj: dict) -> None:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(obj, separators=(",", ":")) + "\n")
+        proc.stdin.flush()
+
+    def _recv_for_id(want_id, timeout_s: float):
+        """Read stdout lines until a response with id==want_id or timeout.
+        Skip notifications (no id / method-only)."""
+        deadline = time.time() + timeout_s
+        assert proc.stdout is not None
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                return None
+            # Blocking readline with remaining budget via select
+            import select
+            remaining = max(0.05, deadline - time.time())
+            ready, _, _ = select.select([proc.stdout], [], [], remaining)
+            if not ready:
+                continue
+            line = proc.stdout.readline()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("id") == want_id:
+                return msg
+            # notification — ignore
+        return None
+
+    try:
+        _send({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "agentremoted",
+                    "title": "agentremoted",
+                    "version": "2.4.1",
+                },
+                "capabilities": {},
+            },
+        })
+        init = _recv_for_id(1, _APP_SERVER_INIT_S)
+        if not init or init.get("error"):
+            err = (init or {}).get("error") or {}
+            return {
+                "ok": False,
+                "error": "codex app-server initialize failed: %s"
+                         % (err.get("message") or "timeout"),
+            }
+        _send({"id": 2, "method": "account/rateLimits/read", "params": {}})
+        resp = _recv_for_id(2, _APP_SERVER_RPC_S)
+        if not resp:
+            return {"ok": False, "error": "codex rateLimits/read timed out"}
+        if resp.get("error"):
+            err = resp.get("error") or {}
+            msg = str(err.get("message") or err)
+            # Unauthenticated / API-key-only installs.
+            low = msg.lower()
+            if "auth" in low or "login" in low or "sign" in low:
+                return {
+                    "ok": False,
+                    "error": "No Codex ChatGPT sign-in — run `codex login` on the host.",
+                }
+            return {"ok": False, "error": "codex rateLimits/read: %s" % msg}
+        result = resp.get("result") if isinstance(resp.get("result"), dict) else {}
+        buckets = _buckets_from_app_server_rate_limits(result)
+        if not buckets:
+            return {
+                "ok": False,
+                "error": "No Codex rate-limit windows in app-server response",
+            }
+        return {"ok": True, "buckets": buckets}
+    except (BrokenPipeError, OSError) as e:
+        return {"ok": False, "error": "codex app-server I/O error: %s" % e}
+    finally:
+        try:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+
+
+def _buckets_from_codex_usage(raw: dict) -> list:
+    """Map ChatGPT codex/usage JSON → [{title, percent, resets_text, severity}]."""
+    buckets = []
+    plan = str(raw.get("plan_type") or raw.get("planType") or "").strip()
+    rl = raw.get("rate_limit") or raw.get("rateLimit") or {}
+    if isinstance(rl, dict):
+        primary = rl.get("primary_window") or rl.get("primaryWindow")
+        b = _bucket_from_window(
+            _window_title(
+                (primary or {}).get("limit_window_seconds")
+                if isinstance(primary, dict) else None),
+            primary if isinstance(primary, dict) else {},
+        )
+        if b:
+            if plan:
+                b["title"] = "%s · %s" % (b["title"], plan)
+            buckets.append(b)
+        secondary = rl.get("secondary_window") or rl.get("secondaryWindow")
+        if isinstance(secondary, dict):
+            b2 = _bucket_from_window("Secondary limit", secondary)
+            if b2:
+                buckets.append(b2)
+    # Code review window (when present).
+    cr = raw.get("code_review_rate_limit") or raw.get("codeReviewRateLimit")
+    if isinstance(cr, dict):
+        win = cr.get("primary_window") or cr.get("primaryWindow") or cr
+        b3 = _bucket_from_window("Code review", win if isinstance(win, dict) else {})
+        if b3:
+            buckets.append(b3)
+    # Credits snapshot for paid overage plans.
+    credits = raw.get("credits") if isinstance(raw.get("credits"), dict) else {}
+    if credits.get("has_credits") or credits.get("unlimited"):
+        bal = credits.get("balance")
+        if credits.get("unlimited"):
+            buckets.append({
+                "title": "Credits",
+                "percent": 0,
+                "resets_text": "Unlimited",
+                "severity": "normal",
+            })
+        elif bal is not None:
+            try:
+                # balance is remaining fraction or absolute — show as used%
+                # when 0–1, else leave percent at 0 with balance text.
+                fbal = float(bal)
+                if 0 <= fbal <= 1:
+                    pct = _clamp_pct((1.0 - fbal) * 100)
+                    buckets.append({
+                        "title": "Credits",
+                        "percent": pct,
+                        "resets_text": "%.0f%% remaining" % (fbal * 100),
+                        "severity": _severity(pct),
+                    })
+                else:
+                    buckets.append({
+                        "title": "Credits",
+                        "percent": 0,
+                        "resets_text": "Balance %s" % bal,
+                        "severity": "normal",
+                    })
+            except (TypeError, ValueError):
+                pass
+    return buckets
+
+
+def _fetch_usage_via_http(config) -> dict:
+    """Fallback: ChatGPT backend-api/codex/usage with OAuth from auth.json."""
+    access, account_id = _chatgpt_tokens(config)
+    if not access:
+        return {
+            "ok": False,
+            "error": "No Codex ChatGPT sign-in found — run `codex login` on the host.",
+        }
+    headers = {
+        "Authorization": "Bearer " + access,
+        "Accept": "application/json",
+        "User-Agent": _USAGE_UA,
+    }
+    if account_id:
+        headers["ChatGPT-Account-Id"] = account_id
+    req = urllib.request.Request(_USAGE_URL, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            path = _auth_path(config)
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                tokens = data.get("tokens") if isinstance(
+                    data.get("tokens"), dict) else {}
+                refresh = str(tokens.get("refresh_token") or "").strip()
+            except (OSError, ValueError, json.JSONDecodeError):
+                data, tokens, refresh = {}, {}, ""
+            if refresh:
+                updated = _refresh_chatgpt_token(refresh)
+                if updated.get("access_token"):
+                    tokens.update(updated)
+                    data["tokens"] = tokens
+                    _write_auth(path, data)
+                    headers["Authorization"] = "Bearer " + updated["access_token"]
+                    try:
+                        req2 = urllib.request.Request(_USAGE_URL, headers=headers)
+                        with urllib.request.urlopen(req2, timeout=20) as resp:
+                            raw = json.loads(resp.read().decode("utf-8"))
+                    except Exception:
+                        return {
+                            "ok": False,
+                            "error": "Codex sign-in expired — run `codex login` on the host.",
+                        }
+                else:
+                    return {
+                        "ok": False,
+                        "error": "Codex sign-in expired — run `codex login` on the host.",
+                    }
+            else:
+                return {
+                    "ok": False,
+                    "error": "Codex sign-in expired — run `codex login` on the host.",
+                }
+        elif e.code == 403:
+            return {
+                "ok": False,
+                "error": "ChatGPT blocked the usage request (HTTP 403).",
+            }
+        else:
+            return {"ok": False, "error": "Usage request failed (HTTP %d)" % e.code}
+    except (urllib.error.URLError, OSError) as e:
+        return {"ok": False, "error": "Could not reach ChatGPT usage API: %s" % e}
+    except (json.JSONDecodeError, ValueError):
+        return {"ok": False, "error": "Unexpected usage response"}
+
+    if not isinstance(raw, dict):
+        return {"ok": False, "error": "Unexpected usage response"}
+    buckets = _buckets_from_codex_usage(raw)
+    if not buckets:
+        plan = str(raw.get("plan_type") or "").strip() or "unknown"
+        if (raw.get("rate_limit") or {}).get("allowed") is True:
+            return {
+                "ok": True,
+                "buckets": [{
+                    "title": "Plan · %s" % plan,
+                    "percent": 0,
+                    "resets_text": "No rate-limit windows reported",
+                    "severity": "normal",
+                }],
+            }
+        return {"ok": False, "error": "No Codex usage windows in response"}
+    return {"ok": True, "buckets": buckets}
+
+
+def fetch_usage(config) -> dict:
+    """Return {"ok": True, "buckets": [...]} or {"ok": False, "error": str}.
+
+    Prefer ``codex app-server`` rateLimits RPC (reliable, same auth as the
+    CLI). Fall back to ChatGPT HTTP if app-server is unavailable.
+    """
+    with _usage_app_server_lock:
+        primary = _fetch_usage_via_app_server(config)
+    if primary.get("ok"):
+        return primary
+    # App-server missing / timed out / auth error — try HTTP once.
+    secondary = _fetch_usage_via_http(config)
+    if secondary.get("ok"):
+        return secondary
+    # Prefer the more specific of the two errors.
+    err = primary.get("error") or secondary.get("error") or "usage failed"
+    if secondary.get("error") and "app-server" in str(primary.get("error") or ""):
+        err = "%s (HTTP fallback: %s)" % (
+            primary.get("error"), secondary.get("error"))
+    return {"ok": False, "error": err}
 
 
 def _preview(text: str, n: int = _MAX_PREVIEW) -> str:
@@ -428,6 +999,10 @@ class CodexRunner:
     def send_tui_keys(self, session_id: str, keys=None, text: str = "") -> str:
         return self._interactive_mgr().send_tui_keys(session_id, keys=keys, text=text)
 
+    def usage(self) -> dict:
+        """Subscription / plan rate limits for the Usage sheet."""
+        return fetch_usage(self.config)
+
     def capabilities(self):
         from .codex_interactive import tmux_available
         has_tmux = tmux_available()
@@ -441,7 +1016,8 @@ class CodexRunner:
             "requires_cwd": True,
             "can_set_model": True,
             "can_set_effort": False,
-            "can_show_usage": False,
+            # ChatGPT-plan rate limits via backend-api/codex/usage (OAuth).
+            "can_show_usage": True,
             "turns": True,
             # "interactive" permission mode: turns run in a host tmux TUI.
             # Requires tmux on the host (same as Claude/Grok interactive).

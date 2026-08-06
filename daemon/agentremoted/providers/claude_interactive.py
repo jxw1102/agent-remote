@@ -320,9 +320,15 @@ class InteractiveManager:
         except (OSError, subprocess.TimeoutExpired):
             return False
 
-    def _pane_text(self, name: str) -> str:
+    def _pane_text(self, name: str, *, ansi: bool = False) -> str:
+        # -e keeps SGR colour sequences for Live TUI clients; internal
+        # readiness / busy checks use plain text (ansi=False).
+        args = ["capture-pane", "-p"]
+        if ansi:
+            args.append("-e")
+        args.extend(["-t", name])
         try:
-            out = self._tmux("capture-pane", "-p", "-t", name, capture=True)
+            out = self._tmux(*args, capture=True)
             return out.stdout.decode("utf-8", errors="replace")
         except (OSError, subprocess.TimeoutExpired):
             return ""

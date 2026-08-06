@@ -44,6 +44,112 @@ const profileHostAccent = (p) => {
 const sessionProvider = (session, profile) =>
   (session && session.provider) || (profile && profile.provider) || "";
 
+// ---- ANSI → HTML for Live TUI (tmux capture-pane -e) --------------------
+// BB keeps plain text; web/Android render colours. 16-colour + 256 + truecolor.
+const _ANSI_FG = [
+  "#0c0c0c", "#cd3131", "#0dbc79", "#e5e510",
+  "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
+];
+const _ANSI_FG_BRIGHT = [
+  "#666666", "#f14c4c", "#23d18b", "#f5f543",
+  "#3b8eea", "#d670d6", "#29b8db", "#e5e5e5",
+];
+const _ANSI_BG = [
+  "#0c0c0c", "#cd3131", "#0dbc79", "#e5e510",
+  "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
+];
+function _ansi256(n) {
+  n = n | 0;
+  if (n < 0) return null;
+  if (n < 8) return _ANSI_FG[n];
+  if (n < 16) return _ANSI_FG_BRIGHT[n - 8];
+  if (n < 232) {
+    n -= 16;
+    const r = Math.floor(n / 36), g = Math.floor((n % 36) / 6), b = n % 6;
+    const c = (v) => (v === 0 ? 0 : 55 + v * 40);
+    return `rgb(${c(r)},${c(g)},${c(b)})`;
+  }
+  const v = 8 + (n - 232) * 10;
+  return `rgb(${v},${v},${v})`;
+}
+function _escHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+/** Convert SGR sequences into <span style=…>…</span> (safe HTML). */
+function ansiToHtml(raw) {
+  if (!raw) return "";
+  // Normalise CSI
+  const s = String(raw).replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "");
+  let i = 0;
+  let html = "";
+  let bold = false, dim = false, italic = false, underline = false;
+  let fg = null, bg = null;
+  const open = () => {
+    const st = [];
+    if (fg) st.push(`color:${fg}`);
+    if (bg) st.push(`background-color:${bg}`);
+    if (bold) st.push("font-weight:700");
+    if (dim) st.push("opacity:0.7");
+    if (italic) st.push("font-style:italic");
+    if (underline) st.push("text-decoration:underline");
+    return st.length ? `<span style="${st.join(";")}">` : "";
+  };
+  let openTag = open();
+  if (openTag) html += openTag;
+  const re = /\u001b\[([0-9;]*)m/g;
+  let m;
+  let last = 0;
+  while ((m = re.exec(s)) !== null) {
+    const chunk = s.slice(last, m.index);
+    if (chunk) html += _escHtml(chunk);
+    last = re.lastIndex;
+    if (openTag) html += "</span>";
+    const parts = (m[1] || "0").split(";").map((x) => (x === "" ? 0 : parseInt(x, 10)));
+    for (let p = 0; p < parts.length; p++) {
+      const code = parts[p];
+      if (code === 0 || Number.isNaN(code)) {
+        bold = dim = italic = underline = false;
+        fg = bg = null;
+      } else if (code === 1) bold = true;
+      else if (code === 2) dim = true;
+      else if (code === 3) italic = true;
+      else if (code === 4) underline = true;
+      else if (code === 22) { bold = false; dim = false; }
+      else if (code === 23) italic = false;
+      else if (code === 24) underline = false;
+      else if (code === 39) fg = null;
+      else if (code === 49) bg = null;
+      else if (code >= 30 && code <= 37) fg = _ANSI_FG[code - 30];
+      else if (code >= 90 && code <= 97) fg = _ANSI_FG_BRIGHT[code - 90];
+      else if (code >= 40 && code <= 47) bg = _ANSI_BG[code - 40];
+      else if (code >= 100 && code <= 107) bg = _ANSI_FG_BRIGHT[code - 100];
+      else if (code === 38 || code === 48) {
+        const isFg = code === 38;
+        const mode = parts[p + 1];
+        if (mode === 5 && parts[p + 2] != null) {
+          const c = _ansi256(parts[p + 2]);
+          if (isFg) fg = c; else bg = c;
+          p += 2;
+        } else if (mode === 2 && parts[p + 4] != null) {
+          const c = `rgb(${parts[p + 2]|0},${parts[p + 3]|0},${parts[p + 4]|0})`;
+          if (isFg) fg = c; else bg = c;
+          p += 4;
+        }
+      }
+    }
+    openTag = open();
+    if (openTag) html += openTag;
+  }
+  if (last < s.length) html += _escHtml(s.slice(last));
+  if (openTag) html += "</span>";
+  // Drop other CSI (cursor etc.) that capture sometimes leaves
+  return html.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "");
+}
+
 const PAGE = 60;
 const POLL_IDLE_MS = 6000;   // stream healthy: timer is only a safety net
 const POLL_ACTIVE_MS = 1500; // no usable stream: this is the real rate
@@ -984,6 +1090,7 @@ async function pollLiveTui(force) {
         pane.textContent = frame?.error
           || "No interactive TUI for this session. Start a turn in Interactive mode.";
         pane.classList.add("empty-tui");
+        delete pane.dataset.hadFrame;
       }
       return;
     }
@@ -992,7 +1099,13 @@ async function pollLiveTui(force) {
     pane.dataset.hadFrame = "1";
     pane.classList.remove("empty-tui");
     const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
-    pane.textContent = frame.text || "(empty pane)";
+    // Coloured SGR from tmux capture-pane -e (BB keeps plain text).
+    const raw = frame.text || "(empty pane)";
+    if (raw.includes("\u001b[") || raw.includes("\x1b[")) {
+      pane.innerHTML = ansiToHtml(raw);
+    } else {
+      pane.textContent = raw;
+    }
     if (atBottom) pane.scrollTop = pane.scrollHeight;
     status.textContent = frame.job_id
       ? `Host TUI · job ${String(frame.job_id).slice(0, 8)}`

@@ -1,6 +1,8 @@
 # Agent Remote
 
 Drive **Claude Code**, **Grok**, and **Codex** from a phone or browser.
+Clients: **web**, **Android**, **BlackBerry 10**, and **LILYGO T-LoRa Pager** firmware (`pager/`).
+
 One Python daemon (`agentremoted`) fronts the host CLIs; clients talk to it
 over a token-authenticated HTTP API.
 

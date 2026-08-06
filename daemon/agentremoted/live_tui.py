@@ -130,7 +130,11 @@ def capture_session(mgr, session_id: str) -> dict:
     if not alive:
         return frame_payload(session_id, "", False,
                              error="the host TUI has exited")
-    text = mgr._pane_text(tui.name) or ""
+    # Prefer ANSI capture so web/Android can render colours; BB strips SGR.
+    try:
+        text = mgr._pane_text(tui.name, ansi=True) or ""
+    except TypeError:
+        text = mgr._pane_text(tui.name) or ""
     job_id = ""
     job = getattr(tui, "job", None)
     if job is not None:
