@@ -10,6 +10,17 @@ void fillRect(int x, int y, int w, int h, uint16_t color);
 void drawText(int x, int y, const char *text, uint16_t color, uint8_t size = 1);
 void drawTextTrunc(int x, int y, int maxW, const char *text, uint16_t color, uint8_t size = 1);
 void hLine(int y, uint16_t color);
+// Primitive shapes for the icon menu / beeper cards.
+void fillRoundRect(int x, int y, int w, int h, int r, uint16_t color);
+void drawRoundRect(int x, int y, int w, int h, int r, uint16_t color);
+void fillCircle(int x, int y, int r, uint16_t color);
+void drawCircle(int x, int y, int r, uint16_t color);
+void drawLine(int x0, int y0, int x1, int y1, uint16_t color);
+void fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color);
+// Ring segment between radii r0..r1, angles in degrees (LovyanGFX fillArc).
+void fillArc(int x, int y, int r0, int r1, float a0, float a1, uint16_t color);
+// Put the panel into sleep mode (power off path).
+void sleepPanel();
 int width();
 int height();
 void flush();

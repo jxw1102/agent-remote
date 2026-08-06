@@ -15,8 +15,9 @@ struct AppConfig {
   bool soundCues = true;
   bool hapticCues = true;
   uint8_t backlight = 180;
-  // Auto deep-sleep after idle minutes (0 = never).
-  uint8_t idleSleepMin = 5;
+  // Auto deep-sleep after idle minutes (0 = never). Default off: deep sleep
+  // drops the USB-Serial-JTAG port, which reads as a dead device on the desk.
+  uint8_t idleSleepMin = 0;
 
   bool load() {
     Preferences p;

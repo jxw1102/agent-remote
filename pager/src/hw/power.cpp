@@ -2,6 +2,7 @@
 #include "hw/display.h"
 #include "board_pins.h"
 
+#include <WiFi.h>
 #include <Wire.h>
 #include <esp_sleep.h>
 
@@ -65,12 +66,43 @@ void deepSleepSeconds(uint32_t sec) {
   esp_deep_sleep_start();
 }
 
+void powerOff() {
+  Serial.println("[power] off — wake with knob or side button");
+  Serial.flush();
+  display::sleepPanel();
+  // Keyboard backlight off, all XL9555 rails off (keyboard, LoRa, GPS, SD…).
+  digitalWrite(PIN_KB_BL, LOW);
+  Wire.beginTransmission(XL9555_ADDR);
+  Wire.write(0x02);
+  Wire.write((uint8_t)0x00);
+  Wire.endTransmission();
+  Wire.beginTransmission(XL9555_ADDR);
+  Wire.write(0x03);
+  Wire.write((uint8_t)0x00);
+  Wire.endTransmission();
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_OFF);
+  pinMode(PIN_BOOT, INPUT_PULLUP);
+  pinMode(PIN_ROT_BTN, INPUT_PULLUP);
+  const uint64_t wakePins = (1ULL << PIN_BOOT) | (1ULL << PIN_ROT_BTN);
+  esp_sleep_enable_ext1_wakeup(wakePins, ESP_EXT1_WAKEUP_ANY_LOW);
+  delay(100);
+  esp_deep_sleep_start();
+}
+
+void restart() {
+  Serial.println("[power] restart");
+  Serial.flush();
+  delay(50);
+  esp_restart();
+}
+
 void idleTick(uint32_t lastActivityMs, uint8_t idleSleepMin, uint8_t backlight) {
-  if (idleSleepMin == 0) return;
   uint32_t idle = millis() - lastActivityMs;
-  uint32_t dimAt = (uint32_t)idleSleepMin * 60UL * 1000UL / 2UL;
+  // Dim after 2 min even when deep sleep is disabled.
   uint32_t sleepAt = (uint32_t)idleSleepMin * 60UL * 1000UL;
-  if (idle > sleepAt) {
+  uint32_t dimAt = idleSleepMin ? sleepAt / 2UL : 120000UL;
+  if (idleSleepMin && idle > sleepAt) {
     deepSleepSeconds(0);
   } else if (idle > dimAt) {
     if (!dimmed) {

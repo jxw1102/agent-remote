@@ -74,16 +74,9 @@
                   stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
-        <!-- Fixed-order slots: Stop left of Live TUI. Both always reserve
-             space (icon-idle = invisible, not display:none) so neither
-             appearing/disappearing shifts the other under the pointer. -->
-        <button id="btn-stop" class="icon-btn danger icon-idle" type="button"
-                title="Stop" aria-label="Stop" aria-hidden="true" tabindex="-1">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="6.5" y="6.5" width="11" height="11" rx="1.5"
-                  fill="currentColor"/>
-          </svg>
-        </button>
+        <!-- Order: Options · Refresh · Live TUI · Stop.
+             Stop always keeps its slot (icon-idle = invisible, not removed)
+             so nothing slides into that space when a job is not running. -->
         <button id="btn-live-tui" class="icon-btn icon-idle" type="button"
                 title="Live TUI — host terminal for this session" aria-label="Live TUI"
                 aria-pressed="false" aria-hidden="true" tabindex="-1">
@@ -95,6 +88,13 @@
             <path d="M7 9h.01M10 9h7"/>
           </svg>
         </button>
+        <button id="btn-stop" class="icon-btn danger icon-idle" type="button"
+                title="Stop" aria-label="Stop" aria-hidden="true" tabindex="-1">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="6.5" y="6.5" width="11" height="11" rx="1.5"
+                  fill="currentColor"/>
+          </svg>
+        </button>
       </div>
     </header>
 
@@ -102,7 +102,8 @@
 
     <div id="transcript" class="transcript">
       <div id="welcome" class="empty welcome">
-        <svg class="empty-logo" viewBox="0 0 108 108" aria-hidden="true">
+        <svg class="empty-logo" viewBox="0 0 108 108" width="54" height="54" aria-hidden="true">
+          <rect width="108" height="108" rx="54" fill="#12121a"/>
           <path d="M34 40 L48 54 L34 68" stroke="#d97757" stroke-width="7"
                 fill="none" stroke-linecap="round" stroke-linejoin="round"/>
           <path d="M56 68 L76 68" stroke="#00d4ff" stroke-width="7"
@@ -113,20 +114,16 @@
            <strong>agentremoted</strong> running next to Claude Code, Grok, or Codex
            on your Mac or a server.</p>
         <ol class="welcome-steps">
-          <li>Install and run the daemon from the project repo.</li>
+          <li>Download the daemon package from Releases.</li>
           <li>Copy its token (<code>~/.agentremoted/token</code>).</li>
           <li>Click <strong>Add a daemon</strong> and paste the URL + token.</li>
         </ol>
         <div class="welcome-actions">
           <button id="btn-welcome-add" class="primary" type="button">Add a daemon</button>
           <a id="link-get-daemon" class="welcome-link"
-             href="https://github.com/jxw1102/agent-remote"
+             href="https://github.com/jxw1102/agent-remote/releases"
              target="_blank" rel="noopener noreferrer">Get the daemon →</a>
         </div>
-        <p class="welcome-hint">Repo &amp; releases:
-          <a href="https://github.com/jxw1102/agent-remote" target="_blank"
-             rel="noopener noreferrer">github.com/jxw1102/agent-remote</a>
-        </p>
       </div>
     </div>
 

@@ -11,8 +11,10 @@
 #include "hw/display.h"
 #include "hw/keyboard.h"
 #include "hw/power.h"
+#include "hw/rotary.h"
 #include "hw/wifi_mgr.h"
 #include "net/agentapi.h"
+#include "net/statusfeed.h"
 #include "ui/ui.h"
 
 static AppConfig g_cfg;
@@ -23,7 +25,15 @@ void setup() {
   delay(500);
   Serial.println();
   Serial.println("=== Agent Remote / T-LoRa Pager ===");
-  Serial.println("build: safe-boot path");
+  Serial.printf("build: %s %s\n", __DATE__, __TIME__);
+  // Reset reason distinguishes panic/WDT bootloop from clean power-on;
+  // PSRAM line confirms the qio_qspi memory config actually initialized.
+  Serial.printf("[boot] reset reason=%d wakeup=%d\n", (int)esp_reset_reason(),
+                (int)esp_sleep_get_wakeup_cause());
+  Serial.printf("[boot] chip rev=%d psram=%s (%u KB) heap=%u KB\n",
+                ESP.getChipRevision(), psramFound() ? "ok" : "MISSING",
+                (unsigned)(ESP.getPsramSize() / 1024),
+                (unsigned)(ESP.getHeapSize() / 1024));
   Serial.flush();
 
   // Watchdog: 30s so a stuck peripheral cannot freeze forever without reset.
@@ -47,6 +57,9 @@ void setup() {
   keyboard::begin();
   esp_task_wdt_reset();
 
+  Serial.println("[boot] rotary");
+  rotary::begin();
+
   Serial.println("[boot] power");
   power::begin();
 
@@ -61,6 +74,7 @@ void setup() {
   }
   if (g_cfg.configured()) {
     agentapi::configure(g_cfg.apiBase(), g_cfg.daemonToken);
+    statusfeed::configure(g_cfg.apiBase(), g_cfg.daemonToken);
   }
 
   ui::begin(&g_cfg);
@@ -74,12 +88,29 @@ void setup() {
 void loop() {
   esp_task_wdt_reset();
   wifi_mgr::tick();
+  statusfeed::tick();
   keyboard::tick();
+
+  // Rotary knob: rotate = navigate, press = select. Side (BOOT) button = back.
+  int rd = rotary::readDelta();
+  if (rd != 0) {
+    ui::onRotary(rd);
+  }
+  if (rotary::pressed()) {
+    ui::onKey(0, true, false, false);
+  }
+  if (rotary::backPressed()) {
+    ui::onKey(0, false, false, true);
+  }
 
   keyboard::Event ev{};
   while (keyboard::poll(&ev)) {
     ui::markActivity();
-    if (ev.function) continue;
+    if (ev.function) {
+      ui::draw();  // refresh CAP/SYM indicator
+      continue;
+    }
+    // ev.escape only comes from the serial fallback — route it to "back".
     ui::onKey(ev.ch, ev.enter, ev.backspace, ev.escape);
   }
 

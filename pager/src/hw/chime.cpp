@@ -21,13 +21,20 @@ bool g_sound = true;
 bool g_haptic = true;
 
 void amp(bool on) {
+  // Read-modify-write AMP_EN on output port 0 so the rail bits set by
+  // board_init stay untouched.
   Wire.beginTransmission(XL9555_ADDR);
   Wire.write(0x02);
-  // Read-modify would be better; for chime pulse, set AMP bit only.
-  // Keep other rails: assume KB_EN|DRV_EN|GPIO already high from board init.
-  uint8_t p0 = (1u << EXP_DRV_EN) | (1u << EXP_KB_EN) | (1u << EXP_GPIO_EN) |
-               (1u << EXP_LORA_EN) | (1u << EXP_GPS_EN) | (1u << EXP_SD_EN);
-  if (on) p0 |= (1u << EXP_AMP_EN);
+  if (Wire.endTransmission(false) != 0) return;
+  if (Wire.requestFrom((int)XL9555_ADDR, 1) != 1) return;
+  uint8_t p0 = Wire.read();
+  if (on) {
+    p0 |= (1u << EXP_AMP_EN);
+  } else {
+    p0 &= ~(1u << EXP_AMP_EN);
+  }
+  Wire.beginTransmission(XL9555_ADDR);
+  Wire.write(0x02);
   Wire.write(p0);
   Wire.endTransmission();
 }
@@ -44,6 +51,7 @@ void hapticPulse(Cue cue) {
   if (cue == Cue::Done) effect = 10;
   if (cue == Cue::Error) effect = 12;
   if (cue == Cue::Attention) effect = 14;
+  if (cue == Cue::Tick) effect = 26;  // sharp tick, subtle
   wr(0x01, 0x00);
   wr(0x04, effect);
   wr(0x0C, 0x01);
@@ -77,6 +85,7 @@ void play(Cue cue, bool sound, bool haptic) {
   if (haptic && g_haptic) {
     hapticPulse(cue);
   }
+  if (cue == Cue::Tick) return;  // haptic-only, never beeps
   if (sound && g_sound) {
     amp(true);
     beepSeries(cue);

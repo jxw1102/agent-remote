@@ -2,6 +2,9 @@
 
 #include <WiFi.h>
 
+#include <algorithm>
+#include <vector>
+
 namespace wifi_mgr {
 namespace {
 
@@ -9,12 +12,66 @@ State st = State::Off;
 uint32_t started = 0;
 String wantSsid;
 
+bool scanInFlight = false;
+bool scanDone = false;
+std::vector<ScanItem> scanResults;
+const ScanItem kEmptyItem{};
+
+void collectScan() {
+  int n = WiFi.scanComplete();
+  if (n < 0) return;  // still running / not started
+  scanResults.clear();
+  for (int i = 0; i < n; i++) {
+    String ssid = WiFi.SSID(i);
+    if (!ssid.length()) continue;  // skip hidden
+    bool secure = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+    int rssi = WiFi.RSSI(i);
+    bool dup = false;
+    for (auto &it : scanResults) {
+      if (it.ssid == ssid) {  // keep strongest AP per SSID
+        if (rssi > it.rssi) it.rssi = rssi;
+        dup = true;
+        break;
+      }
+    }
+    if (!dup) scanResults.push_back({ssid, rssi, secure});
+  }
+  std::sort(scanResults.begin(), scanResults.end(),
+            [](const ScanItem &a, const ScanItem &b) { return a.rssi > b.rssi; });
+  WiFi.scanDelete();
+  scanInFlight = false;
+  scanDone = true;
+  Serial.printf("[wifi] scan done: %d networks\n", (int)scanResults.size());
+}
+
 }  // namespace
 
 void begin() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(true);  // power friendly on battery
   st = State::Off;
+}
+
+void startScan() {
+  scanDone = false;
+  scanInFlight = true;
+  scanResults.clear();
+  WiFi.scanNetworks(true /*async*/);
+  Serial.println("[wifi] scan started");
+}
+
+bool scanning() { return scanInFlight; }
+
+bool scanReady() {
+  if (scanInFlight) collectScan();
+  return scanDone;
+}
+
+int scanCount() { return (int)scanResults.size(); }
+
+const ScanItem &scanItem(int i) {
+  if (i < 0 || i >= (int)scanResults.size()) return kEmptyItem;
+  return scanResults[(size_t)i];
 }
 
 void connect(const String &ssid, const String &pass) {

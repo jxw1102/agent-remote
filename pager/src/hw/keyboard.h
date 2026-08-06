@@ -18,5 +18,8 @@ void begin();
 bool poll(Event *out);
 // Call regularly so INT is drained.
 void tick();
+// Sticky modifier states (for UI indicators).
+bool capsOn();
+bool symOn();
 
 }  // namespace keyboard

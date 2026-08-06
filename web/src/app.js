@@ -719,7 +719,25 @@ const effortsOf = (profile, harness = null) => {
 
 // ----------------------------------------------------------- onboarding
 
-const DAEMON_REPO = "https://github.com/jxw1102/agent-remote";
+const DAEMON_RELEASES = "https://github.com/jxw1102/agent-remote/releases";
+
+/** Shared empty-state mark (chevron + underscore on a disc). */
+function appendEmptyLogo(parent) {
+  const logo = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  logo.setAttribute("class", "empty-logo");
+  logo.setAttribute("viewBox", "0 0 108 108");
+  logo.setAttribute("width", "54");
+  logo.setAttribute("height", "54");
+  logo.setAttribute("aria-hidden", "true");
+  logo.innerHTML = [
+    '<rect width="108" height="108" rx="54" fill="#12121a"/>',
+    '<path d="M34 40 L48 54 L34 68" stroke="#d97757" stroke-width="7"',
+    ' fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+    '<path d="M56 68 L76 68" stroke="#00d4ff" stroke-width="7"',
+    ' stroke-linecap="round"/>',
+  ].join("");
+  parent.appendChild(logo);
+}
 
 /**
  * First-run / empty-list guide: clients need a running agentremoted.
@@ -727,14 +745,7 @@ const DAEMON_REPO = "https://github.com/jxw1102/agent-remote";
  */
 function buildDaemonGuide(opts = {}) {
   const empty = el("div", opts.compact ? "empty guide" : "empty welcome");
-  if (!opts.compact) {
-    const logo = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    logo.setAttribute("class", "empty-logo");
-    logo.setAttribute("viewBox", "0 0 108 108");
-    logo.setAttribute("aria-hidden", "true");
-    logo.innerHTML = '<path d="M34 40 L48 54 L34 68" stroke="#d97757" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M56 68 L76 68" stroke="#00d4ff" stroke-width="7" stroke-linecap="round"/>';
-    empty.appendChild(logo);
-  }
+  appendEmptyLogo(empty);
   empty.appendChild(el("h2", null, "Connect a daemon to start"));
   const lead = el("p");
   lead.innerHTML = "This page is only a <strong>client</strong>. Install "
@@ -744,7 +755,7 @@ function buildDaemonGuide(opts = {}) {
   const steps = document.createElement("ol");
   steps.className = "welcome-steps";
   [
-    "Clone or download the daemon from the project repo.",
+    "Download the daemon package from Releases.",
     "Run it (<code>cd daemon && PYTHONPATH=. python3 -m agentremoted</code> or the launchd/systemd install).",
     "Copy the token from <code>~/.agentremoted/token</code> and add a profile.",
   ].forEach((html) => {
@@ -760,16 +771,12 @@ function buildDaemonGuide(opts = {}) {
   actions.appendChild(add);
   const link = document.createElement("a");
   link.className = "welcome-link";
-  link.href = DAEMON_REPO;
+  link.href = DAEMON_RELEASES;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   link.textContent = "Get the daemon →";
   actions.appendChild(link);
   empty.appendChild(actions);
-  const hint = el("p", "welcome-hint");
-  hint.innerHTML = "Source &amp; releases: "
-    + `<a href="${DAEMON_REPO}" target="_blank" rel="noopener noreferrer">github.com/jxw1102/agent-remote</a>`;
-  empty.appendChild(hint);
   return empty;
 }
 
@@ -783,6 +790,7 @@ function showWelcomeIfNeeded() {
     tr.appendChild(buildDaemonGuide());
   } else {
     const empty = el("div", "empty");
+    appendEmptyLogo(empty);
     empty.appendChild(el("h2", null, "Pick a session"));
     empty.appendChild(el("p", null,
       "Every daemon you add shows up in one list on the left — Claude, Grok, and Codex side by side."));
@@ -1586,7 +1594,7 @@ function stopJobWatch() {
   state.jobTimer = null;
   state.job = null;
   state.jobLastFetch = 0;
-  // Keep the 34×34 slot so Live TUI (right of Stop) never shifts.
+  // Keep the 34×34 Stop slot empty — do not collapse the row.
   setIconIdle($("btn-stop"), true);
   renderBanner();
 }

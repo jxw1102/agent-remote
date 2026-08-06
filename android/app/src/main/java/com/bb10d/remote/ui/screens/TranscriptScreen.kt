@@ -23,6 +23,9 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -31,6 +34,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.MoreVert
@@ -89,8 +93,10 @@ import com.bb10d.remote.ui.theme.Accent
 import com.bb10d.remote.ui.theme.AgentRemoteTheme
 import com.bb10d.remote.ui.theme.MonoStyle
 import com.bb10d.remote.ui.theme.palette
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -159,6 +165,7 @@ private fun TranscriptScreenBody(
     // Composer draft is owned by the ViewModel so attachment inserts survive
     // the system file picker (local remember state was dropped on return).
     val composerText by vm.composerText.collectAsStateWithLifecycle()
+    val attachments by vm.attachments.collectAsStateWithLifecycle()
     var menuOpen by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showOptions by remember { mutableStateOf(false) }
@@ -173,15 +180,22 @@ private fun TranscriptScreenBody(
         uri ?: return@rememberLauncherForActivityResult
         scope.launch {
             val name = queryFileName(context, uri)
-            val bytes = runCatching {
-                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            }.getOrNull()
-            if (bytes == null) {
-                vm.note("Could not read that file")
+            // IO thread: camera photos are several MB and cloud-backed
+            // (Google Photos) documents can block while they download.
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                }.getOrNull()
+            }
+            if (bytes == null || bytes.isEmpty()) {
+                // Empty happens for cloud-only files the provider couldn't
+                // fetch — the old build uploaded these as 0 bytes (HTTP 400).
+                vm.note(if (bytes == null) "Could not read that file" else "File is empty on this device (cloud-only?)")
                 return@launch
             }
-            // ViewModel uploads and splices [attached: path] into composerText.
-            vm.attachUpload(name, bytes)
+            // Uploads become chips above the composer; markers join the
+            // prompt at send time (vm.sendComposer).
+            vm.attach(name, bytes)
         }
     }
 
@@ -408,18 +422,20 @@ private fun TranscriptScreenBody(
                 }
             }
 
+            AttachmentChips(
+                chips = attachments,
+                onRemove = vm::removeAttachment,
+            )
             Composer(
                 text = composerText,
                 onText = vm::updateComposer,
+                canSend = composerText.isNotBlank() ||
+                    attachments.any { !it.uploading },
                 running = jobState.running,
                 interactive = profile?.effectiveExecMode() == ExecMode.INTERACTIVE,
                 accent = accent.tint,
                 onAccent = accent.onTint,
-                onSend = {
-                    val text = composerText
-                    vm.clearComposer()
-                    vm.send(text)
-                },
+                onSend = vm::sendComposer,
                 onStop = vm::stop,
                 onAttach = { picker.launch(arrayOf("*/*")) },
             )
@@ -772,10 +788,71 @@ private fun QuestionBanner(accent: Color) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Uploaded files as removable chips above the composer. Kept out of the
+ * TextField on purpose: the old design spliced `[attached: …]` into the
+ * field text and the async update raced TextField state (markers vanished).
+ */
+@Composable
+private fun AttachmentChips(
+    chips: List<TranscriptViewModel.ComposerAttachment>,
+    onRemove: (String) -> Unit,
+) {
+    if (chips.isEmpty()) return
+    val pal = palette
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surface)
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        chips.forEach { chip ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, pal.hairline, RoundedCornerShape(8.dp))
+                    .padding(start = 8.dp),
+            ) {
+                if (chip.uploading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(12.dp),
+                        strokeWidth = 1.5.dp,
+                        color = pal.dim,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(
+                    chip.name,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 180.dp),
+                )
+                IconButton(
+                    onClick = { onRemove(chip.id) },
+                    modifier = Modifier.size(28.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.Close,
+                        contentDescription = "Remove attachment",
+                        tint = pal.dim,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun Composer(
     text: String,
     onText: (String) -> Unit,
+    canSend: Boolean,
     running: Boolean,
     interactive: Boolean,
     accent: Color,
@@ -838,16 +915,16 @@ private fun Composer(
             }
             IconButton(
                 onClick = onSend,
-                enabled = text.isNotBlank(),
+                enabled = canSend,
                 modifier = Modifier
                     .padding(bottom = 4.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(if (text.isNotBlank()) accent else Color.Transparent),
+                    .background(if (canSend) accent else Color.Transparent),
             ) {
                 Icon(
                     Icons.AutoMirrored.Outlined.Send,
                     contentDescription = "Send",
-                    tint = if (text.isNotBlank()) onAccent else pal.dim,
+                    tint = if (canSend) onAccent else pal.dim,
                 )
             }
         }

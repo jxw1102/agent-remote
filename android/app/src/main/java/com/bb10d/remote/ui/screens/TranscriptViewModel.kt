@@ -15,6 +15,7 @@ import com.bb10d.remote.data.SessionRef
 import com.bb10d.remote.data.Time
 import com.bb10d.remote.net.DaemonClient
 import com.bb10d.remote.net.DaemonException
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -797,9 +798,8 @@ class TranscriptViewModel(
     }
 
     /**
-     * Composer draft lives here (not in Compose remember) so attachment
-     * inserts survive the document-picker Activity Result lifecycle.
-     * Local `remember { mutableStateOf }` was losing the `[attached: …]` splice.
+     * Composer draft lives here (not in Compose remember) so it survives the
+     * document-picker Activity Result lifecycle.
      */
     private val _composerText = MutableStateFlow("")
     val composerText: StateFlow<String> = _composerText.asStateFlow()
@@ -812,43 +812,73 @@ class TranscriptViewModel(
         _composerText.value = ""
     }
 
-    private fun appendAttachedMarker(path: String) {
-        val marker = "[attached: $path]"
-        val cur = _composerText.value
-        _composerText.value = when {
-            cur.isBlank() -> marker
-            cur.endsWith(' ') || cur.endsWith('\n') -> cur + marker
-            else -> cur.trimEnd() + " " + marker
-        }
-    }
+    /**
+     * Attachments are chips beside the composer, never text spliced into the
+     * TextField: async writes into a live TextField race its internal state
+     * and the old `[attached: …]` splice kept getting lost. Chips are
+     * VM-owned, show upload progress, can be removed, and the markers join
+     * the prompt only at send time in [sendComposer].
+     */
+    data class ComposerAttachment(
+        val id: String,
+        val name: String,
+        val path: String = "",  // host path once uploaded
+        val uploading: Boolean = true,
+    )
 
-    fun attachUpload(name: String, bytes: ByteArray) {
+    private val _attachments = MutableStateFlow<List<ComposerAttachment>>(emptyList())
+    val attachments: StateFlow<List<ComposerAttachment>> = _attachments.asStateFlow()
+
+    fun attach(name: String, bytes: ByteArray) {
         val c = client ?: run {
             setStatus("Not connected to a daemon")
             return
         }
         if (bytes.isEmpty()) {
-            setStatus("Empty file")
+            setStatus("File is empty on this device (cloud-only?)")
             return
         }
         val safeName = name.ifBlank { "file" }
-        setStatus("Uploading $safeName…", sticky = false)
+        val chip = ComposerAttachment(id = UUID.randomUUID().toString(), name = safeName)
+        _attachments.value = _attachments.value + chip
         viewModelScope.launch {
             try {
                 val dto = c.uploadAttachment(safeName, bytes)
                 val path = dto.path.trim()
-                if (path.isEmpty()) {
-                    setStatus("Upload ok but daemon returned no path")
-                    return@launch
+                if (path.isEmpty()) throw DaemonException(0, "daemon returned no path")
+                _attachments.value = _attachments.value.map {
+                    if (it.id == chip.id) it.copy(path = path, uploading = false) else it
                 }
-                appendAttachedMarker(path)
                 setStatus("Attached $safeName", sticky = false)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                setStatus(repo.reason(e))
+                _attachments.value = _attachments.value.filterNot { it.id == chip.id }
+                setStatus("Upload failed: ${repo.reason(e)}")
             }
         }
+    }
+
+    fun removeAttachment(id: String) {
+        _attachments.value = _attachments.value.filterNot { it.id == id }
+    }
+
+    /** Send the composer draft plus the markers for every uploaded chip. */
+    fun sendComposer() {
+        val chips = _attachments.value
+        if (chips.any { it.uploading }) {
+            setStatus("Attachment still uploading…", sticky = false)
+            return
+        }
+        val markers = chips.filter { it.path.isNotEmpty() }
+            .joinToString(" ") { "[attached: ${it.path}]" }
+        val text = listOf(_composerText.value.trim(), markers)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+        if (text.isBlank()) return
+        _composerText.value = ""
+        _attachments.value = emptyList()
+        send(text)
     }
 
     fun clearStatus() = setStatus("")

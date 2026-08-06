@@ -17,7 +17,8 @@ String urlJoin(const String &path) {
   return b + path;
 }
 
-bool httpGet(const String &path, String *body, int *code, String *err) {
+bool httpGet(const String &path, String *body, int *code, String *err,
+             uint32_t timeoutMs = 15000) {
   if (WiFi.status() != WL_CONNECTED) {
     if (err) *err = "wifi down";
     return false;
@@ -38,7 +39,10 @@ bool httpGet(const String &path, String *body, int *code, String *err) {
       return false;
     }
   }
-  http.setTimeout(15000);
+  // A dead host must not freeze the UI loop for 15 s — background polls pass
+  // a short timeout; user-initiated calls keep the generous default.
+  http.setConnectTimeout(3000);
+  http.setTimeout(timeoutMs);
   http.addHeader("Authorization", "Bearer " + g_token);
   http.addHeader("X-Auth-Token", g_token);
   int c = http.GET();
@@ -99,7 +103,7 @@ void configure(const String &baseUrl, const String &token) {
 
 bool ping(String *versionOut, String *errOut) {
   String body;
-  if (!httpGet("/api/ping", &body, nullptr, errOut)) return false;
+  if (!httpGet("/api/ping", &body, nullptr, errOut, 5000)) return false;
   JsonDocument doc;
   if (deserializeJson(doc, body)) {
     if (errOut) *errOut = "bad json";
@@ -163,7 +167,7 @@ bool newSession(const String &cwd, const String &prompt, const String &provider,
 StatusSnap pollStatus() {
   StatusSnap snap;
   String body, err;
-  if (!httpGet("/api/sessions?limit=40", &body, nullptr, &err)) {
+  if (!httpGet("/api/sessions?limit=40", &body, nullptr, &err, 4000)) {
     snap.error = err;
     return snap;
   }

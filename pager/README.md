@@ -38,7 +38,10 @@ pio device monitor -b 115200
 
 ### Device dead / no boot after flash
 
-Usually **wrong flash/PSRAM mode** or a hang in early init. Recovery:
+Usually **wrong flash/PSRAM mode** or a hang in early init. The board
+definition pairs `qio_qspi` memory type with a **DIO image header**
+(matches the official arduino-esp32 `LilyGo-T-LoRa-Pager` entry; a QIO
+header fails on some flash chips → dead after flash, no serial). Recovery:
 
 1. Hold **BOOT**, tap **RST**, release **BOOT** (download mode — USB stays solid).
 2. Erase and reflash with the fixed board definition (`qio_qspi`, 16 MB):

@@ -27,6 +27,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 FAKE_HOME = tempfile.mkdtemp(prefix="agentremoted-test-")
 os.environ["AGENTREMOTED_HOME"] = os.path.join(FAKE_HOME, ".agentremoted")
+# Never read the real macOS Keychain (real OAuth tokens -> live API calls).
+os.environ["AGENTREMOTED_NO_KEYCHAIN"] = "1"
 
 from agentremoted.config import Config, load_or_create_token  # noqa: E402
 from agentremoted.jobs import JobManager                      # noqa: E402

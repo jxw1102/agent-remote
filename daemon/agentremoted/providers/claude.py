@@ -24,12 +24,15 @@ the phone, and pre-allows the host's own MCP servers so only edits and shell
 commands ever ask.
 """
 
+import getpass
 import hashlib
 import json
 import logging
 import os
 import queue
 import re
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -175,17 +178,128 @@ _TITLE_SYSTEM = (
 
 
 # OAuth token refresh, the same grant the CLI performs. When the cached access
-# token in ~/.claude/.credentials.json has expired we exchange the refresh
+# token in the CLI's credential store has expired we exchange the refresh
 # token for a fresh one and write it back, so /usage and the models catalog
 # keep working between interactive CLI runs (headless `claude -p` refreshes its
-# own copy but may not touch the file the daemon reads).
+# own copy but may not touch the store the daemon reads).
+#
+# The store itself is platform-dependent: on Linux/WSL the CLI writes
+# ~/.claude/.credentials.json; on macOS it keeps the same JSON blob in the
+# login Keychain (generic password, service "Claude Code-credentials") and
+# writes NO file at all — so a file-only reader finds nothing to sign in with
+# and every OAuth feature (usage, models, titles, headless MCP) goes dark.
 _TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 _OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _TOKEN_SKEW_MS = 60_000  # refresh a touch early to dodge edge-of-expiry 401s
 
+# Every real Claude OAuth token (setup-token or store accessToken) starts with
+# this. A configured token that doesn't — a template placeholder like
+# "PASTE-TOKEN-HERE", a truncated paste — must not shadow a valid sign-in in
+# the credential store: Anthropic answers garbage bearers with long 429
+# backoffs, which reads as "usage broken / no models" with no hint why.
+_TOKEN_PREFIX = "sk-ant-"
+_bad_env_token_warned = False
+
+
+def _reject_bad_env_token(tok) -> str:
+    """The configured token if it can possibly be real, else "" (warn once)."""
+    global _bad_env_token_warned
+    tok = str(tok or "").strip()
+    if not tok:
+        return ""
+    if tok.startswith(_TOKEN_PREFIX):
+        return tok
+    if not _bad_env_token_warned:
+        _bad_env_token_warned = True
+        log.warning(
+            "claude: CLAUDE_CODE_OAUTH_TOKEN in env/config is not a Claude "
+            "token (expected %s…) — ignoring it and using the CLI's own "
+            "sign-in instead", _TOKEN_PREFIX)
+    return ""
+
+_KEYCHAIN_SERVICE = "Claude Code-credentials"
+# `security` blocks on a GUI unlock prompt when the login keychain is locked;
+# a daemon must never hang on that, so give up quickly and report no sign-in.
+_KEYCHAIN_TIMEOUT_S = 10
+
 
 def _creds_path() -> Path:
     return Path.home() / ".claude" / ".credentials.json"
+
+
+def _keychain_enabled() -> bool:
+    # AGENTREMOTED_NO_KEYCHAIN opts out (tests; hosts where the keychain is
+    # locked and the `security` round-trip would only ever time out).
+    return (sys.platform == "darwin"
+            and not os.environ.get("AGENTREMOTED_NO_KEYCHAIN"))
+
+
+def _keychain_read() -> dict:
+    """The credentials blob from the macOS login Keychain, or {}."""
+    try:
+        proc = subprocess.run(
+            ["security", "find-generic-password",
+             "-s", _KEYCHAIN_SERVICE, "-w"],
+            capture_output=True, text=True, timeout=_KEYCHAIN_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if proc.returncode != 0:
+        return {}
+    try:
+        data = json.loads(proc.stdout.strip())
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _keychain_write(data: dict) -> None:
+    """Update the Keychain item in place (-U), as the CLI itself does."""
+    try:
+        subprocess.run(
+            ["security", "add-generic-password", "-U",
+             "-s", _KEYCHAIN_SERVICE, "-a", getpass.getuser(),
+             "-w", json.dumps(data)],
+            capture_output=True, timeout=_KEYCHAIN_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _read_creds():
+    """(credentials blob, store) from wherever the CLI keeps it; ({}, "").
+
+    Reads both the JSON file and (on macOS) the login Keychain, and picks
+    whichever holds the fresher claudeAiOauth token: a machine that migrated
+    between storage modes can be left with a stale copy in one store, and
+    blindly preferring that one would break usage/models while a perfectly
+    good sign-in sits in the other.
+    """
+    candidates = []
+    try:
+        data = json.loads(_creds_path().read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data:
+            candidates.append((data, "file"))
+    except (OSError, ValueError):
+        pass
+    if _keychain_enabled():
+        data = _keychain_read()
+        if data:
+            candidates.append((data, "keychain"))
+    if not candidates:
+        return {}, ""
+
+    def freshness(item):
+        exp = (item[0].get("claudeAiOauth") or {}).get("expiresAt")
+        return exp if isinstance(exp, (int, float)) else 0
+
+    return max(candidates, key=freshness)
+
+
+def _save_creds(data: dict, store: str) -> None:
+    """Write refreshed tokens back to the store they came from."""
+    if store == "keychain":
+        _keychain_write(data)
+    elif store == "file":
+        _write_creds(_creds_path(), data)
 
 
 def _refresh_oauth(refresh_token: str) -> dict:
@@ -237,19 +351,17 @@ def _oauth_token(config) -> str:
     """The subscription OAuth access token.
 
     Prefer an explicit long-lived token (`claude setup-token`) from the
-    daemon's env/config. Otherwise read the interactive credentials file; if
-    its access token has expired, exchange the stored refresh token for a fresh
-    one and write the new tokens back (mirroring what the CLI does on each
-    run), so /usage keeps working even when no job has run recently."""
+    daemon's env/config. Otherwise read the interactive credential store
+    (JSON file or macOS Keychain); if its access token has expired, exchange
+    the stored refresh token for a fresh one and write the new tokens back
+    (mirroring what the CLI does on each run), so /usage keeps working even
+    when no job has run recently."""
     env = getattr(config, "claude_env", None) or {}
-    tok = env.get("CLAUDE_CODE_OAUTH_TOKEN") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    if tok and str(tok).strip():
-        return str(tok).strip()
-    path = _creds_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
+    tok = _reject_bad_env_token(env.get("CLAUDE_CODE_OAUTH_TOKEN")
+                                or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
+    if tok:
+        return tok
+    data, store = _read_creds()
     oauth = data.get("claudeAiOauth") or {}
     access = str(oauth.get("accessToken", "")).strip()
     expires_at = oauth.get("expiresAt")
@@ -263,7 +375,7 @@ def _oauth_token(config) -> str:
         if updated.get("accessToken"):
             oauth.update(updated)
             data["claudeAiOauth"] = oauth
-            _write_creds(path, data)
+            _save_creds(data, store)
             return str(updated["accessToken"])
     # Expired and could not refresh: hand back whatever we have so the caller's
     # 401 path shows "sign-in expired" rather than a misleading "no sign-in".
@@ -1360,7 +1472,7 @@ def _mcp_tool_prefix(server: str) -> str:
 # ------------------------------------------------------------- headless MCP
 #
 # Headless `claude -p` never attaches the OAuth tokens the interactive TUI
-# stores for remote MCP servers (~/.claude/.credentials.json "mcpOAuth"):
+# stores for remote MCP servers (the credential store's "mcpOAuth" map):
 # plugin servers report needs-auth despite a valid token on disk, and
 # claude.ai connectors sit in "pending" forever, so not one MCP tool loads.
 # The proven fix is to hand the same server to --mcp-config with an explicit
@@ -1442,11 +1554,7 @@ def _mcp_oauth_servers() -> dict:
     `/mcp` sign-in creates it), as --mcp-config entries that carry the token
     in an explicit Bearer header. Keys are the munged tool-prefix names, so
     the tools keep the ids the TUI transcript shows."""
-    path = _creds_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    data, store = _read_creds()
     oauth = data.get("mcpOAuth")
     if not isinstance(oauth, dict):
         return {}
@@ -1491,7 +1599,7 @@ def _mcp_oauth_servers() -> dict:
         }
     if dirty:
         data["mcpOAuth"] = oauth
-        _write_creds(path, data)
+        _save_creds(data, store)
     return servers
 
 
@@ -1665,7 +1773,12 @@ class ClaudeRunner:
         if job.model and job.model != "default":
             cmd += ["--model", job.model]
         env = None
-        extra_env = getattr(self.config, "claude_env", None) or {}
+        extra_env = dict(getattr(self.config, "claude_env", None) or {})
+        # Same guard as _oauth_token: a placeholder token forwarded into the
+        # CLI's env would shadow its own sign-in and fail every turn's auth.
+        if "CLAUDE_CODE_OAUTH_TOKEN" in extra_env and \
+                not _reject_bad_env_token(extra_env["CLAUDE_CODE_OAUTH_TOKEN"]):
+            del extra_env["CLAUDE_CODE_OAUTH_TOKEN"]
         if extra_env:
             env = dict(os.environ)
             env.update({str(k): str(v) for k, v in extra_env.items()})

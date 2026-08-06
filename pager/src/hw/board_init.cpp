@@ -4,25 +4,14 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-// Minimal XL9555 (TI / Shanghai Belling style) — output port 0 only.
+// Minimal XL9555 (PCA9555-style): output regs 0x02/0x03, config regs
+// 0x06/0x07 (1 = input, 0 = output). Rail bits 8+ live on port 1.
 namespace {
 
-bool xlWritePort0(uint8_t value) {
+bool xlWriteReg(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(XL9555_ADDR);
-  Wire.write(0x02);  // output port 0
+  Wire.write(reg);
   Wire.write(value);
-  return Wire.endTransmission() == 0;
-}
-
-bool xlConfigOutputs() {
-  // Config port 0 = all outputs (0 = output)
-  Wire.beginTransmission(XL9555_ADDR);
-  Wire.write(0x06);
-  Wire.write(0x00);
-  if (Wire.endTransmission() != 0) return false;
-  Wire.beginTransmission(XL9555_ADDR);
-  Wire.write(0x07);
-  Wire.write(0x00);
   return Wire.endTransmission() == 0;
 }
 
@@ -47,25 +36,23 @@ void boardEarlyInit() {
   Wire.setClock(100000);
 
   // Power rails via XL9555 (Meshtastic earlyInitVariant).
-  // KB_EN + DRV_EN + GPIO_EN high; AMP low until chime; LORA/GPS high (off path).
-  if (xlConfigOutputs()) {
-    uint8_t p0 = 0;
-    p0 |= (1u << EXP_DRV_EN);
-    p0 |= (1u << EXP_KB_EN);
-    p0 |= (1u << EXP_GPIO_EN);
-    p0 |= (1u << EXP_LORA_EN);
-    p0 |= (1u << EXP_GPS_EN);
-    p0 |= (1u << EXP_SD_EN);
-    // AMP off
-    p0 &= ~(1u << EXP_AMP_EN);
-    if (xlWritePort0(p0)) {
-      Serial.println("[board] XL9555 rails OK");
-    } else {
-      Serial.println("[board] XL9555 write failed");
-    }
-  } else {
-    Serial.println("[board] XL9555 not found — continuing");
-  }
+  // Port 0: DRV/LORA/GPS on, AMP off. KB_RST/NFC_EN/GPS_RST left as inputs —
+  // driving KB_RST low holds the TCA8418 in reset (dead keyboard).
+  // Port 1: KB_EN/GPIO_EN/SD_EN on; SD_DET/SD_PULLEN stay inputs.
+  const uint8_t out0 = (1u << EXP_DRV_EN) | (1u << EXP_LORA_EN) |
+                       (1u << EXP_GPS_EN);
+  const uint8_t out1 = (1u << (EXP_KB_EN - 8)) | (1u << (EXP_GPIO_EN - 8)) |
+                       (1u << (EXP_SD_EN - 8));
+  // Output values first, then config — avoids glitching a pin low while it
+  // flips from input to output (power-on output registers default to 0xFF).
+  bool ok = xlWriteReg(0x02, out0) && xlWriteReg(0x03, out1) &&
+            xlWriteReg(0x06, (uint8_t)~((1u << EXP_DRV_EN) |
+                                        (1u << EXP_AMP_EN) |
+                                        (1u << EXP_LORA_EN) |
+                                        (1u << EXP_GPS_EN))) &&
+            xlWriteReg(0x07, (uint8_t)~out1);
+  Serial.println(ok ? "[board] XL9555 rails OK"
+                    : "[board] XL9555 not found — continuing");
 
   // Keyboard backlight default on
   pinMode(PIN_KB_BL, OUTPUT);

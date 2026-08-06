@@ -81,7 +81,10 @@ void begin(uint8_t backlight) {
     Serial.println("[display] init returned false — UI on serial only");
     return;
   }
-  lcd->setRotation(1);
+  // offset_rotation=3 already maps the panel to landscape-with-keyboard-below
+  // (Meshtastic device-ui uses rotation 0 on top of it). setRotation(1) here
+  // composed to native portrait — screen came out 90° off.
+  lcd->setRotation(0);
   lcd->setBrightness(backlight);
   lcd->setTextDatum(lgfx::textdatum_t::top_left);
   lcd->setFont(&fonts::Font0);
@@ -125,6 +128,45 @@ void drawTextTrunc(int x, int y, int maxW, const char *text, uint16_t color,
 
 void hLine(int y, uint16_t color) {
   if (ready && lcd) lcd->drawFastHLine(0, y, lcd->width(), color);
+}
+
+void fillRoundRect(int x, int y, int w, int h, int r, uint16_t color) {
+  if (ready && lcd) lcd->fillRoundRect(x, y, w, h, r, color);
+}
+
+void drawRoundRect(int x, int y, int w, int h, int r, uint16_t color) {
+  if (ready && lcd) lcd->drawRoundRect(x, y, w, h, r, color);
+}
+
+void fillCircle(int x, int y, int r, uint16_t color) {
+  if (ready && lcd) lcd->fillCircle(x, y, r, color);
+}
+
+void drawCircle(int x, int y, int r, uint16_t color) {
+  if (ready && lcd) lcd->drawCircle(x, y, r, color);
+}
+
+void drawLine(int x0, int y0, int x1, int y1, uint16_t color) {
+  if (ready && lcd) lcd->drawLine(x0, y0, x1, y1, color);
+}
+
+void fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2,
+                  uint16_t color) {
+  if (ready && lcd) lcd->fillTriangle(x0, y0, x1, y1, x2, y2, color);
+}
+
+void fillArc(int x, int y, int r0, int r1, float a0, float a1,
+             uint16_t color) {
+  if (ready && lcd) lcd->fillArc(x, y, r0, r1, a0, a1, color);
+}
+
+void sleepPanel() {
+  if (ready && lcd) {
+    lcd->setBrightness(0);
+    lcd->sleep();
+  }
+  pinMode(PIN_TFT_BL, OUTPUT);
+  digitalWrite(PIN_TFT_BL, LOW);
 }
 
 int width() { return ready && lcd ? lcd->width() : TFT_WIDTH_PX; }

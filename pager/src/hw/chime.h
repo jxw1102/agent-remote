@@ -11,6 +11,7 @@ enum class Cue : uint8_t {
   Done,       // turn finished
   Error,      // turn failed
   Attention,  // permission / question
+  Tick,       // subtle haptic-only blip (tool call changed)
 };
 
 void begin();
