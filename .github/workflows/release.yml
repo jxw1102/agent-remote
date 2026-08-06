@@ -1,9 +1,10 @@
-# Build client + daemon artifacts and publish a GitHub Release whose tag
-# matches the daemon __version__ (e.g. v2.4.5).
+# Build client + daemon artifacts and publish a GitHub Release.
 #
-# Triggers:
-#   - workflow_dispatch (manual)
-#   - push to main when packaging inputs change
+# Trigger: push a version tag only, e.g.
+#   git tag v2.4.5 && git push origin v2.4.5
+#
+# The release tag is the pushed ref (v2.4.5). The daemon __version__ is still
+# read for the tarball name and release notes; keep them in sync.
 #
 # Assets:
 #   - agent-remote.html          web client (single file)
@@ -14,18 +15,9 @@
 name: Release
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
-    paths:
-      - "daemon/agentremoted/__init__.py"
-      - "daemon/**"
-      - "web/**"
-      - "android/**"
-      - "blackberry/**"
-      - "deploy/**"
-      - ".github/workflows/release.yml"
+    tags:
+      - "v*"
 
 permissions:
   contents: write
@@ -43,18 +35,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: v
-        name: Read daemon version
+        name: Resolve version from tag + daemon __version__
         run: |
-          VER=$(grep -E '^__version__\s*=' daemon/agentremoted/__init__.py \
-            | head -1 \
-            | sed -E 's/^__version__[[:space:]]*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/')
+          # Prefer the pushed tag (v2.4.5 → 2.4.5); fall back to __version__.
+          RAW="${GITHUB_REF_NAME:-}"
+          if [[ "$RAW" == v* ]]; then
+            VER="${RAW#v}"
+          else
+            VER=$(grep -E '^__version__\s*=' daemon/agentremoted/__init__.py \
+              | head -1 \
+              | sed -E 's/^__version__[[:space:]]*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/')
+          fi
           if [ -z "$VER" ]; then
-            echo "Could not parse daemon/agentremoted/__init__.py __version__" >&2
+            echo "Could not resolve version from tag or __init__.py" >&2
             exit 1
+          fi
+          PY_VER=$(grep -E '^__version__\s*=' daemon/agentremoted/__init__.py \
+            | head -1 \
+            | sed -E 's/^__version__[[:space:]]*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/' || true)
+          if [ -n "$PY_VER" ] && [ "$PY_VER" != "$VER" ]; then
+            echo "WARN: tag v$VER does not match daemon __version__=$PY_VER" >&2
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "tag=v$VER" >> "$GITHUB_OUTPUT"
-          echo "Daemon version: $VER (tag v$VER)"
+          echo "Release version: $VER (tag v$VER)"
 
   web:
     needs: version
