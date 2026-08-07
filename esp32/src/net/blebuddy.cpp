@@ -1,5 +1,6 @@
 #include "net/blebuddy.h"
 #include "hw/dlog.h"
+#include "net/timesync.h"
 
 #include <ArduinoJson.h>
 #include <NimBLEDevice.h>
@@ -61,7 +62,11 @@ void parseLine(const String &line) {
     dlog::logf("[ble] owner: %s", g_owner.c_str());
     return;
   }
-  if (!doc["time"].isNull()) return;  // time sync — unused for now
+  if (!doc["time"].isNull()) {
+    JsonArray t = doc["time"].as<JsonArray>();
+    if (t.size() >= 2) timesync::setFromBle(t[0] | 0, t[1] | 0);
+    return;
+  }
   if (doc["evt"] == "turn") {
     // Turn events ride alongside snapshots; snapshot diffing does the
     // chimes, so just surface the first text block as a ticker line.

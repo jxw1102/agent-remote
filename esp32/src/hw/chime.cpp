@@ -1,5 +1,6 @@
 #include "hw/chime.h"
 #include "board_pins.h"
+#include "hw/i2c_lock.h"
 
 #include <Wire.h>
 #include <driver/i2s.h>
@@ -21,6 +22,13 @@ constexpr float C5 = 523.25f;
 constexpr float E5 = 659.25f;
 constexpr float G5 = 783.99f;
 
+struct CueMsg {
+  Cue cue;
+  bool sound;
+  bool haptic;
+};
+QueueHandle_t g_queue = nullptr;
+
 bool g_sound = true;
 bool g_haptic = true;
 uint8_t g_volume = 50;
@@ -36,6 +44,7 @@ void amp(bool on) {
 #if !HAS_XL9555
   (void)on;  // no amp-enable rail on this board
 #else
+  I2cLock lock;
   // Read-modify-write AMP_EN on XL9555 output port 0.
   Wire.beginTransmission(XL9555_ADDR);
   Wire.write(0x02);
@@ -59,6 +68,7 @@ bool audioInit() {
   g_audioTried = true;
 
 #if HAS_ES8311
+  I2cLock lock;  // codec bring-up talks I2C
   g_pins.addI2C(audio_driver::PinFunction::CODEC, PIN_I2C_SCL, PIN_I2C_SDA);
   g_pins.addI2S(audio_driver::PinFunction::CODEC, PIN_I2S_MCLK, PIN_I2S_BCK,
                 PIN_I2S_WS, PIN_I2S_DOUT, PIN_I2S_DIN);
@@ -185,7 +195,13 @@ void beepSeries(Cue cue) {
   i2s_zero_dma_buffer(I2S_NUM_0);
 }
 
-void hapticPulse(Cue cue) {
+bool g_drvReady = false;
+
+// DRV2605 needs real initialization before effects play at full strength —
+// poking GO on an unconfigured chip gave the "no vibration" symptom.
+// Sequence mirrors LilyGoLib initDrv: library A, internal trigger, ERM
+// open-loop (the pager's motor is ERM).
+void drvInit() {
   const uint8_t addr = 0x5A;
   auto wr = [&](uint8_t reg, uint8_t val) {
     Wire.beginTransmission(addr);
@@ -193,21 +209,59 @@ void hapticPulse(Cue cue) {
     Wire.write(val);
     Wire.endTransmission();
   };
-  uint8_t effect = 1;
-  if (cue == Cue::Done) effect = 10;
-  if (cue == Cue::Error) effect = 12;
-  if (cue == Cue::Attention) effect = 14;
-  if (cue == Cue::Tick) effect = 26;  // sharp tick, subtle
-  wr(0x01, 0x00);
+  auto rd = [&](uint8_t reg) -> uint8_t {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return 0;
+    if (Wire.requestFrom((int)addr, 1) != 1) return 0;
+    return Wire.read();
+  };
+  wr(0x01, 0x00);  // MODE: exit standby, internal trigger
+  wr(0x02, 0x00);  // RTP input 0
+  wr(0x0D, 0x00);  // overdrive
+  wr(0x0E, 0x00);  // sustain pos
+  wr(0x0F, 0x00);  // sustain neg
+  wr(0x10, 0x00);  // brake
+  wr(0x13, 0x64);  // audio-to-vibe max input
+  wr(0x03, 0x01);  // effect library A (ERM)
+  wr(0x1A, rd(0x1A) & 0x7F);  // FEEDBACK: ERM mode
+  wr(0x1D, rd(0x1D) | 0x20);  // CONTROL3: ERM open loop
+  g_drvReady = true;
+  Serial.println("[chime] DRV2605 ready (ERM)");
+}
+
+void hapticPulse(Cue cue) {
+  I2cLock lock;
+  if (!g_drvReady) drvInit();
+  const uint8_t addr = 0x5A;
+  auto wr = [&](uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    Wire.write(val);
+    Wire.endTransmission();
+  };
+  uint8_t effect = 1;                     // strong click 100%
+  if (cue == Cue::Done) effect = 10;      // double click
+  if (cue == Cue::Error) effect = 12;     // triple click
+  if (cue == Cue::Attention) effect = 15; // 750 ms alert buzz
+  if (cue == Cue::Tick) effect = 26;      // sharp tick, subtle
+  wr(0x01, 0x00);  // wake (chip may have re-entered standby)
   wr(0x04, effect);
-  wr(0x0C, 0x01);
+  wr(0x05, 0x00);  // end of sequence
+  wr(0x0C, 0x01);  // GO
 }
 
 }  // namespace
 
+namespace {
+void chimeTask(void *);  // defined below; anonymous namespaces merge
+}
+
 void begin() {
-  // Codec init is lazy: first audible cue pays ~100 ms once.
-  Serial.println("[chime] ready (codec lazy-init)");
+  // Codec init is lazy: the first audible cue pays it, on the chime task.
+  g_queue = xQueueCreate(8, sizeof(CueMsg));
+  xTaskCreate(chimeTask, "chime", 6144, NULL, 1, NULL);
+  Serial.println("[chime] task ready (codec lazy-init)");
 }
 
 void setEnabled(bool sound, bool haptic) {
@@ -222,22 +276,41 @@ void setVolume(uint8_t pct) {
 #endif
 }
 
-void play(Cue cue, bool sound, bool haptic) {
-  if (haptic && g_haptic) {
-    hapticPulse(cue);
+namespace {
+
+// The full cue (amp pre-roll + tones) takes ~0.5 s — far too long for the
+// loop task, where it froze LVGL on every event. Runs here instead.
+void playSync(const CueMsg &m) {
+  if (m.haptic && g_haptic) {
+    hapticPulse(m.cue);
   }
-  if (cue == Cue::Tick) return;  // haptic-only, never beeps
-  if (sound && g_sound && g_volume > 0) {
+  if (m.cue == Cue::Tick) return;  // haptic-only, never beeps
+  if (m.sound && g_sound && g_volume > 0) {
     if (!audioInit()) return;
     amp(true);
     // Prime with silence: the amp's soft-start eats ~170 ms of audio after
     // enable (field-tested: 70 ms still lost the first note of the Done
     // triad). The pre-roll trades a slight delay for complete first notes.
     gap(180);
-    beepSeries(cue);
+    beepSeries(m.cue);
     gap(15);
     amp(false);
   }
+}
+
+void chimeTask(void *) {
+  CueMsg m;
+  for (;;) {
+    if (xQueueReceive(g_queue, &m, portMAX_DELAY) == pdTRUE) playSync(m);
+  }
+}
+
+}  // namespace
+
+void play(Cue cue, bool sound, bool haptic) {
+  if (!g_queue) return;
+  CueMsg m{cue, sound, haptic};
+  xQueueSend(g_queue, &m, 0);  // full queue: drop rather than block the UI
 }
 
 }  // namespace chime

@@ -50,7 +50,7 @@ cp ../deploy/config.example.json ~/.agentremoted/config.json
 On first run the daemon creates **`~/.agentremoted/token`**. Show it:
 
 ```bash
-cd /path/to/agent-remote/daemon
+cd /path/to/bb10-remote/daemon
 PYTHONPATH=. python3 -m agentremoted --print-token
 ```
 
@@ -60,7 +60,7 @@ Clients send that value as `X-Auth-Token`, `Authorization: Bearer …`, or
 ### Foreground (macOS, Linux, anywhere)
 
 ```bash
-cd /path/to/agent-remote/daemon
+cd /path/to/bb10-remote/daemon
 PYTHONPATH=. python3 -m agentremoted
 ```
 
@@ -75,7 +75,7 @@ curl -s "http://127.0.0.1:8473/api/ping"
 Script: [`scripts/install-launchd.sh`](scripts/install-launchd.sh)
 
 ```bash
-cd /path/to/agent-remote/daemon
+cd /path/to/bb10-remote/daemon
 ./scripts/install-launchd.sh          # install / update + start
 ./scripts/install-launchd.sh --remove # stop and uninstall
 ```

@@ -250,15 +250,139 @@ class ApiHandler(BaseHTTPRequestHandler):
             return 0.0
 
     def _merged_sessions(self, project, limit, user_only):
-        rows = []
-        for name, b in (self.bundles or {}).items():
-            for s in b.store.list_sessions(project, limit, user_only=user_only):
+        """Merge harness lists so every provider stays visible.
+
+        Global top-N by recency starves Codex when Claude/Grok are busier
+        (limit=6–12 showed codex:0). Round-robin by harness (each queue
+        already newest-first) keeps a mixed feed. Running jobs pin first.
+        """
+        bundles = list((self.bundles or {}).items())
+        if not bundles:
+            return []
+        limit = max(1, min(int(limit or 25), 200))
+        fetch = max(limit, 40)
+        # name -> list of sessions (newest first within harness)
+        queues = []
+        for name, b in bundles:
+            try:
+                rows = list(b.store.list_sessions(
+                    project, fetch, user_only=user_only) or [])
+            except Exception:
+                log.exception("list_sessions failed for %s", name)
+                rows = []
+            tagged = []
+            for s in rows:
                 s = dict(s)
                 s["provider"] = name
-                rows.append(s)
-        # Newest first across harnesses (mixed float mtime / ISO timestamps).
-        rows.sort(key=self._activity_sort_key, reverse=True)
-        return rows[:limit]
+                tagged.append(s)
+            # Within-harness newest first
+            tagged.sort(key=self._activity_sort_key, reverse=True)
+            queues.append([name, tagged, 0])  # name, rows, cursor
+
+        selected = []
+        seen = set()
+
+        def _add(s):
+            key = (s.get("provider") or "", s.get("id") or "")
+            if not key[1] or key in seen:
+                return False
+            seen.add(key)
+            selected.append(s)
+            return True
+
+        # In-flight turns first (new Codex before sqlite has a thread).
+        for s in self._running_job_sessions():
+            _add(s)
+
+        # Round-robin: one from each harness per wave (Codex never buried).
+        while len(selected) < limit:
+            progressed = False
+            for i, (name, rows, cur) in enumerate(queues):
+                if len(selected) >= limit:
+                    break
+                while cur < len(rows):
+                    s = rows[cur]
+                    cur += 1
+                    queues[i][2] = cur
+                    if _add(s):
+                        progressed = True
+                        break
+            if not progressed:
+                break
+
+        return selected[:limit]
+
+    def _running_job_sessions(self):
+        """Synthetic session rows for active jobs (multi + single)."""
+        import time as _time
+        now = _time.time()
+        out = []
+        if self.bundles:
+            items = list(self.bundles.items())
+        else:
+            name = ""
+            if getattr(self, "runner", None) is not None:
+                name = str(getattr(self.runner, "name", "") or "")
+            items = [(name, type("B", (), {"jobs": getattr(self, "jobs", None)})())]
+
+        for name, b in items:
+            jobs_mgr = getattr(b, "jobs", None)
+            if jobs_mgr is None:
+                continue
+            try:
+                job_list = jobs_mgr.list_jobs()
+            except Exception:
+                continue
+            for j in job_list or []:
+                if not isinstance(j, dict):
+                    continue
+                st = str(j.get("status") or "")
+                if st not in ("running", "starting"):
+                    continue
+                sid = (j.get("new_session_id") or j.get("session_id") or "").strip()
+                jid = str(j.get("id") or "")
+                prompt = " ".join(str(j.get("prompt") or "").split())
+                title = (prompt[:80] if prompt else "Running…")
+                rid = sid or ("job:%s" % jid)
+                prov = j.get("provider") or name or ""
+                out.append({
+                    "id": rid,
+                    "project_id": "",
+                    "cwd": j.get("cwd") or "",
+                    "git_branch": "",
+                    "title": title,
+                    "started": "",
+                    "last_active": now,
+                    "last_role": "user",
+                    "last_text": prompt[:200],
+                    "model": j.get("model") or "",
+                    "size_bytes": 0,
+                    "provider": prov,
+                    "job_id": jid,
+                    "running": True,
+                })
+        return out
+
+    def _sessions_with_running(self, sessions, limit):
+        """Prepend active jobs onto a single-provider session list."""
+        limit = max(1, min(int(limit or 25), 200))
+        seen = set()
+        out = []
+        for s in self._running_job_sessions():
+            key = (s.get("provider") or "", s.get("id") or "")
+            if key[1] and key not in seen:
+                seen.add(key)
+                out.append(s)
+        for s in sessions or []:
+            s = dict(s)
+            key = (s.get("provider") or "", s.get("id") or "")
+            if key[1] and key not in seen:
+                seen.add(key)
+                out.append(s)
+            if len(out) >= limit:
+                break
+        out.sort(key=self._activity_sort_key, reverse=True)
+        return out[:limit]
 
     def _merged_projects(self):
         rows = []
@@ -703,8 +827,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/api/sessions":
             project = (query.get("project") or [None])[0]
             limit = min(max(self._int_param(query, "limit", 25), 1), 200)
-            self._send_json({"sessions": self.store.list_sessions(
-                project, limit, user_only=not self._flag(query, "all"))})
+            sessions = self.store.list_sessions(
+                project, limit, user_only=not self._flag(query, "all"))
+            self._send_json({
+                "sessions": self._sessions_with_running(sessions, limit),
+            })
             return
 
         if path == "/api/sessions/search":

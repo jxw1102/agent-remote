@@ -226,7 +226,9 @@ const store = {
 };
 
 const state = {
-  profiles: [],          // [{id, name, baseUrl, token, enabled, provider, caps, execMode, model, effort}]
+  // model/effort: prefer modelByHarness / effortByHarness per CLI; plain
+  // model/effort kept for single-harness and backward-compatible save files.
+  profiles: [],          // [{id, name, baseUrl, token, …, model, effort, modelByHarness, effortByHarness}]
   settings: {},
   rows: [],              // merged session list
   feeds: {},             // profileId -> {error, count}
@@ -718,6 +720,46 @@ const effortsOf = (profile, harness = null) => {
   return (profile && profile.efforts) || [];
 };
 
+/**
+ * Model/effort for a harness. Multi hosts used to keep one profile.model for
+ * every CLI — starting Codex after Claude sent `claude-fable-5` as `-m`.
+ * Prefer per-harness map; never return a value outside this harness's list.
+ */
+function modelOf(profile, harness = null) {
+  if (!profile) return "";
+  const h = (harness || profile.provider || "").toLowerCase();
+  const models = modelsOf(profile, h || null);
+  const map = profile.modelByHarness || {};
+  const stored = (h && map[h]) || "";
+  if (stored && (!models.length || models.includes(stored))) return stored;
+  if (profile.model && models.includes(profile.model)) return profile.model;
+  return models[0] || "";
+}
+function setModelFor(profile, harness, model) {
+  if (!profile) return;
+  const h = (harness || profile.provider || "").toLowerCase();
+  if (!profile.modelByHarness) profile.modelByHarness = {};
+  if (h) profile.modelByHarness[h] = model;
+  profile.model = model;
+}
+function effortOf(profile, harness = null) {
+  if (!profile) return "";
+  const h = (harness || profile.provider || "").toLowerCase();
+  const efforts = effortsOf(profile, h || null);
+  const map = profile.effortByHarness || {};
+  const stored = (h && map[h]) || "";
+  if (stored && (!efforts.length || efforts.includes(stored))) return stored;
+  if (profile.effort && efforts.includes(profile.effort)) return profile.effort;
+  return efforts[0] || "";
+}
+function setEffortFor(profile, harness, effort) {
+  if (!profile) return;
+  const h = (harness || profile.provider || "").toLowerCase();
+  if (!profile.effortByHarness) profile.effortByHarness = {};
+  if (h) profile.effortByHarness[h] = effort;
+  profile.effort = effort;
+}
+
 // ----------------------------------------------------------- onboarding
 
 const DAEMON_RELEASES = "https://github.com/jxw1102/agent-remote/releases";
@@ -1124,7 +1166,11 @@ function renderSessions() {
   const blocked = blockedKeys();
 
   if (!state.profiles.length) {
-    host.appendChild(buildDaemonGuide({ compact: true }));
+    // Full "Connect a daemon" guide lives in the transcript pane only —
+    // never paint it twice (list + main). This column is the session list.
+    const empty = el("div", "empty list-quiet");
+    empty.appendChild(el("p", null, "Sessions appear here."));
+    host.appendChild(empty);
     return;
   }
   if (!rows.length && !state.loading) {
@@ -1709,15 +1755,16 @@ async function send(text) {
   }
 
   try {
+    const harness = sessionProvider(state.open && state.open.session, profile);
     const res = await call(profile,
       `/api/sessions/${encodeURIComponent(state.open.sessionId)}/continue`,
       {
         method: "POST",
         body: {
           prompt: raw,
-          permission_mode: wireExecMode(execModeOf(profile)),
-          model: profile.model || "",
-          effort: profile.effort || "",
+          permission_mode: wireExecMode(execModeOf(profile, harness)),
+          model: modelOf(profile, harness),
+          effort: effortOf(profile, harness),
         },
       });
     if (res && res.job_id) attachJob(res.job_id);
@@ -1752,7 +1799,8 @@ async function runShell(command) {
     const started = await call(profile,
       `/api/sessions/${encodeURIComponent(state.open.sessionId)}/continue`,
       { method: "POST", body: { prompt, permission_mode: wireExecMode(execModeOf(profile)),
-                                model: profile.model || "", effort: profile.effort || "" } });
+                                model: modelOf(profile, sessionProvider(state.open && state.open.session, profile)),
+                                effort: effortOf(profile, sessionProvider(state.open && state.open.session, profile)) } });
     if (started && started.job_id) attachJob(started.job_id);
   } catch (e) {
     composerNote(e.message, true);
@@ -2138,8 +2186,11 @@ function editProfile(index) {
       };
       const name = mk("Name", existing && existing.name, "e.g. Mac · Claude");
       const url = mk("Address", existing && existing.baseUrl,
-        "http:// is assumed; add https:// for a TLS daemon");
-      url.placeholder = "192.168.1.20:8473";
+        "http:// is assumed; add https:// for a TLS daemon. "
+        + "From a phone off your LAN, tunnel localhost with Cloudflare: "
+        + "cloudflared tunnel --url http://localhost:8473 "
+        + "— paste the https://….trycloudflare.com URL here.");
+      url.placeholder = "192.168.1.20:8473  or  https://….trycloudflare.com";
       const token = mk("Token", existing && existing.token,
         "The contents of ~/.agentremoted/token on that host", "password");
       testLine = el("div", "help");
@@ -2238,6 +2289,10 @@ function normalizeProfile(p) {
     execMode: normalizeExecMode(p.execMode || ""),
     model: p.model || "",
     effort: p.effort || "",
+    modelByHarness: (p.modelByHarness && typeof p.modelByHarness === "object")
+      ? { ...p.modelByHarness } : {},
+    effortByHarness: (p.effortByHarness && typeof p.effortByHarness === "object")
+      ? { ...p.effortByHarness } : {},
   };
 }
 
@@ -2379,21 +2434,20 @@ function openNewSession() {
             : "One-shot CLI turn — tools auto-run, no permission prompts."));
         body.appendChild(modeBar);
 
-        // Model / effort for this harness (from multi provider_details).
+        // Model / effort for THIS harness only (never bleed Claude → Codex).
         const models = modelsOf(picked, harness);
         if (capOf(picked, "can_set_model", true, harness) && models.length) {
           const mf = el("div", "field");
           mf.style.marginTop = "10px";
           mf.appendChild(el("label", null, "Model"));
           const mbar = el("div", "pillbar");
-          const cur = picked.model && models.includes(picked.model)
-            ? picked.model : models[0];
+          const cur = modelOf(picked, harness);
           models.slice(0, 12).forEach((v) => {
             const b = el("button", "pill", v);
             b.type = "button";
             b.setAttribute("aria-pressed", String(v === cur));
             b.addEventListener("click", () => {
-              picked.model = v;
+              setModelFor(picked, harness, v);
               store.save();
               render();
             });
@@ -2408,14 +2462,13 @@ function openNewSession() {
           ef.style.marginTop = "10px";
           ef.appendChild(el("label", null, "Reasoning effort"));
           const ebar = el("div", "pillbar");
-          const curE = picked.effort && efforts.includes(picked.effort)
-            ? picked.effort : efforts[0];
+          const curE = effortOf(picked, harness);
           efforts.forEach((v) => {
             const b = el("button", "pill", v);
             b.type = "button";
             b.setAttribute("aria-pressed", String(v === curE));
             b.addEventListener("click", () => {
-              picked.effort = v;
+              setEffortFor(picked, harness, v);
               store.save();
               render();
             });
@@ -2447,8 +2500,9 @@ function openNewSession() {
               const body = {
                 cwd, prompt,
                 permission_mode: wireExecMode(execModeOf(p, h)),
-                model: p.model || "",
-                effort: p.effort || "",
+                // Coerce to a model valid for this harness (not the last Claude pick).
+                model: modelOf(p, h),
+                effort: effortOf(p, h),
               };
               // Multi-harness root requires provider so the daemon routes the turn.
               if (p.multi || harnessesOf(p).length > 1) body.provider = h;
@@ -3009,15 +3063,13 @@ function openOptions() {
           `This session last ran on ${sessionModel}`));
       }
       if (capOf(profile, "can_set_model", true, harness || null) && models.length) {
-        const cur = profile.model && models.includes(profile.model)
-          ? profile.model : models[0];
-        group("Model", models, cur, (v) => { profile.model = v; });
+        const cur = modelOf(profile, harness || null);
+        group("Model", models, cur, (v) => { setModelFor(profile, harness || null, v); });
       }
       const efforts = effortsOf(profile, harness || null);
       if (capOf(profile, "can_set_effort", false, harness || null) && efforts.length) {
-        const curE = profile.effort && efforts.includes(profile.effort)
-          ? profile.effort : efforts[0];
-        group("Reasoning effort", efforts, curE, (v) => { profile.effort = v; });
+        const curE = effortOf(profile, harness || null);
+        group("Reasoning effort", efforts, curE, (v) => { setEffortFor(profile, harness || null, v); });
       }
       const toggle = (label, checked, onChange) => {
         const f = el("div", "field");
@@ -3257,7 +3309,7 @@ async function boot() {
   if (!state.profiles.length) await offerOwnOrigin();
 
   showWelcomeIfNeeded();
-  $("btn-welcome-add")?.addEventListener("click", openProfiles);
+  // "Add a daemon" buttons are wired inside buildDaemonGuide().
 
   await Promise.all(state.profiles.map(pingProfile));
   renderFilters();

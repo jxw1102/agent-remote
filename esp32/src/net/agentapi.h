@@ -10,7 +10,15 @@ struct SessionRow {
   String cwd;
   String provider;
   bool working = false;
-  uint8_t daemon = 0;  // which configured daemon owns this session
+  uint8_t daemon = 0;   // which configured daemon owns this session
+  String lastActive;    // ISO timestamp — lexicographic sort works
+};
+
+struct UsageBucket {
+  String title;
+  String resets;
+  String severity;  // normal / warn / …
+  int percent = 0;
 };
 
 struct StatusSnap {
@@ -44,6 +52,9 @@ String statusSignature(const StatusSnap &s);
 // Upload raw text to POST /api/attachments?name=… → host path (diag logs).
 bool uploadText(int daemon, const String &name, const String &text,
                 String *pathOut, String *errOut);
+
+// GET /api/usage — subscription buckets across the daemon's providers.
+bool fetchUsage(int daemon, std::vector<UsageBucket> *out, String *errOut);
 
 // GET /api/sessions/<id>/tui — live host TUI pane (plain text).
 bool fetchTui(int daemon, const String &sessionId, String *textOut,

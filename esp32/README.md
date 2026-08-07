@@ -29,7 +29,7 @@ Board selection in Arduino IDE: **LilyGo-T-LoRa-Pager**, revision **Radio-SX1262
 ## Build & flash (PlatformIO)
 
 ```bash
-cd esp32
+cd bb10-remote/pager
 # macOS: brew install platformio
 pio run -e tlora_pager_sx1262
 pio run -e tlora_pager_sx1262 -t upload

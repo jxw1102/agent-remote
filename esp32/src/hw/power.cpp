@@ -1,6 +1,7 @@
 #include "hw/power.h"
 #include "hw/display.h"
 #include "board_pins.h"
+#include "hw/i2c_lock.h"
 
 #include <WiFi.h>
 #include <Wire.h>
@@ -69,6 +70,7 @@ void begin() {
 }
 
 Status read() {
+  I2cLock lock;
   Status s{};
   s.percent = -1;
   s.voltage = 0;

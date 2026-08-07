@@ -1,227 +1,166 @@
-# Agent Remote
+<p align="center">
+  <img src="blackberry/variant/unified/icon.png" alt="Agent Remote logo" width="96">
+</p>
 
-Drive **Claude Code**, **Grok**, and **Codex** from a phone or browser.
-Clients: **web**, **Android**, **BlackBerry 10**, **iOS**, and **LILYGO / T-Deck** firmware (`esp32/`).
+<h1 align="center">Agent Remote</h1>
 
-One Python daemon (`agentremoted`) fronts the host CLIs; clients talk to it
-over a token-authenticated HTTP API.
+<p align="center">
+  Control your AI coding sessions from anywhere.
+</p>
 
-**One process, every harness** — config uses `"providers": ["claude", "grok",
-"codex"]`. Clients add a single profile per host and pick the harness when
-starting a session.
+<p align="center">
+  <a href="https://github.com/jxw1102/agent-remote/releases"><img src="https://img.shields.io/github/v/release/jxw1102/agent-remote?display_name=tag&sort=semver" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/jxw1102/agent-remote" alt="MIT license"></a>
+  <a href="https://github.com/jxw1102/agent-remote/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/jxw1102/agent-remote/release.yml?label=release" alt="Release workflow status"></a>
+</p>
 
-| Client | Location |
-|--------|----------|
-| BlackBerry 10 (Cascades) | `blackberry/` → `AgentRemote.bar` |
-| Web (single HTML file) | `web/` — or the **hosted client** below |
-| Android | `android/` |
-| iOS (iPhone / iPad) | `ios/` → SwiftUI app + XcodeGen |
+Agent Remote is a self-hosted remote interface for AI coding agents. Run agents
+on your own computer or server, then connect securely from a browser, phone, or
+specialized device. Start sessions, send prompts, follow live progress, approve
+actions, and manage work across multiple hosts from one place.
 
-**Hosted web client** (no build step): open
-[https://nice-dune-0415af003.7.azurestaticapps.net/](https://nice-dune-0415af003.7.azurestaticapps.net/),
-then **Add a daemon** with your host Base URL and token. The page only talks
-to the daemons you configure — it does not host `agentremoted` for you.
+The project consists of a lightweight Python daemon and native clients. The
+daemon fronts the agent command-line tools through a token-authenticated HTTP
+API, with server-sent events and WebSockets available for live status.
 
-**Releases** (APK, BAR, single-file web HTML, and a packaged daemon tarball) are
-published on GitHub when the daemon version changes — see
-[github.com/jxw1102/agent-remote/releases](https://github.com/jxw1102/agent-remote/releases).
-The release tag matches `agentremoted`’s `__version__` (for example `v2.4.5`).
+## Why Agent Remote?
 
+- Keep long-running coding sessions available when you leave your desk.
+- Use one profile for a host and choose the agent when starting a session.
+- Monitor active work and answer permission or user-question prompts remotely.
+- Connect several hosts and see their sessions in one unified client view.
+- Keep your code and agent state on infrastructure you control.
+
+## Features
+
+- Multi-host profiles and multi-agent sessions
+- Live status, queues, stop controls, and event streams
+- Permission Allow/Deny and `AskUserQuestion` support where available
+- Attachments, slash commands, and host-to-device file drops
+- Interactive and headless execution modes
+- Capability discovery through `GET /api/ping`
+- Web, Android, BlackBerry 10, and LILYGO T-LoRa Pager clients
+- Python daemon with no third-party runtime dependencies
+
+## Architecture
+
+```text
+┌──────────────────────────────────────────────┐
+│              Agent Remote clients             │
+│       Web · Android · BlackBerry · Pager       │
+└──────────────────────┬───────────────────────┘
+                       │ HTTP + JSON
+                       │ token auth · SSE / WebSocket
+┌──────────────────────▼───────────────────────┐
+│                 agentremoted                   │
+│     sessions · queue · permissions · status    │
+└──────────────┬───────────────┬────────────────┘
+               │               │
+        Agent command      Agent session state
+        line interfaces       on the host
 ```
-[Agent Remote client: BB10 / Android / web]
-        ↕  HTTP + JSON  (X-Auth-Token; SSE and/or WebSocket for live status)
-[agentremoted — multi providers]
-        ├─ claude  →  ~/.claude/projects/**  + `claude …`
-        ├─ grok    →  ~/.grok/sessions/**    + `grok …`
-        └─ codex   →  ~/.codex/**            + `codex …`
-```
 
-## Requirements
+The HTTP API is the source of truth for all clients. Provider-specific behavior
+lives inside the daemon, while clients use the capabilities reported by
+`/api/ping` to decide what to display and enable.
 
-- **Python 3** (stdlib only for the daemon — no pip packages)
-- Harness CLIs on `PATH` for the providers you list (`claude`, `grok`, `codex`)
-- Optional: Docker (to build the BB10 `.bar` without a host NDK)
+## Clients
 
-## Quick start — run the daemon
+| Client | Location | Intended use |
+| --- | --- | --- |
+| Web | [`web/`](web/) | Browser access with no build step |
+| Android | [`android/`](android/) | Full mobile client with notifications and live status |
+| BlackBerry 10 | [`blackberry/`](blackberry/) | Cascades app for BB10 devices |
+| LILYGO T-LoRa Pager | [`esp32/`](esp32/) | Small-screen, keyboard-driven remote |
 
-### 1. Config + token (first time only)
+The hosted web client is available at
+[nice-dune-0415af003.7.azurestaticapps.net](https://nice-dune-0415af003.7.azurestaticapps.net/).
+It talks only to the daemons you configure; it does not host an agent daemon.
+
+## Quick start
+
+### Requirements
+
+- Python 3
+- At least one supported agent CLI on `PATH`
+- Optional: Docker for building the BlackBerry 10 package
+
+### 1. Configure the daemon
 
 ```bash
 mkdir -p ~/.agentremoted
 cp deploy/config.example.json ~/.agentremoted/config.json
-# Edit "providers" / port if needed — leave the multi shape.
+# Edit providers and port as needed.
 ```
 
-The first start creates `~/.agentremoted/token`. Print it anytime:
+Use the multi-provider configuration shape even when only one provider is
+enabled:
 
-```bash
-cd daemon
-PYTHONPATH=. python3 -m agentremoted --print-token
+```json
+{
+  "providers": ["claude", "grok", "codex"],
+  "port": 8473
+}
 ```
 
-### 2a. Foreground (any OS — good for trying it)
+The first start creates a token at `~/.agentremoted/token`.
+
+### 2. Start the daemon
+
+For a foreground run:
 
 ```bash
 cd daemon
 PYTHONPATH=. python3 -m agentremoted
 ```
 
-```bash
-curl -s http://127.0.0.1:8473/api/ping
-```
-
-### 2b. macOS — login service (recommended)
-
-```bash
-cd daemon
-./scripts/install-launchd.sh          # install / update + start
-# ./scripts/install-launchd.sh --remove
-```
-
-Writes a multi `providers` list for every harness found on `PATH`, starts at
-login, restarts on crash.
-
-| | |
-|--|--|
-| URL for clients | `http://127.0.0.1:8473` |
-| Token | `~/.agentremoted/token` |
-| Config | `~/.agentremoted/config.json` |
-| Log | `~/.agentremoted/daemon.log` |
+Verify that it is responding:
 
 ```bash
 curl -s http://127.0.0.1:8473/api/ping
-tail -f ~/.agentremoted/daemon.log
-launchctl print "gui/$(id -u)/com.agentremoted"
 ```
 
-### 2c. Linux — systemd
+On macOS, install the login service with `daemon/scripts/install-launchd.sh`.
+On Linux, use [`deploy/deploy.sh`](deploy/deploy.sh) or the systemd unit in
+[`deploy/`](deploy/). See the [daemon launch guide](daemon/README.md#launch-the-daemon)
+for detailed instructions.
 
-**Option A — one-shot deploy**
+### 3. Connect a client
 
-```bash
-./deploy/deploy.sh user@your-host
-# KEY=~/.ssh/id_ed25519 PORT=8473 PROVIDERS=claude,grok,codex ./deploy/deploy.sh user@host
-# VPS with only Grok:  PROVIDERS=grok PORT=2096 ./deploy/deploy.sh user@host
-```
+Add a profile using:
 
-Installs under `/opt/bb10-remote`, multi-shaped config under
-`/root/.agentremoted/`, unit `agentremoted`.
+| Setting | Value |
+| --- | --- |
+| Base URL | `http://127.0.0.1:8473`, a LAN address, or a tunnel URL |
+| Token | Contents of `~/.agentremoted/token` |
 
-**Option B — manual**
+For the fastest setup, open the [hosted web client](https://nice-dune-0415af003.7.azurestaticapps.net/)
+and choose **Add a daemon**.
 
-```bash
-sudo mkdir -p /opt/bb10-remote
-sudo cp -a daemon deploy /opt/bb10-remote/
+## Remote access
 
-sudo mkdir -p /root/.agentremoted
-sudo cp deploy/config.example.json /root/.agentremoted/config.json
-# edit providers / port / tls_* as needed
-
-sudo cp deploy/agentremoted.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now agentremoted
-```
+Do not expose the daemon port directly to the public internet. For phone access,
+the recommended option is a Cloudflare Tunnel:
 
 ```bash
-systemctl status agentremoted
-journalctl -u agentremoted -f
-sudo cat /root/.agentremoted/token
-curl -s http://127.0.0.1:8473/api/ping
-```
-
-The unit uses `WorkingDirectory=/opt/bb10-remote/daemon` and
-`AGENTREMOTED_HOME=/root/.agentremoted`. For a non-root install, copy the unit
-and change those paths (and `User=`).
-
-More detail: [daemon/README.md](daemon/README.md).
-
-## Connect a client
-
-| Field | Example |
-|-------|---------|
-| Base URL | `http://127.0.0.1:8473` (LAN) or your Cloudflare Tunnel URL |
-| Token | contents of `~/.agentremoted/token` on that host |
-
-- **Web (easiest):** open the hosted client at
-  [https://nice-dune-0415af003.7.azurestaticapps.net/](https://nice-dune-0415af003.7.azurestaticapps.net/)
-  and add your daemon URL + token  
-- **Web (local):** `cd web && python3 build.py && ./serve.sh`  
-- **BlackBerry:** `cd blackberry && ./build-bar-docker.sh`, sideload, Settings → profile  
-- **Android:** see [`android/`](android/)
-
-`GET /api/ping` reports `multi`, `providers`, and capability flags.
-
-See also [deploy/CONNECTION.txt](deploy/CONNECTION.txt).
-
-### Reach it from your phone (recommended: Cloudflare Tunnel)
-
-Do **not** open the daemon port on the public internet. Prefer a tunnel so
-clients get HTTPS without firewall changes or a VPS.
-
-[cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/)
-quick tunnel (no Cloudflare account required for a temporary URL):
-
-```bash
-# match the port in config.json (default 8473)
 cloudflared tunnel --url http://localhost:8473
 ```
 
-If you run the daemon on another port (e.g. `8080`):
+Use the HTTPS URL printed by `cloudflared` as the client base URL. For a stable
+address, configure a named tunnel and a domain you control. The daemon token
+still authenticates every request.
 
-```bash
-cloudflared tunnel --url http://localhost:8080
-```
+## Security
 
-`cloudflared` prints a URL like `https://….trycloudflare.com` — paste that as
-the client **Base URL**, and keep using the same host token. Stop the tunnel
-when you are done; the hostname expires with the process.
+- Every API request is authenticated with the daemon token.
+- Keep the token private and rotate it if it is exposed.
+- Prefer a private LAN or an HTTPS tunnel for remote connections.
+- Review [SECURITY.md](SECURITY.md) before reporting a vulnerability.
 
-For a stable hostname, create a named Cloudflare Tunnel and route a domain
-you control. The token still authenticates every request.
+## Development
 
-## Layout
-
-```
-bb10-remote/
-  daemon/           agentremoted (Python), providers, tests, launchd script
-  web/              browser client (no npm) → one HTML file
-  blackberry/       Cascades BB10 app → AgentRemote.bar
-  android/          Android app
-  deploy/           host install: systemd unit, multi config, deploy.sh
-                    (see deploy/README.md)
-  dist/             built .bars (gitignored)
-```
-
-## Build the BlackBerry app
-
-```bash
-cd blackberry
-./build-bar-docker.sh          # → ../dist/AgentRemote.bar
-```
-
-Needs Docker with a BB NDK image (`delaya73/bbndk` or `accupara/bbndk`). On
-Apple Silicon, if you see `exec format error`, turn **off** “Use Rosetta for
-x86/amd64 emulation” in Docker Desktop.
-
-## Networking
-
-- **Phone over the internet:** Cloudflare Tunnel (above) is the recommended
-  path — free HTTPS, no open ports, works with Android / web / BB10.
-- **BB10:** prefer plain HTTP + shared token on LAN (old TLS stack). Through
-  Cloudflare you get HTTPS termination at the edge, which BB10 clients handle
-  better than a self-signed daemon cert. You can also put any reverse proxy in
-  front, or set `tls_cert` / `tls_key` in config for an HTTPS origin.
-- Live status: **`/sse/status`** (works through HTTPS proxies / tunnels) and
-  **`/ws/status`** (plain `http://` base URLs; often blocked behind tunnels).
-
-## App features (summary)
-
-- Multi **profiles** (several hosts) and multi-**harness** (one process)
-- Live status, queue, stop, attachments, slash commands
-- Permission Allow/Deny and AskUserQuestion when the harness supports them
-- Host→phone **drop** folder (`~/Public` on macOS by default)
-
-## Tests
+The daemon uses only the Python standard library. Run its smoke and rendering
+tests with:
 
 ```bash
 cd daemon
@@ -229,9 +168,37 @@ python3 tests/smoke_test.py
 python3 tests/render_test.py
 ```
 
-## Contributing / security / license
+Build the BlackBerry package with Docker:
 
-- [CONTRIBUTING.md](CONTRIBUTING.md)  
-- [SECURITY.md](SECURITY.md)  
-- [LICENSE](LICENSE) — MIT  
-- [AGENTS.md](AGENTS.md) — multi-client parity for agents  
+```bash
+cd blackberry
+./build-bar-docker.sh
+```
+
+Build the Android client with JDK 17+ and Android SDK platform 36:
+
+```bash
+cd android
+./gradlew assembleDebug
+```
+
+See the client-specific READMEs for platform setup and build details.
+
+## Documentation
+
+- [Daemon setup and API](daemon/README.md)
+- [Android client](android/README.md)
+- [ESP32 pager client](esp32/README.md)
+- [Deployment guide](deploy/README.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+
+## Releases
+
+APK, BAR, single-file web HTML, and packaged daemon releases are published on
+[GitHub Releases](https://github.com/jxw1102/agent-remote/releases). Release
+tags match the daemon version, such as `v2.4.5`.
+
+## License
+
+Agent Remote is released under the [MIT License](LICENSE).

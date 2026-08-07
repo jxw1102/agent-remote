@@ -35,8 +35,10 @@ struct AppConfig {
   }
 
   // Multiple daemons (Android "profiles"): each is host:port or full
-  // http(s):// base plus its token. Slot 0 is the primary.
-  static constexpr int kMaxDaemons = 4;
+  // http(s):// base plus its token. Slot 0 is the primary. Three is the
+  // measured ceiling: each daemon holds a socket (of lwIP's ~10) and, when
+  // https, a ~25-45 KB TLS session — 3× https left ~50 KB heap in the field.
+  static constexpr int kMaxDaemons = 3;
   struct DaemonCfg {
     String url;
     String token;

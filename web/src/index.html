@@ -101,30 +101,8 @@
     <div id="banner" class="banner hidden"></div>
 
     <div id="transcript" class="transcript">
-      <div id="welcome" class="empty welcome">
-        <svg class="empty-logo" viewBox="0 0 108 108" width="54" height="54" aria-hidden="true">
-          <rect width="108" height="108" rx="54" fill="#12121a"/>
-          <path d="M34 40 L48 54 L34 68" stroke="#d97757" stroke-width="7"
-                fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M56 68 L76 68" stroke="#00d4ff" stroke-width="7"
-                stroke-linecap="round"/>
-        </svg>
-        <h2>Connect a daemon to start</h2>
-        <p>This page is only a client. Sessions come from
-           <strong>agentremoted</strong> running next to Claude Code, Grok, or Codex
-           on your Mac or a server.</p>
-        <ol class="welcome-steps">
-          <li>Download the daemon package from Releases.</li>
-          <li>Copy its token (<code>~/.agentremoted/token</code>).</li>
-          <li>Click <strong>Add a daemon</strong> and paste the URL + token.</li>
-        </ol>
-        <div class="welcome-actions">
-          <button id="btn-welcome-add" class="primary" type="button">Add a daemon</button>
-          <a id="link-get-daemon" class="welcome-link"
-             href="https://github.com/jxw1102/agent-remote/releases"
-             target="_blank" rel="noopener noreferrer">Get the daemon →</a>
-        </div>
-      </div>
+      <!-- Filled by app.js showWelcomeIfNeeded() — one guide only (not also in the list). -->
+      <div id="welcome" class="empty welcome" aria-busy="true"></div>
     </div>
 
     <!-- Live TUI: host tmux pane + keyboard capture (hidden by default). -->

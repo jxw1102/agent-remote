@@ -19,6 +19,7 @@
 #include "net/agentapi.h"
 #include "net/blebuddy.h"
 #include "net/statusfeed.h"
+#include "net/webui.h"
 #include "ui/ui.h"
 
 static AppConfig g_cfg;
@@ -104,7 +105,9 @@ void setup() {
     blebuddy::begin();
   }
 
-  chime::play(chime::Cue::Status, g_cfg.soundCues, g_cfg.hapticCues);
+  // Boot greeting: beep + a felt nudge (Attention's buzz, not just a click).
+  chime::play(chime::Cue::Attention, false, g_cfg.hapticCues);
+  chime::play(chime::Cue::Status, g_cfg.soundCues, false);
   Serial.println("[boot] ready");
   Serial.flush();
 }
@@ -112,13 +115,13 @@ void setup() {
 void loop() {
   esp_task_wdt_reset();
   wifi_mgr::tick();
-  statusfeed::tick();
   blebuddy::tick();
   keyboard::tick();
 
   // LVGL owns input now: glue pumps knob + keyboard into indevs and runs
   // lv_timer_handler; ui::tick does the beeper controller work.
   lvgl_glue::loop();
+  webui::tick();
   ui::tick();
 
   power::idleTick(ui::lastActivityMs(), g_cfg.idleSleepMin, g_cfg.backlight);

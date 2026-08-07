@@ -4,7 +4,7 @@
          (different sandboxes), so trying it costs nothing and profiles are
          entered fresh - BB10 QSettings cannot cross app sandboxes. -->
     <id>com.bb10d.agentremote</id>
-    <author>jxw1102</author>
+    <author>xiaowen.ji</author>
     <name>Agent Remote</name>
     <description>Agent Remote: profiles for agentremoted hosts (Claude, Grok, Codex), merged session list, per-provider accents.</description>
     <versionNumber>3.0.0</versionNumber>

@@ -10,8 +10,11 @@
 #include "net/agentapi.h"
 #include "net/blebuddy.h"
 #include "net/statusfeed.h"
+#include "net/timesync.h"
+#include "net/webui.h"
 
 #include <lvgl.h>
+#include <algorithm>
 #include <vector>
 
 namespace ui {
@@ -19,7 +22,8 @@ namespace {
 
 enum class Screen : uint8_t {
   Boot, Beeper, Menu, Sessions, Compose, LiveTui, Chimes,
-  WifiScan, WifiPass, WifiManual, WifiSaved, Daemon, DaemonEdit, Bluetooth, Diag, Power,
+  WifiScan, WifiPass, WifiManual, WifiSaved, Daemon, DaemonEdit, Bluetooth,
+  WebUi, Usage, Diag, Power,
 };
 
 AppConfig *cfg = nullptr;
@@ -29,6 +33,7 @@ lv_group_t *grp = nullptr;
 String pendingSsid;
 String composeSession;  // session id, empty = new session
 int composeDaemon = 0;   // which daemon owns composeSession
+Screen tuiFrom = Screen::Sessions;  // where Live TUI was opened from
 int editDaemon = 0;      // slot open in the daemon edit screen
 String ticker;
 String lastSig;
@@ -41,6 +46,7 @@ lv_obj_t *cardsBox = nullptr;
 lv_obj_t *idleBox = nullptr;
 lv_obj_t *idleTitle = nullptr;
 lv_obj_t *idleSub = nullptr;
+lv_obj_t *hdrTime = nullptr;  // wall clock (NTP / BLE sync)
 lv_obj_t *hdrMod = nullptr;   // CAP / SYM
 lv_obj_t *hdrBell = nullptr;  // beeper feed health
 lv_obj_t *hdrWifi = nullptr;  // network state
@@ -59,6 +65,7 @@ struct PrevJob {
 };
 std::vector<PrevJob> prevJobs;
 bool feedSeeded = false;
+uint32_t lastToolBeep = 0;  // floor between tool-change beeps
 uint32_t lastFeedGen = 0;
 bool anyPending = false;
 uint32_t remindNextAt = 0;
@@ -82,7 +89,7 @@ lv_obj_t *makeLogo(lv_obj_t *parent, int size) {
 
   float k = size / 108.0f;
   int lw = (int)(7 * k);
-  if (lw < 3) lw = 3;
+  if (lw < 2) lw = 2;
 
   lv_point_precise_t *pts =
       (lv_point_precise_t *)lv_malloc(sizeof(lv_point_precise_t) * 5);
@@ -124,6 +131,43 @@ void syncWifi() {
   wifi_mgr::setSaved(ss, pp, cfg->wifiCount);
 }
 
+// One persistent worker runs every background job. Spawning a fresh task
+// per job needed a contiguous 20 KB internal-RAM stack each time — with
+// three https feeds resident that allocation could fail, the job never ran,
+// and its "loading" state spun forever (the endless Usage spinner).
+enum WorkerJob : uint8_t {
+  JOB_SESSIONS, JOB_TUI, JOB_REPLY, JOB_DIAG, JOB_USAGE, JOB_POLL,
+};
+QueueHandle_t workerQ = nullptr;
+
+void runSessionsFetch();
+void runTuiFetch();
+void runReply();
+void runDiagUpload();
+void runUsageFetch();
+void runStatusPoll();
+
+void workerTask(void *) {
+  uint8_t j;
+  for (;;) {
+    if (xQueueReceive(workerQ, &j, portMAX_DELAY) != pdTRUE) continue;
+    switch ((WorkerJob)j) {
+      case JOB_SESSIONS: runSessionsFetch(); break;
+      case JOB_TUI: runTuiFetch(); break;
+      case JOB_REPLY: runReply(); break;
+      case JOB_DIAG: runDiagUpload(); break;
+      case JOB_USAGE: runUsageFetch(); break;
+      case JOB_POLL: runStatusPoll(); break;
+    }
+  }
+}
+
+bool submitJob(WorkerJob j) {
+  if (!workerQ) return false;
+  uint8_t v = (uint8_t)j;
+  return xQueueSend(workerQ, &v, 0) == pdTRUE;
+}
+
 // Push the configured daemons into the API + feed layers.
 void applyDaemons() {
   agentapi::setDaemonCount(cfg->daemonCount);
@@ -135,6 +179,14 @@ void applyDaemons() {
     statusfeed::configure(i, on ? cfg->apiBase(i) : String(),
                           cfg->daemons[i].token);
   }
+}
+
+// Free an https daemon's held TLS session before an API call to it; the
+// feed reconnects on its own. With every daemon on https, held sessions
+// were starving the API handshake (measured: 50 KB heap, HTTP -1).
+void pauseHttpsFeed(int d, uint32_t ms) {
+  if (d >= 0 && d < cfg->daemonCount && cfg->apiBase(d).startsWith("https://"))
+    statusfeed::pause(d, ms);
 }
 
 // First daemon whose feed is live — target for uploads and best-effort calls.
@@ -199,15 +251,24 @@ lv_obj_t *makeProviderBadge(lv_obj_t *parent, const String &p) {
     lv_obj_add_event_cb(chip, freeLogoPoints, LV_EVENT_DELETE, pts);
     addLine(pts, 2, 3);
   } else if (p.startsWith("co")) {
-    // Hexagon outline.
+    // OpenAI-style knot: six skewed petals in hexagonal symmetry.
     lv_point_precise_t *pts =
-        (lv_point_precise_t *)lv_malloc(sizeof(lv_point_precise_t) * 7);
+        (lv_point_precise_t *)lv_malloc(sizeof(lv_point_precise_t) * 12);
     if (!pts) return chip;
-    lv_point_precise_t hex[7] = {{10, 4},  {15, 7},  {15, 13}, {10, 16},
-                                 {5, 13},  {5, 7},   {10, 4}};
-    for (int i = 0; i < 7; i++) pts[i] = hex[i];
+    pts[0] = {(lv_value_precise_t)17.6, (lv_value_precise_t)10.0};
+    pts[1] = {(lv_value_precise_t)11.8, (lv_value_precise_t)12.6};
+    pts[2] = {(lv_value_precise_t)13.8, (lv_value_precise_t)16.6};
+    pts[3] = {(lv_value_precise_t)8.6, (lv_value_precise_t)12.9};
+    pts[4] = {(lv_value_precise_t)6.2, (lv_value_precise_t)16.6};
+    pts[5] = {(lv_value_precise_t)6.8, (lv_value_precise_t)10.3};
+    pts[6] = {(lv_value_precise_t)2.4, (lv_value_precise_t)10.0};
+    pts[7] = {(lv_value_precise_t)8.2, (lv_value_precise_t)7.4};
+    pts[8] = {(lv_value_precise_t)6.2, (lv_value_precise_t)3.4};
+    pts[9] = {(lv_value_precise_t)11.4, (lv_value_precise_t)7.1};
+    pts[10] = {(lv_value_precise_t)13.8, (lv_value_precise_t)3.4};
+    pts[11] = {(lv_value_precise_t)13.2, (lv_value_precise_t)9.7};
     lv_obj_add_event_cb(chip, freeLogoPoints, LV_EVENT_DELETE, pts);
-    addLine(pts, 7, 2);
+    for (int i = 0; i < 6; i++) addLine(pts + i * 2, 2, 2);
   } else {
     lv_obj_t *dot = lv_obj_create(chip);
     lv_obj_remove_style_all(dot);
@@ -254,6 +315,17 @@ const char *battSymbol(int pct) {
 }
 
 void updateHeader() {
+  if (hdrTime) {
+    if (timesync::valid()) {
+      int h = 0, m = 0;
+      timesync::nowLocal(&h, &m);
+      char t[8];
+      snprintf(t, sizeof(t), "%02d:%02d", h, m);
+      lv_label_set_text(hdrTime, t);
+    } else {
+      lv_label_set_text(hdrTime, "");
+    }
+  }
   if (hdrMod)
     lv_label_set_text(hdrMod, keyboard::capsOn() ? "CAP"
                               : keyboard::symOn() ? "SYM"
@@ -299,7 +371,14 @@ void addHeader(lv_obj_t *scr, const char *title) {
   lv_obj_t *t = lv_label_create(bar);
   lv_label_set_text(t, title);
   lv_obj_set_style_text_font(t, &lv_font_montserrat_14, 0);
-  lv_obj_align(t, LV_ALIGN_LEFT_MID, 0, 0);
+  if (strcmp(title, "Agent Remote") == 0) {
+    // Brand mark beside the home title.
+    lv_obj_t *lg = makeLogo(bar, 18);
+    lv_obj_align(lg, LV_ALIGN_LEFT_MID, -2, 0);
+    lv_obj_align(t, LV_ALIGN_LEFT_MID, 19, 0);
+  } else {
+    lv_obj_align(t, LV_ALIGN_LEFT_MID, 0, 0);
+  }
 
   lv_obj_t *right = lv_obj_create(bar);
   lv_obj_remove_style_all(right);
@@ -309,6 +388,10 @@ void addHeader(lv_obj_t *scr, const char *title) {
                         LV_FLEX_ALIGN_CENTER);
   lv_obj_set_style_pad_column(right, 8, 0);
   lv_obj_align(right, LV_ALIGN_RIGHT_MID, 0, 0);
+
+  hdrTime = lv_label_create(right);
+  lv_obj_set_style_text_font(hdrTime, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(hdrTime, lv_color_white(), 0);
 
   hdrMod = lv_label_create(right);
   lv_obj_set_style_text_font(hdrMod, &lv_font_montserrat_12, 0);
@@ -339,7 +422,20 @@ lv_obj_t *addBody(lv_obj_t *scr) {
 
 // ---- beeper ---------------------------------------------------------------
 
+lv_obj_t *beeperWrap = nullptr;
+
 void beeperClicked(lv_event_t *) { show(Screen::Menu); }
+
+void jobCardClicked(lv_event_t *e) {
+  int idx = (int)(intptr_t)lv_event_get_user_data(e);
+  const auto &jobs = statusfeed::jobs();
+  if (idx < 0 || idx >= (int)jobs.size()) return;
+  if (jobs[idx].sessionId.isEmpty()) return;
+  composeSession = jobs[idx].sessionId;
+  composeDaemon = jobs[idx].daemon;
+  tuiFrom = Screen::Beeper;
+  show(Screen::LiveTui);
+}
 
 void blinkAnimCb(void *obj, int32_t v) {
   lv_obj_set_style_border_opa((lv_obj_t *)obj, (lv_opa_t)v, 0);
@@ -398,7 +494,7 @@ void addBleCards() {
   }
 
   lv_obj_t *card = lv_obj_create(cardsBox);
-  lv_obj_set_size(card, LV_PCT(100), 42);
+  lv_obj_set_size(card, LV_PCT(100), 50);
   lv_obj_set_style_pad_all(card, 6, 0);
   lv_obj_set_style_radius(card, 8, 0);
   lv_obj_set_style_bg_color(card, lv_color_hex(0x1a2733), 0);
@@ -442,6 +538,12 @@ void rebuildCards() {
   const auto &jobs = statusfeed::jobs();
 
   bool showIdle = jobs.empty() && !blebuddy::active();
+  // Whole-screen press = menu only when idle; with cards, knob focus
+  // belongs to the cards and the side button opens the menu.
+  if (beeperWrap) {
+    lv_group_remove_obj(beeperWrap);
+    if (jobs.empty()) lv_group_add_obj(grp, beeperWrap);
+  }
   if (idleBox) (showIdle ? lv_obj_remove_flag : lv_obj_add_flag)(idleBox, LV_OBJ_FLAG_HIDDEN);
   if (showIdle) {
     auto fs = statusfeed::aggregate();
@@ -476,12 +578,21 @@ void rebuildCards() {
   }
 
   int shown = 0;
+  int jobIdx = -1;
   for (const auto &j : jobs) {
+    jobIdx++;
     if (shown++ >= 4) break;
     bool needs = j.pendingPermission || j.pendingQuestion;
 
     lv_obj_t *card = lv_obj_create(cardsBox);
-    lv_obj_set_size(card, LV_PCT(100), 42);
+    // Focusable: rotate to a card, press to open its Live TUI.
+    lv_group_add_obj(grp, card);
+    lv_obj_set_style_border_width(card, 2, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_border_color(card, lv_palette_main(LV_PALETTE_PURPLE),
+                                  LV_STATE_FOCUS_KEY);
+    lv_obj_add_event_cb(card, jobCardClicked, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)jobIdx);
+    lv_obj_set_size(card, LV_PCT(100), 50);
     lv_obj_set_style_pad_all(card, 6, 0);
     lv_obj_set_style_radius(card, 8, 0);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x232330), 0);
@@ -558,6 +669,7 @@ lv_obj_t *buildBeeper() {
   lv_obj_set_size(btn, LV_PCT(100), LV_PCT(100));
   lv_obj_add_event_cb(btn, beeperClicked, LV_EVENT_CLICKED, NULL);
   lv_group_add_obj(grp, btn);
+  beeperWrap = btn;
 
   cardsBox = lv_obj_create(btn);
   lv_obj_remove_style_all(cardsBox);
@@ -595,6 +707,8 @@ const MenuDef kMenu[] = {
     {LV_SYMBOL_WIFI, "Wi-Fi", Screen::WifiScan},
     {LV_SYMBOL_SETTINGS, "Daemon", Screen::Daemon},
     {LV_SYMBOL_BLUETOOTH, "BLE", Screen::Bluetooth},
+    {LV_SYMBOL_DOWNLOAD, "Web", Screen::WebUi},
+    {LV_SYMBOL_CHARGE, "Usage", Screen::Usage},
     {LV_SYMBOL_FILE, "Diag", Screen::Diag},
     {LV_SYMBOL_POWER, "Power", Screen::Power},
 };
@@ -650,6 +764,7 @@ void sessionClicked(lv_event_t *e) {
   if (idx >= 0 && idx < (int)sessions.size()) {
     composeSession = sessions[idx].id;
     composeDaemon = sessions[idx].daemon;
+    tuiFrom = Screen::Sessions;
     show(Screen::LiveTui);
   }
 }
@@ -662,11 +777,15 @@ volatile int sessFetchState = 0;  // 0 idle, 1 running, 2 ok, 3 failed
 std::vector<SessionRow> sessFetchResult;
 String sessFetchErr;
 
-void sessionsFetchTask(void *) {
+void runSessionsFetch() {
   std::vector<SessionRow> all;
   String err;
   bool ok = false;
   dlog::logf("[sess] fetch start (heap %u)", (unsigned)ESP.getFreeHeap());
+  // All-https configs: every held TLS session starves the handshake, so
+  // pause them all for the duration of the fetch, not just the target.
+  for (int d = 0; d < agentapi::daemonCount(); d++)
+    if (cfg->daemons[d].enabled) pauseHttpsFeed(d, 15000);
   for (int d = 0; d < agentapi::daemonCount(); d++) {
     if (!cfg->daemons[d].enabled) continue;
     std::vector<SessionRow> rows;
@@ -680,22 +799,32 @@ void sessionsFetchTask(void *) {
     dlog::logf("[sess] d%d: %d rows (heap %u)", d, (int)all.size(),
                (unsigned)ESP.getFreeHeap());
   }
+  // Newest first across every daemon (ISO timestamps sort lexicographically;
+  // rows without one sink to the bottom).
+  std::sort(all.begin(), all.end(), [](const SessionRow &a, const SessionRow &b) {
+    return a.lastActive > b.lastActive;
+  });
   sessFetchResult.swap(all);
   sessFetchErr = err;
   sessFetchState = ok ? 2 : 3;
-  vTaskDelete(NULL);
 }
+
+uint32_t sessFetchStartedAt = 0;
 
 void startSessionsFetch() {
   if (sessFetchState == 1) return;
   sessFetchState = 1;
-  // TLS handshakes (https daemon URLs) need real stack — 12 KB overflowed.
-  xTaskCreate(sessionsFetchTask, "sessfetch", 20480, NULL, 1, NULL);
+  sessFetchStartedAt = millis();
+  if (!submitJob(JOB_SESSIONS)) {
+    sessFetchState = 3;
+    sessFetchErr = "worker queue full";
+  }
 }
 
 void fillSessionsList() {
   if (!sessList) return;
   lv_obj_clean(sessList);
+  lv_obj_t *firstBtn = nullptr;
   if (sessions.empty()) {
     lv_list_add_text(sessList, sessFetchErr.length() ? sessFetchErr.c_str()
                                                      : "No sessions");
@@ -706,7 +835,7 @@ void fillSessionsList() {
     String row = String(sessions[i].working ? LV_SYMBOL_PLAY " " : "") +
                  sessions[i].title;
     if (cfg->daemonCount > 1)
-      row += "   [" + cfg->daemonName(sessions[i].daemon) + "]";
+      row += "   [" + cfg->daemonName(sessions[i].daemon).substring(0, 6) + "]";
     lv_obj_t *btn = lv_list_add_button(sessList, NULL, row.c_str());
     lv_obj_t *badge = makeProviderBadge(btn, sessions[i].provider);
     lv_obj_move_to_index(badge, 0);  // icon before the label
@@ -714,7 +843,10 @@ void fillSessionsList() {
                               LV_STATE_FOCUS_KEY);
     lv_obj_add_event_cb(btn, sessionClicked, LV_EVENT_CLICKED,
                         (void *)(intptr_t)i);
+    if (!firstBtn) firstBtn = btn;
   }
+  // Knob-press / Enter must work without rotating first.
+  if (firstBtn) lv_group_focus_obj(firstBtn);
 }
 
 lv_obj_t *buildSessions() {
@@ -733,6 +865,7 @@ lv_obj_t *buildSessions() {
   sessSpinner = lv_spinner_create(body);
   lv_obj_set_size(sessSpinner, 40, 40);
   lv_obj_center(sessSpinner);
+  lv_group_remove_obj(sessSpinner);  // must never take focus from list rows
 
   // Stale-while-revalidate: cached rows show immediately, refresh follows.
   if (!sessions.empty()) fillSessionsList();
@@ -740,31 +873,30 @@ lv_obj_t *buildSessions() {
   return scr;
 }
 
-// Reply screen: BlackBerry-style quick replies beat typing on this keyboard.
 lv_obj_t *replyNote = nullptr;
-const char *kQuickReplies[] = {"Continue", "Yes", "No", "Run the tests",
-                               "Commit and push"};
 
-void sendReply(const char *txt) {
-  if (!txt || !*txt) return;
-  if (replyNote) {
-    lv_label_set_text(replyNote, "Sending...");
-    lv_refr_now(NULL);
-  }
+// Replies post from a task — a slow daemon must not freeze the composer.
+volatile int replyState = 0;  // 0 idle, 1 sending, 2 ok, 3 failed
+String replyText, replyErr;
+
+void runReply() {
+  pauseHttpsFeed(composeDaemon, 8000);
   String err;
-  if (agentapi::sendPrompt(composeDaemon, composeSession, txt, &err)) {
-    chime::play(chime::Cue::Status, cfg->soundCues, cfg->hapticCues);
-    ticker = "sent: " + String(txt);
-    show(Screen::Beeper);
-  } else {
-    chime::play(chime::Cue::Error, cfg->soundCues, cfg->hapticCues);
-    if (replyNote) lv_label_set_text(replyNote, err.c_str());
-  }
+  bool ok = agentapi::sendPrompt(composeDaemon, composeSession,
+                                 replyText.c_str(), &err);
+  replyErr = err;
+  replyState = ok ? 2 : 3;
 }
 
-void quickReplyClicked(lv_event_t *e) {
-  int idx = (int)(intptr_t)lv_event_get_user_data(e);
-  sendReply(kQuickReplies[idx]);
+void sendReply(const char *txt) {
+  if (!txt || !*txt || replyState == 1) return;
+  replyText = txt;
+  if (replyNote) lv_label_set_text(replyNote, "Sending...");
+  replyState = 1;
+  if (!submitJob(JOB_REPLY)) {
+    replyState = 0;
+    if (replyNote) lv_label_set_text(replyNote, "Busy - try again");
+  }
 }
 
 void customReplyReady(lv_event_t *e) {
@@ -788,33 +920,13 @@ lv_obj_t *buildCompose() {
   lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
   lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 0, 0);
 
-  // Quick-reply chips.
-  lv_obj_t *chips = lv_obj_create(body);
-  lv_obj_remove_style_all(chips);
-  lv_obj_set_size(chips, LV_PCT(100), 76);
-  lv_obj_align(chips, LV_ALIGN_TOP_LEFT, 0, 18);
-  lv_obj_set_flex_flow(chips, LV_FLEX_FLOW_ROW_WRAP);
-  lv_obj_set_style_pad_column(chips, 6, 0);
-  lv_obj_set_style_pad_row(chips, 6, 0);
-  for (int i = 0; i < (int)(sizeof(kQuickReplies) / sizeof(kQuickReplies[0]));
-       i++) {
-    lv_obj_t *btn = lv_button_create(chips);
-    lv_obj_set_height(btn, 32);
-    lv_obj_set_style_pad_hor(btn, 10, 0);
-    lv_obj_add_event_cb(btn, quickReplyClicked, LV_EVENT_CLICKED,
-                        (void *)(intptr_t)i);
-    lv_obj_t *lb = lv_label_create(btn);
-    lv_label_set_text(lb, kQuickReplies[i]);
-    lv_obj_set_style_text_font(lb, &lv_font_montserrat_12, 0);
-    lv_obj_center(lb);
-  }
-
   lv_obj_t *ta = lv_textarea_create(body);
   lv_textarea_set_one_line(ta, true);
-  lv_textarea_set_placeholder_text(ta, "Custom... (Enter = send)");
+  lv_textarea_set_placeholder_text(ta, "Message... (Enter = send)");
   lv_obj_set_width(ta, LV_PCT(100));
-  lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 100);
+  lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 26);
   lv_obj_add_event_cb(ta, customReplyReady, LV_EVENT_READY, ta);
+  lv_group_focus_obj(ta);
 
   replyNote = lv_label_create(body);
   lv_label_set_text(replyNote, "");
@@ -833,7 +945,7 @@ String tuiFetchText;
 String tuiShown;
 uint32_t tuiLastPoll = 0;
 
-void tuiFetchTask(void *) {
+void runTuiFetch() {
   String text, err;
   bool attached = false;
   if (agentapi::fetchTui(composeDaemon, composeSession, &text, &attached, &err) && attached) {
@@ -843,16 +955,43 @@ void tuiFetchTask(void *) {
                                 : "[ no live TUI for this session ]";
   }
   tuiFetchState = 2;
-  vTaskDelete(NULL);
 }
 
 void startTuiFetch() {
   if (tuiFetchState != 0) return;
+  // Rolling pause: TUI polls every 1.5 s, so an https daemon's feed stays
+  // down while this screen is open and reconnects after leaving it.
+  pauseHttpsFeed(composeDaemon, 5000);
   tuiFetchState = 1;
-  xTaskCreate(tuiFetchTask, "tuifetch", 20480, NULL, 1, NULL);
+  if (!submitJob(JOB_TUI)) tuiFetchState = 0;  // retry next poll
 }
 
 void tuiReplyClicked(lv_event_t *) { show(Screen::Compose); }
+
+// Programmatic lv_obj_scroll_by has no bounds — clamp the step to the
+// remaining content so the knob stops at the edges instead of scrolling
+// into the void. viewDx/viewDy are view-movement: +x = right, +y = down.
+void scrollByClamped(lv_obj_t *obj, int viewDx, int viewDy) {
+  if (viewDx > 0) {
+    int m = (int)lv_obj_get_scroll_right(obj);
+    if (m < 0) m = 0;
+    if (viewDx > m) viewDx = m;
+  } else if (viewDx < 0) {
+    int m = (int)lv_obj_get_scroll_left(obj);
+    if (m < 0) m = 0;
+    if (-viewDx > m) viewDx = -m;
+  }
+  if (viewDy > 0) {
+    int m = (int)lv_obj_get_scroll_bottom(obj);
+    if (m < 0) m = 0;
+    if (viewDy > m) viewDy = m;
+  } else if (viewDy < 0) {
+    int m = (int)lv_obj_get_scroll_top(obj);
+    if (m < 0) m = 0;
+    if (-viewDy > m) viewDy = -m;
+  }
+  if (viewDx || viewDy) lv_obj_scroll_by(obj, -viewDx, -viewDy, LV_ANIM_ON);
+}
 
 // Knob rotation scrolls the pane; clockwise = down. Holding Sym (the orange
 // triangle) turns the same rotation into horizontal scrolling for wide TUI
@@ -860,9 +999,9 @@ void tuiReplyClicked(lv_event_t *) { show(Screen::Compose); }
 bool tuiRotary(int delta) {
   if (!tuiPane) return false;
   if (keyboard::symOn()) {
-    lv_obj_scroll_by(tuiPane, (int32_t)(-delta * 60), 0, LV_ANIM_ON);
+    scrollByClamped(tuiPane, delta * 60, 0);
   } else {
-    lv_obj_scroll_by(tuiPane, 0, (int32_t)(-delta * 40), LV_ANIM_ON);
+    scrollByClamped(tuiPane, 0, delta * 40);
   }
   return true;
 }
@@ -1021,6 +1160,185 @@ lv_obj_t *buildBluetooth() {
   return scr;
 }
 
+// ---- usage ------------------------------------------------------------------
+
+lv_obj_t *usageBox = nullptr;
+lv_obj_t *usageSpinner = nullptr;
+volatile int usageFetchState = 0;  // 0 idle, 1 running, 2 ok, 3 failed
+volatile uint32_t usageGen = 0;    // bumps as each daemon's answer lands
+SemaphoreHandle_t usageMx = nullptr;
+std::vector<UsageBucket> usageResult;
+String usageErr;
+
+void runUsageFetch() {
+  // One daemon at a time, rendered as each answers — never concurrent.
+  // Buckets dedupe by title (the same subscription seen from two hosts
+  // shows once, at the higher percentage).
+  std::vector<UsageBucket> acc;
+  String err;
+  bool any = false;
+  for (int d = 0; d < cfg->daemonCount; d++) {
+    if (!cfg->daemons[d].enabled) continue;
+    pauseHttpsFeed(d, 30000);
+    std::vector<UsageBucket> rows;
+    String e;
+    if (agentapi::fetchUsage(d, &rows, &e)) {
+      any = true;
+      for (auto &u : rows) {
+        bool dup = false;
+        for (auto &v : acc) {
+          if (v.title == u.title) {
+            dup = true;
+            if (u.percent > v.percent) v = u;
+          }
+        }
+        if (!dup) acc.push_back(u);
+      }
+      xSemaphoreTake(usageMx, portMAX_DELAY);
+      usageResult = acc;
+      xSemaphoreGive(usageMx);
+      usageGen++;
+    } else if (err.isEmpty()) {
+      err = e;
+    }
+  }
+  usageErr = err;
+  usageFetchState = any ? 2 : 3;
+}
+
+void fillUsage() {
+  if (!usageBox) return;
+  lv_obj_clean(usageBox);
+  std::vector<UsageBucket> snapshot;
+  if (usageMx) {
+    xSemaphoreTake(usageMx, portMAX_DELAY);
+    snapshot = usageResult;
+    xSemaphoreGive(usageMx);
+  }
+  if (snapshot.empty()) {
+    lv_obj_t *lb = lv_label_create(usageBox);
+    lv_label_set_text(lb, usageErr.length() ? usageErr.c_str() : "No usage data");
+    return;
+  }
+  for (auto &u : snapshot) {
+    lv_obj_t *row = lv_obj_create(usageBox);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), 40);
+
+    lv_obj_t *t = lv_label_create(row);
+    lv_label_set_text(t, u.title.c_str());
+    lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(t, LV_PCT(55), 16);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_12, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    lv_obj_t *bar = lv_bar_create(row);
+    lv_bar_set_range(bar, 0, 100);
+    lv_bar_set_value(bar, u.percent, LV_ANIM_ON);
+    lv_obj_set_size(bar, 120, 10);
+    lv_obj_align(bar, LV_ALIGN_TOP_RIGHT, -56, 3);
+    lv_color_t col = u.percent >= 90 ? lv_palette_main(LV_PALETTE_RED)
+                     : u.percent >= 70 ? lv_palette_main(LV_PALETTE_AMBER)
+                                       : lv_palette_main(LV_PALETTE_GREEN);
+    if (u.severity != "normal") col = lv_palette_main(LV_PALETTE_AMBER);
+    lv_obj_set_style_bg_color(bar, col, LV_PART_INDICATOR);
+
+    lv_obj_t *pc = lv_label_create(row);
+    lv_label_set_text(pc, (String(u.percent) + "%").c_str());
+    lv_obj_set_style_text_font(pc, &lv_font_montserrat_12, 0);
+    lv_obj_align(pc, LV_ALIGN_TOP_RIGHT, -8, 0);
+
+    lv_obj_t *r = lv_label_create(row);
+    lv_label_set_text(r, u.resets.c_str());
+    lv_label_set_long_mode(r, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(r, LV_PCT(60), 14);
+    lv_obj_set_style_text_font(r, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(r, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_align(r, LV_ALIGN_TOP_LEFT, 0, 18);
+  }
+}
+
+// Knob scrolls the bucket list (edge-clamped like the other panes).
+bool usageRotary(int delta) {
+  if (!usageBox) return false;
+  scrollByClamped(usageBox, 0, delta * 40);
+  return true;
+}
+
+lv_obj_t *buildUsage() {
+  lv_obj_t *scr = makeScreen();
+  addHeader(scr, "Usage");
+  lv_obj_t *body = addBody(scr);
+
+  usageBox = lv_obj_create(body);
+  lv_obj_remove_style_all(usageBox);
+  lv_obj_set_size(usageBox, LV_PCT(100), LV_PCT(100));
+  lv_obj_set_flex_flow(usageBox, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(usageBox, 4, 0);
+
+  usageSpinner = lv_spinner_create(body);
+  lv_obj_set_size(usageSpinner, 40, 40);
+  lv_obj_center(usageSpinner);
+  lv_group_remove_obj(usageSpinner);  // must never take focus from list rows
+
+  // Stale-while-revalidate: the daemon's usage scrape takes seconds, so
+  // last-known buckets render immediately (bars animate to their values)
+  // and the refresh replaces them quietly when it lands.
+  if (!usageResult.empty()) {
+    lv_obj_add_flag(usageSpinner, LV_OBJ_FLAG_HIDDEN);
+    fillUsage();
+  }
+  if (usageFetchState != 1) {
+    usageFetchState = 1;
+    if (!submitJob(JOB_USAGE)) {
+      usageFetchState = 0;
+      lv_obj_add_flag(usageSpinner, LV_OBJ_FLAG_HIDDEN);
+      usageErr = "worker busy - reopen to retry";
+      fillUsage();
+    }
+  }
+  return scr;
+}
+
+// ---- web ui (SD manager) ----------------------------------------------------
+
+lv_obj_t *buildWebUi() {
+  lv_obj_t *scr = makeScreen();
+  addHeader(scr, "Web SD manager");
+  lv_obj_t *body = addBody(scr);
+
+  // Feeds down while serving: frees their sockets/TLS and keeps the shared
+  // SPI bus calmer during SD streaming. They reconnect after leaving.
+  for (int i = 0; i < cfg->daemonCount; i++)
+    statusfeed::pause(i, 3600000);
+  webui::begin();
+
+  lv_obj_t *t = lv_label_create(body);
+  if (wifi_mgr::state() == wifi_mgr::State::Connected) {
+    lv_label_set_text(t, ("Open in a browser:\n" + webui::url()).c_str());
+  } else {
+    lv_label_set_text(t, "Wi-Fi is not connected.");
+  }
+  lv_obj_set_style_text_font(t, &lv_font_montserrat_18, 0);
+  lv_obj_align(t, LV_ALIGN_TOP_LEFT, 4, 8);
+
+  lv_obj_t *cred = lv_label_create(body);
+  lv_label_set_text(
+      cred, ("User: pager    Password: " + webui::password()).c_str());
+  lv_obj_set_style_text_color(cred, lv_palette_main(LV_PALETTE_AMBER), 0);
+  lv_obj_align(cred, LV_ALIGN_TOP_LEFT, 4, 78);
+
+  lv_obj_t *hint = lv_label_create(body);
+  lv_label_set_text(hint,
+                    sdconfig::present()
+                        ? "Browse / upload / delete SD files.\nBack stops the server."
+                        : "No SD card detected.");
+  lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
+  lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 4, -4);
+  return scr;
+}
+
 // ---- diag -------------------------------------------------------------------
 
 lv_obj_t *diagNote = nullptr;
@@ -1031,25 +1349,45 @@ lv_obj_t *diagBox = nullptr;
 bool diagRotary(int delta) {
   if (!diagBox) return false;
   if (keyboard::symOn()) {
-    lv_obj_scroll_by(diagBox, (int32_t)(-delta * 60), 0, LV_ANIM_ON);
+    scrollByClamped(diagBox, delta * 60, 0);
   } else {
-    lv_obj_scroll_by(diagBox, 0, (int32_t)(-delta * 40), LV_ANIM_ON);
+    scrollByClamped(diagBox, 0, delta * 40);
   }
   return true;
 }
 
-void diagUpload(lv_event_t *) {
-  if (diagNote) {
-    lv_label_set_text(diagNote, "Uploading...");
-    lv_refr_now(NULL);
+// Log upload runs on a task: 3 daemons × a slow tunnel would freeze the
+// UI for tens of seconds otherwise.
+volatile int diagUpState = 0;  // 0 idle, 1 running, 2 done
+String diagUpNote;
+
+void runDiagUpload() {
+  // Every enabled daemon gets the log — with several daemons there is no
+  // telling which host the person debugging can actually read.
+  String note, log = dlog::dump();
+  int okCount = 0;
+  for (int d = 0; d < cfg->daemonCount; d++) {
+    if (!cfg->daemons[d].enabled) continue;
+    pauseHttpsFeed(d, 10000);
+    String path, err;
+    if (agentapi::uploadText(d, "pager-log.txt", log, &path, &err)) {
+      okCount++;
+    } else if (note.isEmpty()) {
+      note = err;
+    }
   }
-  String path, err;
-  if (agentapi::uploadText(anyLiveDaemon(), "pager-log.txt", dlog::dump(), &path, &err)) {
-    if (diagNote)
-      lv_label_set_text(diagNote, ("Uploaded: " + path).c_str());
-  } else {
-    if (diagNote)
-      lv_label_set_text(diagNote, ("Upload failed: " + err).c_str());
+  diagUpNote = okCount ? ("Uploaded to " + String(okCount) + " daemon(s)")
+                       : ("Upload failed: " + note);
+  diagUpState = 2;
+}
+
+void diagUpload(lv_event_t *) {
+  if (diagUpState == 1) return;
+  if (diagNote) lv_label_set_text(diagNote, "Uploading...");
+  diagUpState = 1;
+  if (!submitJob(JOB_DIAG)) {
+    diagUpState = 0;
+    if (diagNote) lv_label_set_text(diagNote, "Busy - try again");
   }
 }
 
@@ -1207,6 +1545,7 @@ lv_obj_t *buildWifiScan() {
   wifiSpinner = lv_spinner_create(body);
   lv_obj_set_size(wifiSpinner, 40, 40);
   lv_obj_center(wifiSpinner);
+  lv_group_remove_obj(wifiSpinner);  // must never take focus from list rows
 
   if (wifi_mgr::scanReady() && wifi_mgr::scanCount() > 0) {
     lv_obj_add_flag(wifiSpinner, LV_OBJ_FLAG_HIDDEN);
@@ -1518,7 +1857,7 @@ lv_obj_t *buildBoot() {
 
 void goBack() {
   switch (cur) {
-    case Screen::Beeper: break;  // home
+    case Screen::Beeper: show(Screen::Menu); break;  // side button = menu
     case Screen::Menu: show(Screen::Beeper, true); break;
     case Screen::WifiPass:
     case Screen::WifiManual:
@@ -1532,7 +1871,13 @@ void goBack() {
       show(Screen::Menu, true);
       break;
     case Screen::Compose: show(Screen::LiveTui, true); break;
-    case Screen::LiveTui: show(Screen::Sessions, true); break;
+    case Screen::WebUi:
+      webui::stop();
+      // Wake the feeds back up (they were paused for the server).
+      for (int i = 0; i < cfg->daemonCount; i++) statusfeed::pause(i, 1);
+      show(Screen::Menu, true);
+      break;
+    case Screen::LiveTui: show(tuiFrom, true); break;
     case Screen::DaemonEdit: show(Screen::Daemon, true); break;
     case Screen::Boot: break;
     default: show(Screen::Menu, true); break;
@@ -1542,7 +1887,8 @@ void goBack() {
 void show(Screen s, bool backward) {
   cardsBox = nullptr;
   idleBox = nullptr;
-  hdrMod = hdrBell = hdrWifi = hdrBatt = nullptr;
+  beeperWrap = nullptr;
+  hdrTime = hdrMod = hdrBell = hdrWifi = hdrBatt = nullptr;
   wifiList = nullptr;
   wifiSpinner = nullptr;
   replyNote = nullptr;
@@ -1551,6 +1897,8 @@ void show(Screen s, bool backward) {
   tuiLabel = nullptr;
   tuiPane = nullptr;
   bleState = nullptr;
+  usageBox = nullptr;
+  usageSpinner = nullptr;
   diagNote = nullptr;
   diagText = nullptr;
   diagBox = nullptr;
@@ -1576,12 +1924,15 @@ void show(Screen s, bool backward) {
     case Screen::Daemon: scr = buildDaemon(); break;
     case Screen::DaemonEdit: scr = buildDaemonEdit(); break;
     case Screen::Bluetooth: scr = buildBluetooth(); break;
+    case Screen::WebUi: scr = buildWebUi(); break;
+    case Screen::Usage: scr = buildUsage(); break;
     case Screen::Diag: scr = buildDiag(); break;
     case Screen::Power: scr = buildPower(); break;
   }
   cur = s;
   lvgl_glue::setRotaryHandler(s == Screen::LiveTui ? tuiRotary
                               : s == Screen::Diag  ? diagRotary
+                              : s == Screen::Usage ? usageRotary
                                                    : nullptr);
   lv_screen_load_anim(scr,
                       backward ? LV_SCR_LOAD_ANIM_MOVE_RIGHT
@@ -1590,6 +1941,30 @@ void show(Screen s, bool backward) {
 }
 
 // ---- feed diffing (beeper controller) --------------------------------------
+
+// Fallback status poll (feeds down): blocking HTTP belongs on the worker —
+// at boot this ran on the UI thread in the gap between Wi-Fi connecting and
+// the feeds going live, freezing the device for seconds.
+volatile int pollJobState = 0;  // 0 idle, 1 running, 2 done
+StatusSnap pollSnap;
+
+void runStatusPoll() {
+  StatusSnap s{};
+  bool anyOk = false;
+  for (int d = 0; d < agentapi::daemonCount(); d++) {
+    if (!cfg->daemons[d].enabled) continue;
+    StatusSnap one = agentapi::pollStatus(d);
+    if (!one.ok) continue;
+    anyOk = true;
+    s.working += one.working;
+    s.needsYou = s.needsYou || one.needsYou;
+    if (s.phase.isEmpty()) s.phase = one.phase;
+    if (s.tool.isEmpty()) s.tool = one.tool;
+  }
+  s.ok = anyOk;
+  pollSnap = s;
+  pollJobState = 2;
+}
 
 String toolSigOf(const statusfeed::JobStat &j) {
   return j.phase + "|" + j.tool + "|" + j.toolDetail;
@@ -1651,7 +2026,14 @@ void diffFeed() {
       cue(chime::Cue::Status);
       ticker = "turn started";
     } else if (sawTick) {
-      chime::play(chime::Cue::Tick, false, cfg->hapticCues);
+      // Tool → tool transitions beep like the web client (Status cue is
+      // defined as "phase/tool change"), floored so bursts don't rattle.
+      if (millis() - lastToolBeep > 2000) {
+        lastToolBeep = millis();
+        cue(chime::Cue::Status);
+      } else {
+        chime::play(chime::Cue::Tick, false, cfg->hapticCues);
+      }
     }
   } else {
     feedSeeded = true;
@@ -1671,6 +2053,10 @@ void diffFeed() {
 
 void begin(AppConfig *c) {
   cfg = c;
+  workerQ = xQueueCreate(8, 1);
+  usageMx = xSemaphoreCreateMutex();
+  if (xTaskCreate(workerTask, "worker", 24576, NULL, 1, NULL) != pdPASS)
+    dlog::logf("[worker] task create FAILED");
   applyDaemons();
   syncWifi();
   lvgl_glue::onBack(goBack);
@@ -1716,6 +2102,50 @@ void tick() {
     tuiFetchState = 0;  // drop a result that landed after leaving
   }
 
+  // Reply / diag-upload results land back on the UI thread here.
+  if (replyState >= 2) {
+    bool ok = replyState == 2;
+    replyState = 0;
+    if (ok) {
+      cue(chime::Cue::Status);
+      ticker = "sent: " + replyText;
+      if (cur == Screen::Compose) show(Screen::Beeper);
+    } else {
+      cue(chime::Cue::Error);
+      if (replyNote) lv_label_set_text(replyNote, replyErr.c_str());
+    }
+  }
+  if (diagUpState == 2) {
+    diagUpState = 0;
+    if (diagNote) lv_label_set_text(diagNote, diagUpNote.c_str());
+  }
+  // Progressive usage rendering: repaint as each daemon's buckets arrive.
+  static uint32_t lastUsageGen = 0;
+  if (usageGen != lastUsageGen) {
+    lastUsageGen = usageGen;
+    if (cur == Screen::Usage) {
+      if (usageSpinner) lv_obj_add_flag(usageSpinner, LV_OBJ_FLAG_HIDDEN);
+      fillUsage();
+    }
+  }
+  if (usageFetchState >= 2) {
+    usageFetchState = 0;
+    if (cur == Screen::Usage) {
+      if (usageSpinner) lv_obj_add_flag(usageSpinner, LV_OBJ_FLAG_HIDDEN);
+      fillUsage();
+    }
+  }
+
+  // Fetch watchdog: a wedged task/connection must not spin forever.
+  if (sessFetchState == 1 && millis() - sessFetchStartedAt > 30000) {
+    sessFetchState = 0;
+    sessFetchErr = "fetch timed out";
+    if (cur == Screen::Sessions) {
+      if (sessSpinner) lv_obj_add_flag(sessSpinner, LV_OBJ_FLAG_HIDDEN);
+      fillSessionsList();
+    }
+  }
+
   // Session fetch landing while the list is open.
   if (sessFetchState >= 2) {
     if (sessFetchState == 2) sessions.swap(sessFetchResult);
@@ -1726,14 +2156,26 @@ void tick() {
     }
   }
 
-  // New feed snapshot → chimes + rebuild cards.
+  // New feed snapshot → chimes; rebuild cards only when their structure
+  // changed (elapsed_s bumps the generation every second, and rebuilding
+  // ~20 widgets per second made the whole UI feel laggy — the elapsed
+  // labels already update in place below).
+  static String lastCardsSig;
   if (statusfeed::generation() != lastFeedGenSeen) {
     lastFeedGenSeen = statusfeed::generation();
     if (statusfeed::aggregate() == statusfeed::State::Live) {
       diffFeed();
-      if (cur == Screen::Beeper && cardsBox) rebuildCards();
     } else {
       feedSeeded = false;
+    }
+    String sig = String((int)statusfeed::aggregate());
+    for (const auto &j : statusfeed::jobs()) {
+      sig += j.jobId;
+      sig += (j.pendingPermission || j.pendingQuestion) ? '!' : '.';
+      sig += j.phase + j.tool + j.toolDetail + "|";
+    }
+    if (sig != lastCardsSig) {
+      lastCardsSig = sig;
       if (cur == Screen::Beeper && cardsBox) rebuildCards();
     }
   }

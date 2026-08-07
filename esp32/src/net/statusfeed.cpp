@@ -13,6 +13,18 @@ namespace {
 constexpr uint32_t kSilenceMs = 60000;
 constexpr size_t kMaxLine = 12 * 1024;
 
+// Feeds run on their own task: connect() blocks up to 1.5 s per attempt and
+// payload parsing is steady work — neither belongs on the LVGL loop.
+// cfgMx serializes reconfiguration against the ticking task; dataMx guards
+// the jobs vectors + generation counters (short critical sections only).
+SemaphoreHandle_t cfgMx = nullptr;
+SemaphoreHandle_t dataMx = nullptr;
+TaskHandle_t feedTask = nullptr;
+// Lock-free pause: pause() only stamps a deadline — the feed task drops the
+// connection itself. Taking cfgMx from the UI thread stalled it for however
+// long a connect() was holding the lock (the "Web screen lags" report).
+volatile uint32_t pauseUntil[kMaxFeeds] = {0, 0, 0};
+
 struct Feed {
   int idx = 0;
   String host;
@@ -136,8 +148,10 @@ struct Feed {
       next.push_back(j);
       if (next.size() >= 8) break;  // screen fits 4; keep memory bounded
     }
+    xSemaphoreTake(dataMx, portMAX_DELAY);
     jobs.swap(next);
     gen++;
+    xSemaphoreGive(dataMx);
   }
 
   void handleLine(const String &line) {
@@ -200,17 +214,51 @@ int feedCount = 0;
 std::vector<JobStat> mergedJobs;
 uint32_t mergedGen = 0;
 
+void feedTaskFn(void *) {
+  for (;;) {
+    for (int i = 0; i < feedCount; i++) {
+      xSemaphoreTake(cfgMx, portMAX_DELAY);
+      uint32_t until = pauseUntil[i];
+      if (until && millis() < until) {
+        // Paused: drop the connection (frees socket/TLS) and sit out.
+        if (feeds[i].cli && feeds[i].cli->connected())
+          feeds[i].disconnect(until - millis());
+      } else {
+        if (until) {
+          pauseUntil[i] = 0;
+          feeds[i].nextConnectAt = 0;  // resume immediately
+        }
+        feeds[i].tick();
+      }
+      xSemaphoreGive(cfgMx);
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
+void ensureTask() {
+  if (feedTask) return;
+  cfgMx = xSemaphoreCreateMutex();
+  dataMx = xSemaphoreCreateMutex();
+  xTaskCreate(feedTaskFn, "statusfeed", 12288, NULL, 1, &feedTask);
+}
+
 }  // namespace
 
 void setCount(int count) {
+  ensureTask();
   if (count < 0) count = 0;
   if (count > kMaxFeeds) count = kMaxFeeds;
+  xSemaphoreTake(cfgMx, portMAX_DELAY);
   for (int i = count; i < kMaxFeeds; i++) feeds[i].reset();
   feedCount = count;
+  xSemaphoreGive(cfgMx);
 }
 
 void configure(int idx, const String &apiBase, const String &token) {
   if (idx < 0 || idx >= kMaxFeeds) return;
+  ensureTask();
+  xSemaphoreTake(cfgMx, portMAX_DELAY);
   Feed &f = feeds[idx];
   f.reset();
   f.idx = idx;
@@ -219,14 +267,23 @@ void configure(int idx, const String &apiBase, const String &token) {
   f.nextConnectAt = 0;
   if (!f.configured && apiBase.length())
     dlog::logf("[feed%d] bad base url", idx);
+  xSemaphoreGive(cfgMx);
+}
+
+void pause(int idx, uint32_t ms) {
+  if (!feedTask || idx < 0 || idx >= feedCount) return;
+  pauseUntil[idx] = ms <= 1 ? 1 : millis() + ms;  // 1 = resume next tick
 }
 
 void stop() {
+  if (!feedTask) return;
+  xSemaphoreTake(cfgMx, portMAX_DELAY);
   for (int i = 0; i < kMaxFeeds; i++) feeds[i].reset();
+  xSemaphoreGive(cfgMx);
 }
 
 void tick() {
-  for (int i = 0; i < feedCount; i++) feeds[i].tick();
+  // Feeds tick on their own task now; kept for call-site compatibility.
 }
 
 State state(int idx) {
@@ -249,19 +306,27 @@ State aggregate() {
 }
 
 uint32_t generation() {
+  if (!dataMx) return 0;
+  xSemaphoreTake(dataMx, portMAX_DELAY);
   uint32_t g = 0;
   for (int i = 0; i < feedCount; i++) g += feeds[i].gen;
+  xSemaphoreGive(dataMx);
   return g;
 }
 
 const std::vector<JobStat> &jobs() {
-  uint32_t g = generation();
+  static const std::vector<JobStat> kEmpty;
+  if (!dataMx) return kEmpty;
+  xSemaphoreTake(dataMx, portMAX_DELAY);
+  uint32_t g = 0;
+  for (int i = 0; i < feedCount; i++) g += feeds[i].gen;
   if (g != mergedGen) {
     mergedGen = g;
     mergedJobs.clear();
     for (int i = 0; i < feedCount; i++)
       for (const auto &j : feeds[i].jobs) mergedJobs.push_back(j);
   }
+  xSemaphoreGive(dataMx);
   return mergedJobs;
 }
 

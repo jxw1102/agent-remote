@@ -8,7 +8,7 @@
 
 namespace statusfeed {
 
-constexpr int kMaxFeeds = 4;
+constexpr int kMaxFeeds = 3;
 
 struct JobStat {
   String jobId;
@@ -34,6 +34,9 @@ void configure(int idx, const String &apiBase, const String &token);
 // Call every loop; non-blocking. Reads stream bytes, reconnects on drop.
 void tick();
 void stop();
+// Drop feed idx's connection for ~ms (frees its socket/TLS session so an
+// API call to the same daemon can handshake); it reconnects afterwards.
+void pause(int idx, uint32_t ms);
 
 State state(int idx);
 // Any Live → Live; else any Connecting → Connecting; else Failed/Off.

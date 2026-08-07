@@ -11,11 +11,10 @@ Whenever you change a **client-side** feature, behaviour, or API contract, consi
 
 | Platform | Location |
 |----------|----------|
-| Web | `web/` |
-| Android | `android/` (Compose) |
-| BlackBerry 10 | `blackberry/` (Cascades / QML + C++) |
-| iOS | `ios/` (SwiftUI) |
-| LILYGO T-LoRa Pager / T-Deck | `esp32/` (ESP32-S3 firmware) |
+| Web | `bb10-remote/web/` |
+| Android | `bb10-remote/android/` (Compose) |
+| BlackBerry 10 | `bb10-remote/blackberry/` (Cascades / QML + C++) |
+| LILYGO T-LoRa Pager | `bb10-remote/esp32/` (ESP32-S3 firmware) |
 
 Examples of work that almost always spans clients:
 

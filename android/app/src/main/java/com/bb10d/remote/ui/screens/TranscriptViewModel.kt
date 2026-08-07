@@ -683,13 +683,20 @@ class TranscriptViewModel(
         }
         watcher.markStarting()
         viewModelScope.launch {
+            val harness = harnessProvider.value.ifBlank { null }
+            val models = profile.caps.modelsFor(harness)
+            val efforts = profile.caps.effortsFor(harness)
+            val model = profile.model.takeIf { it in models }
+                ?: models.firstOrNull().orEmpty()
+            val effort = profile.effort.takeIf { it in efforts }
+                ?: efforts.firstOrNull().orEmpty()
             runCatching {
                 c.continueSession(
                     sessionId = _ref.value.sessionId,
                     prompt = prompt,
                     execMode = profile.effectiveExecMode(),
-                    model = profile.model,
-                    effort = profile.effort,
+                    model = model,
+                    effort = effort,
                 )
             }
                 .onSuccess { watcher.attach(it, _ref.value.sessionId) }

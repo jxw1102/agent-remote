@@ -524,9 +524,15 @@ button.icon-btn.icon-idle {
   font-weight: 600;
 }
 .welcome-link:hover { text-decoration: underline; }
-/* Session-list empty (no daemons) — same guide, slightly tighter. */
-.empty.guide { max-width: 440px; padding: 24px 16px; }
-.empty.guide .welcome-actions { margin-top: 16px; }
+/* Session-list empty (no daemons): short note only — full guide is in transcript. */
+.empty.list-quiet {
+  max-width: none;
+  padding: 28px 16px;
+  text-align: left;
+  color: var(--muted);
+  font-size: 13px;
+}
+.empty.list-quiet p { margin: 0; line-height: 1.4; }
 
 /* -------------------------------------------------------------- markdown */
 

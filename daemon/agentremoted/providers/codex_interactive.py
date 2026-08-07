@@ -37,6 +37,11 @@ from pathlib import Path
 
 from ..config import CONFIG_DIR
 from ..render_blocks import markdown_to_blocks
+from .codex import (
+    _event_chat_message,
+    _event_tool,
+    _safe_json as _codex_safe_json,
+)
 
 log = logging.getLogger(__name__)
 
@@ -47,8 +52,12 @@ _PASTE_SETTLE_S = 0.3
 _READY_SETTLE_S = 0.8
 _SUBMIT_CONFIRM_S = 4.0
 _SUBMIT_RETRIES = 2
-_DISCOVER_SID_S = 30.0
+# Initial post-submit wait for a brand-new thread id (then the main loop
+# keeps probing forever until the turn ends — never fail for missing id).
+_DISCOVER_SID_S = 8.0
 _LOCAL_QUIET_S = 2.5
+# How many recent rollout files to inspect when sqlite lags the disk.
+_ROLLOUT_SCAN = 40
 
 _STATE_FILE = CONFIG_DIR / "codex-tuis.json"
 _PREFIX = "cdx-"
@@ -81,10 +90,8 @@ def _pane_ready(text: str) -> bool:
 
 
 def _safe_json(line: str):
-    try:
-        return json.loads(line)
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return None
+    # Prefer the shared helper so interactive + store stay in lockstep.
+    return _codex_safe_json(line)
 
 
 class _Tui:
@@ -333,12 +340,21 @@ class CodexInteractiveManager:
         return legacy if legacy.is_file() else None
 
     def _connect(self):
+        """Open the Codex state DB so concurrent WAL writes are visible.
+
+        ``file:…?mode=ro`` can lag or miss WAL commits from the codex
+        process; a normal connection + query_only is safer for discovery.
+        """
         db = self._state_db()
         if db is None:
             return None
         try:
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            con = sqlite3.connect(str(db), timeout=2.0)
             con.row_factory = sqlite3.Row
+            try:
+                con.execute("PRAGMA query_only=ON")
+            except sqlite3.Error:
+                pass
             return con
         except sqlite3.Error as e:
             log.warning("codex state db open failed: %s", e)
@@ -349,17 +365,117 @@ class CodexInteractiveManager:
             return ""
         con = self._connect()
         if con is None:
-            return ""
+            return self._rollout_path_on_disk(session_id)
         try:
             row = con.execute(
                 "SELECT rollout_path FROM threads WHERE id = ?",
                 (session_id,),
             ).fetchone()
-            return (row["rollout_path"] if row else "") or ""
+            path = (row["rollout_path"] if row else "") or ""
+            if path and Path(path).is_file():
+                return path
         except sqlite3.Error:
-            return ""
+            pass
         finally:
             con.close()
+        return self._rollout_path_on_disk(session_id)
+
+    def _rollout_path_on_disk(self, session_id: str) -> str:
+        """Find rollout-*<session_id>.jsonl under CODEX_HOME/sessions/."""
+        if not session_id:
+            return ""
+        root = self.config.codex_home_path / "sessions"
+        if not root.is_dir():
+            return ""
+        needle = "-%s.jsonl" % session_id
+        try:
+            for path in root.rglob("rollout-*.jsonl"):
+                name = path.name
+                if name.endswith(".bak") or ".rewind" in name:
+                    continue
+                if name.endswith(needle) or session_id in name:
+                    return str(path)
+        except OSError:
+            pass
+        return ""
+
+    @staticmethod
+    def _cwd_match(want: str, got: str, raw_got: str = "", raw_want: str = "") -> bool:
+        """True if two project paths refer to the same directory (macOS /tmp)."""
+        if not want and not got:
+            return True
+        a = os.path.realpath(os.path.expanduser(want or raw_want or ""))
+        b = os.path.realpath(os.path.expanduser(got or raw_got or ""))
+        if a and b and (a == b or a.rstrip("/") == b.rstrip("/")):
+            return True
+        # /var/folders/… vs different resolve of the same project
+        if a and b and (a.endswith(b) or b.endswith(a)):
+            return True
+        ra, rb = (raw_want or "").rstrip("/"), (raw_got or "").rstrip("/")
+        return bool(ra and rb and ra == rb)
+
+    def _session_meta_from_rollout(self, path: Path) -> dict:
+        """First session_meta payload in a rollout file (cheap head read)."""
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for i, line in enumerate(f):
+                    if i > 5:
+                        break
+                    ev = _safe_json(line)
+                    if not isinstance(ev, dict) or ev.get("type") != "session_meta":
+                        continue
+                    payload = ev.get("payload")
+                    return payload if isinstance(payload, dict) else {}
+        except OSError:
+            return {}
+        return {}
+
+    def _newest_rollout_for_cwd(self, cwd: str, after_ts: float = 0):
+        """(id, path) from on-disk rollouts — often earlier than sqlite index."""
+        root = self.config.codex_home_path / "sessions"
+        if not root.is_dir():
+            return None
+        want = os.path.realpath(os.path.expanduser(cwd or ""))
+        ranked = []
+        try:
+            for path in root.rglob("rollout-*.jsonl"):
+                name = path.name
+                if name.endswith(".bak") or ".rewind" in name:
+                    continue
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                if after_ts and mtime + 5 < after_ts:
+                    continue
+                ranked.append((mtime, path))
+        except OSError:
+            return None
+        ranked.sort(key=lambda t: t[0], reverse=True)
+        for _, path in ranked[:_ROLLOUT_SCAN]:
+            meta = self._session_meta_from_rollout(path)
+            sid = str(meta.get("session_id") or meta.get("id") or "").strip()
+            if not sid:
+                # Filename fallback: rollout-…-<uuid>.jsonl
+                stem = path.stem  # rollout-…-uuid
+                if "-" in stem:
+                    maybe = stem.split("-")
+                    # uuid-ish last 5 segments of UUID form
+                    for i in range(len(maybe)):
+                        cand = "-".join(maybe[i:])
+                        if len(cand) >= 32 and cand.count("-") >= 4:
+                            sid = cand
+                            break
+            if not sid:
+                continue
+            mcwd = str(meta.get("cwd") or "")
+            if meta and not self._cwd_match(want, mcwd, mcwd, cwd):
+                continue
+            # No meta cwd: still accept very new files for this launch window.
+            if not meta.get("cwd") and after_ts and path.stat().st_mtime + 5 < after_ts:
+                continue
+            return sid, str(path)
+        return None
 
     def _newest_thread_for_cwd(self, cwd: str, after_ts: float = 0):
         """Return (id, rollout_path) for the newest thread in cwd, or None."""
@@ -370,7 +486,7 @@ class CodexInteractiveManager:
             rows = con.execute(
                 "SELECT id, cwd, rollout_path, created_at, updated_at "
                 "FROM threads ORDER BY COALESCE(updated_at, created_at) DESC "
-                "LIMIT 40"
+                "LIMIT 80"
             ).fetchall()
         except sqlite3.Error:
             return None
@@ -378,21 +494,20 @@ class CodexInteractiveManager:
             con.close()
         want = os.path.realpath(os.path.expanduser(cwd or ""))
         for row in rows:
-            rcwd = os.path.realpath(str(row["cwd"] or ""))
-            if rcwd != want and str(row["cwd"] or "").rstrip("/") != cwd.rstrip("/"):
-                # macOS /tmp vs /private/tmp
-                if not (want.endswith(str(row["cwd"] or "")) or
-                        rcwd.endswith(cwd.rstrip("/"))):
-                    continue
+            raw = str(row["cwd"] or "")
+            rcwd = os.path.realpath(raw) if raw else ""
+            if not self._cwd_match(want, rcwd, raw, cwd):
+                continue
             ts = int(row["updated_at"] or row["created_at"] or 0)
             if ts > 10_000_000_000:
                 ts = ts // 1000
-            if after_ts and ts + 2 < after_ts:
+            if after_ts and ts + 5 < after_ts:
                 continue
             return str(row["id"] or ""), str(row["rollout_path"] or "")
         return None
 
     def _count_user_messages(self, path: str) -> int:
+        """Count human user turns in a rollout (legacy + item_completed)."""
         if not path or not Path(path).is_file():
             return -1
         n = 0
@@ -402,34 +517,63 @@ class CodexInteractiveManager:
                     ev = _safe_json(line)
                     if not isinstance(ev, dict):
                         continue
-                    payload = ev.get("payload") if ev.get("type") == "event_msg" else None
-                    if isinstance(payload, dict) and payload.get("type") == "user_message":
+                    hit = _event_chat_message(ev)
+                    if hit and hit[0] == "user":
                         n += 1
         except OSError:
             return -1
         return n
 
-    def _discover_session(self, tui: _Tui, launched_at: float) -> bool:
-        """Fill tui.session_id / rollout_path after a new session starts."""
+    def _try_bind_session(self, tui: _Tui, launched_at: float) -> bool:
+        """One non-blocking attempt to fill tui.session_id / rollout_path.
+
+        Prefers on-disk rollouts (session_meta is the first line) because
+        sqlite often lags; falls back to the threads table. Never fails the
+        job — just returns False until Codex has written something.
+        """
+        if tui.session_id and tui.rollout_path and Path(tui.rollout_path).is_file():
+            return True
+        after = (launched_at - 30) if launched_at else 0
+        hit = self._newest_rollout_for_cwd(tui.cwd, after_ts=after)
+        if not hit:
+            hit = self._newest_thread_for_cwd(tui.cwd, after_ts=after)
+        if not hit or not hit[0]:
+            # Have id but missing path?
+            if tui.session_id and not tui.rollout_path:
+                path = self._rollout_for(tui.session_id)
+                if path:
+                    tui.rollout_path = path
+                    self._save_state()
+                    return True
+            return bool(tui.session_id and tui.rollout_path)
+        sid, path = hit[0], hit[1] or ""
+        if not path:
+            path = self._rollout_for(sid)
+        changed = (sid != tui.session_id) or (path and path != tui.rollout_path)
+        tui.session_id = sid
+        if path:
+            tui.rollout_path = path
+            if not tui.rollout_offset:
+                tui.rollout_offset = 0
+        if changed:
+            self._save_state()
+            log.info("codex TUI %s: bound session %s → %s",
+                     tui.name, sid[:12], (path or "")[-48:])
+        return bool(tui.session_id)
+
+    def _discover_session(self, tui: _Tui, launched_at: float,
+                          timeout_s: float = None) -> bool:
+        """Poll until session id appears, or timeout. Does not fail the job."""
         if tui.session_id and tui.rollout_path:
             return True
-        end = time.time() + _DISCOVER_SID_S
-        while time.time() < end:
-            hit = self._newest_thread_for_cwd(tui.cwd, after_ts=launched_at - 5)
-            if hit and hit[0]:
-                tui.session_id = hit[0]
-                tui.rollout_path = hit[1] or self._rollout_for(hit[0])
-                if tui.rollout_path:
-                    try:
-                        # Tail only new bytes if we already had an offset.
-                        if not tui.rollout_offset:
-                            tui.rollout_offset = 0
-                    except Exception:
-                        pass
-                self._save_state()
+        limit = _DISCOVER_SID_S if timeout_s is None else float(timeout_s)
+        end = time.time() + max(0.0, limit)
+        while True:
+            if self._try_bind_session(tui, launched_at):
                 return True
+            if time.time() >= end:
+                return bool(tui.session_id)
             time.sleep(_POLL_S)
-        return bool(tui.session_id)
 
     # -- input -------------------------------------------------------------
 
@@ -549,39 +693,50 @@ class CodexInteractiveManager:
                     with job.lock:
                         job.new_session_id = sid
                 continue
+            # Tool activity (response_item custom_tool_call, patch/web end, …)
+            tool = _event_tool(ev)
+            if tool:
+                name = tool.get("name") or "tool"
+                detail = tool.get("detail") or ""
+                job.add_event("tool", name=name, detail=detail)
+                job.set_phase("tool", (detail or name)[:120])
+                # Keep scanning — same line is never both chat and tool.
+                if et != "event_msg":
+                    continue
+
             if et != "event_msg":
-                # response_item / tool-ish payloads — optional phase only
-                payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
-                itype = str(payload.get("type") or "")
-                if itype in ("function_call", "custom_tool_call", "tool_call"):
-                    name = str(payload.get("name") or payload.get("tool") or "tool")
-                    job.set_phase("tool", name[:120])
                 continue
             payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
             ptype = str(payload.get("type") or "")
-            if ptype == "task_started":
-                job.set_phase("thinking", "")
-            elif ptype == "user_message":
-                # Confirm submit landed; no event needed for the phone
-                # (messages load from store).
-                pass
-            elif ptype == "agent_message":
-                text = str(payload.get("message") or payload.get("text") or "").strip()
-                if text:
+
+            # Chat turns: legacy user_message/agent_message OR item_completed.
+            chat = _event_chat_message(ev)
+            if chat:
+                role, text = chat
+                if role == "assistant" and text:
                     state.setdefault("parts", []).append(text)
                     state.setdefault("full", []).append(text)
                     job.add_event("text", text=text,
                                   blocks=markdown_to_blocks(text))
                     job.set_phase("writing", text[-160:])
+                # user: submit confirm counts these; no phone event needed
+                continue
+
+            if ptype == "task_started":
+                job.set_phase("thinking", "")
             elif ptype in ("agent_reasoning", "reasoning"):
                 job.set_phase("thinking", "")
-            elif ptype in ("command_execution", "exec_command"):
-                cmd = str(payload.get("command") or payload.get("cmd") or "shell")
-                job.add_event("tool", name="shell", detail=cmd[:200])
-                job.set_phase("tool", cmd[:120])
             elif ptype == "task_complete":
                 turn_done = True
                 state["turn_done"] = True
+                # Newer CLIs put the final answer on last_agent_message when
+                # item_completed was missed (e.g. offset after resume).
+                last = str(payload.get("last_agent_message") or "").strip()
+                if last and not (state.get("full") or state.get("parts")):
+                    state.setdefault("parts", []).append(last)
+                    state.setdefault("full", []).append(last)
+                    job.add_event("text", text=last,
+                                  blocks=markdown_to_blocks(last))
                 full = "".join(state.get("full") or state.get("parts") or [])
                 with job.lock:
                     if full and not job.result_text:
@@ -732,26 +887,29 @@ class CodexInteractiveManager:
             log.info("codex TUI %s: resume watch for job %s", tui.name, job.id)
             before = -1
 
-        # New sessions: discover id after submit (not on mid-turn resume).
+        # New sessions: brief wait for id (disk/sqlite), then keep going.
+        # Never fail for a missing id — the main loop rebinds when Codex writes.
+        bound_announced = bool(tui.session_id)
         if not resume and not tui.session_id:
             job.set_phase("thinking", "starting session")
-            if not self._discover_session(tui, launched_at):
-                # Still try to stream from pane quiet-timeout later.
-                log.warning("codex TUI %s: session id not discovered yet", tui.name)
-            else:
+            self._discover_session(tui, launched_at, timeout_s=_DISCOVER_SID_S)
+            if tui.session_id:
+                bound_announced = True
                 with job.lock:
                     job.new_session_id = tui.session_id
                 job.add_event("init", session_id=tui.session_id,
                               model=job.model or "interactive")
-                if tui.rollout_path:
-                    # Include the user message we just wrote — offset 0 is fine
-                    # for a brand-new file; for an existing one keep current.
-                    pass
+            else:
+                log.info("codex TUI %s: session id not ready yet — "
+                         "continuing; will bind when rollout appears", tui.name)
 
         if not resume:
             if before >= 0:
                 self._confirm_submit(tui, before)
             elif tui.rollout_path:
+                self._confirm_submit(tui, 0)
+            else:
+                # Brand-new: no path yet — nudge Enter while discovery races.
                 self._confirm_submit(tui, 0)
 
         prompt = (job.prompt or "").strip()
@@ -765,6 +923,7 @@ class CodexInteractiveManager:
         interrupted = False
         tui.typed_ahead = 0
         last_off = tui.rollout_offset
+        last_bind_try = 0.0
 
         while True:
             time.sleep(_POLL_S)
@@ -776,14 +935,36 @@ class CodexInteractiveManager:
                     pass
                 break
             if not self._tmux_alive(tui.name):
-                if not state.get("turn_done"):
-                    self._fail(job, "codex TUI exited mid-turn")
+                # TUI may die after the turn already landed on disk (common
+                # when submit-confirm spammed Enter against the new event
+                # format). Prefer finishing from the rollout over hard-fail.
+                self._try_bind_session(tui, launched_at)
+                self._poll_rollout(job, tui)
+                if state.get("turn_done") or state.get("full") or state.get("parts"):
+                    text = "".join(state.get("full") or state.get("parts") or [])
+                    with job.lock:
+                        job.new_session_id = tui.session_id or job.new_session_id
+                    self._done(job, text)
+                    return
+                self._fail(job, "codex TUI exited mid-turn")
                 break
-            if not tui.session_id:
-                self._discover_session(tui, launched_at)
-                if tui.session_id:
+
+            # Non-blocking rebind every poll until we have id+path.
+            now = time.time()
+            if (not tui.session_id or not tui.rollout_path) and now - last_bind_try >= _POLL_S:
+                last_bind_try = now
+                if self._try_bind_session(tui, launched_at) and tui.session_id:
                     with job.lock:
                         job.new_session_id = tui.session_id
+                    if not bound_announced:
+                        bound_announced = True
+                        job.add_event("init", session_id=tui.session_id,
+                                      model=job.model or "interactive")
+                        job.set_phase("thinking", "")
+                    if tui.rollout_path and not last_off:
+                        # Start reading from the beginning of a brand-new rollout.
+                        tui.rollout_offset = 0
+                        last_off = 0
 
             done = self._poll_rollout(job, tui)
             if tui.rollout_offset != last_off:
@@ -797,6 +978,8 @@ class CodexInteractiveManager:
                     state["turn_done"] = False
                     quiet_since = time.time()
                     continue
+                # Last chance to bind before finishing.
+                self._try_bind_session(tui, launched_at)
                 text = "".join(state.get("full") or state.get("parts") or [])
                 with job.lock:
                     job.new_session_id = tui.session_id or job.new_session_id
@@ -805,6 +988,7 @@ class CodexInteractiveManager:
 
             if local and time.time() - quiet_since > _LOCAL_QUIET_S:
                 # Slash commands may not emit task_complete.
+                self._try_bind_session(tui, launched_at)
                 text = "".join(state.get("full") or []) or self._pane_tail(tui.name, 12)
                 with job.lock:
                     job.new_session_id = tui.session_id or job.new_session_id
@@ -820,11 +1004,16 @@ class CodexInteractiveManager:
                 return
 
         if interrupted:
+            self._try_bind_session(tui, launched_at)
             text = "".join(state.get("full") or state.get("parts") or [])
             with job.lock:
                 if job.status == "stopped":
                     job.result_text = text
+                    job.new_session_id = tui.session_id or job.new_session_id
             return
         # Fall-through if TUI died after partial result.
         if state.get("full") and job.status == "running":
+            self._try_bind_session(tui, launched_at)
+            with job.lock:
+                job.new_session_id = tui.session_id or job.new_session_id
             self._done(job, "".join(state["full"]))

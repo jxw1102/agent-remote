@@ -22,6 +22,7 @@ import base64
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import threading
@@ -647,6 +648,178 @@ def _safe_json(line: str):
         return None
 
 
+def _content_text(content) -> str:
+    """Flatten Codex content blocks (text / Text / input_text / output_text)."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                if block.strip():
+                    parts.append(block)
+            elif isinstance(block, dict):
+                t = (block.get("text")
+                     or block.get("input_text")
+                     or block.get("output_text")
+                     or "")
+                if t:
+                    parts.append(str(t))
+        return "\n".join(parts).strip()
+    return str(content).strip()
+
+
+def _item_text(item: dict) -> str:
+    """Text from a message-like payload (legacy message/text or content[])."""
+    if not isinstance(item, dict):
+        return ""
+    raw = item.get("message")
+    if raw is None:
+        raw = item.get("text")
+    if isinstance(raw, list):
+        return _content_text(raw)
+    if raw is not None and str(raw).strip():
+        return str(raw).strip()
+    return _content_text(item.get("content"))
+
+
+def _event_chat_message(ev: dict):
+    """Return (role, text) for a phone-visible chat turn, or None.
+
+    Codex CLI ≥0.14x stopped emitting ``event_msg`` ``user_message`` /
+    ``agent_message``. Turns now land as::
+
+        event_msg / item_completed / item.type = UserMessage | AgentMessage
+        content: [{type: text|Text, text: "…"}]
+
+    Older rollouts still use ``user_message`` / ``agent_message`` with a
+    ``message`` string. Ignore ``response_item`` here — AGENTS.md is injected
+    as a synthetic user message and would pollute the transcript.
+    """
+    if not isinstance(ev, dict):
+        return None
+    if str(ev.get("type") or "") != "event_msg":
+        return None
+    payload = ev.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    ptype = str(payload.get("type") or "")
+    if ptype == "user_message":
+        text = _item_text(payload)
+        return ("user", text) if text else None
+    if ptype == "agent_message":
+        text = _item_text(payload)
+        return ("assistant", text) if text else None
+    if ptype == "item_completed":
+        item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
+        itype = str(item.get("type") or "")
+        if itype in ("UserMessage", "user_message"):
+            text = _item_text(item)
+            return ("user", text) if text else None
+        if itype in ("AgentMessage", "agent_message"):
+            text = _item_text(item)
+            return ("assistant", text) if text else None
+    return None
+
+
+def _is_user_prompt_event(ev: dict) -> bool:
+    """True for human user turns (submit confirm + rewind anchors)."""
+    hit = _event_chat_message(ev)
+    return bool(hit and hit[0] == "user" and hit[1])
+
+
+def _unescape_js_fragment(s: str) -> str:
+    return (s or "").replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"').replace("\\'", "'")
+
+
+def _parse_codex_tool_input(raw: str) -> tuple:
+    """Parse Codex ``custom_tool_call.input`` JS snippets → (name, detail)."""
+    s = raw or ""
+    # tools.exec_command({cmd:"ls", ...}) / tools.web__run({search_query:...})
+    fn_m = re.search(r"tools\.([A-Za-z0-9_]+)\s*\(", s)
+    tool_fn = fn_m.group(1) if fn_m else ""
+    cmd_m = re.search(r"""\bcmd\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')""", s)
+    if cmd_m:
+        lit = cmd_m.group(1)
+        cmd = _unescape_js_fragment(lit[1:-1])
+        return "shell", " ".join(cmd.split())[:200]
+    if "search_query" in s or tool_fn.startswith("web"):
+        qs = re.findall(r"""\bq\s*:\s*"((?:\\.|[^"\\])*)\"""", s)
+        if not qs:
+            qs = re.findall(r"""\bq\s*:\s*'((?:\\.|[^'\\])*)'""", s)
+        detail = "; ".join(_unescape_js_fragment(q) for q in qs[:3]) if qs else "web search"
+        return "web_search", detail[:200]
+    if "Begin Patch" in s or "apply_patch" in tool_fn or tool_fn in ("apply_patch",):
+        files = re.findall(r"\*\*\* (?:Add|Update|Delete) File:\s*([^\n\\]+)", s)
+        detail = ", ".join(f.strip() for f in files[:4]) if files else "patch"
+        return "edit", detail[:200]
+    if tool_fn:
+        pretty = tool_fn.replace("__", ".")
+        return pretty, " ".join(s.split())[:160]
+    return "exec", " ".join(s.split())[:160]
+
+
+def _event_tool(ev: dict):
+    """Return {name, detail} for a tool activity event, or None.
+
+    Codex records tools primarily as::
+
+        response_item / custom_tool_call  {name: "exec", input: "tools.exec_command({cmd:…})"}
+
+    with occasional ``event_msg`` summaries (``patch_apply_end``, ``web_search_end``).
+    """
+    if not isinstance(ev, dict):
+        return None
+    et = str(ev.get("type") or "")
+    payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+
+    if et == "response_item":
+        ptype = str(payload.get("type") or "")
+        if ptype == "custom_tool_call":
+            name, detail = _parse_codex_tool_input(str(payload.get("input") or ""))
+            return {"name": name, "detail": detail}
+        if ptype in ("function_call", "tool_call", "custom_tool_call"):
+            name = str(payload.get("name") or "tool")
+            args = payload.get("arguments") if payload.get("arguments") is not None \
+                else payload.get("input")
+            if isinstance(args, dict):
+                detail = str(args.get("cmd") or args.get("command")
+                             or args.get("path") or args)[:200]
+            else:
+                detail = str(args or "")[:200]
+            if name in ("exec", "shell", "Bash"):
+                name = "shell"
+            return {"name": name, "detail": " ".join(detail.split())}
+        return None
+
+    if et != "event_msg":
+        return None
+    ptype = str(payload.get("type") or "")
+    if ptype in ("command_execution", "exec_command"):
+        cmd = str(payload.get("command") or payload.get("cmd") or "shell")
+        return {"name": "shell", "detail": " ".join(cmd.split())[:200]}
+    # patch_apply_end / web_search_end duplicate the matching custom_tool_call
+    # (same turn, less detail) — skip so the transcript/ticker stay clean.
+    if ptype == "item_completed":
+        item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
+        itype = str(item.get("type") or "")
+        if itype in ("CommandExecution", "command_execution", "ShellCommand"):
+            cmd = str(item.get("command") or item.get("cmd") or "")
+            if not cmd and item.get("input"):
+                return dict(zip(("name", "detail"),
+                                _parse_codex_tool_input(str(item.get("input")))))
+            return {"name": "shell", "detail": (cmd or itype)[:200]}
+        if itype in ("FileChange", "file_change", "ApplyPatch", "apply_patch"):
+            path = str(item.get("path") or item.get("file") or "edit")
+            return {"name": "edit", "detail": path[:200]}
+        if itype in ("WebSearch", "web_search"):
+            q = str(item.get("query") or item.get("q") or "web search")
+            return {"name": "web_search", "detail": q[:200]}
+    return None
+
+
 class CodexStore:
     """Read Codex threads from the on-disk SQLite index + rollout JSONL."""
 
@@ -920,12 +1093,16 @@ class CodexStore:
                     ev = _safe_json(line)
                     if not isinstance(ev, dict):
                         continue
+                    hit = _event_chat_message(ev)
+                    if hit and hit[1] and search_util.contains_ci(hit[1], query):
+                        return search_util.make_snippet(hit[1], query)
+                    # Also scan raw payload fields for tool/command hits.
                     payload = ev.get("payload") or {}
                     if not isinstance(payload, dict):
                         continue
                     text = payload.get("message") or payload.get("text") or ""
                     if isinstance(text, list):
-                        text = " ".join(str(t) for t in text)
+                        text = _content_text(text)
                     if text and search_util.contains_ci(str(text), query):
                         return search_util.make_snippet(str(text), query)
         except OSError:
@@ -934,7 +1111,12 @@ class CodexStore:
 
 
 def _build_transcript(path: Path | None) -> list:
-    """Coalesce rollout JSONL into [{role, text, ts}] for the phone."""
+    """Coalesce rollout JSONL into [{role, text, ts}] for the phone.
+
+    Chat turns + compact tool status rows (shell / edit / web_search) so the
+    transcript mirrors live job tool events. Tool *outputs* stay off the
+    history (noisy; same idea as Claude/Grok).
+    """
     if path is None or not path.is_file():
         return []
     messages = []
@@ -945,28 +1127,38 @@ def _build_transcript(path: Path | None) -> list:
                 if not isinstance(ev, dict):
                     continue
                 ts = str(ev.get("timestamp") or "")
-                payload = ev.get("payload") if ev.get("type") == "event_msg" else None
-                if not isinstance(payload, dict):
+                hit = _event_chat_message(ev)
+                if hit:
+                    role, text = hit
+                    prefix = "u" if role == "user" else "a"
+                    messages.append({
+                        "uuid": "%s%d" % (prefix, len(messages)),
+                        "role": role,
+                        "ts": ts,
+                        "text": text,
+                    })
                     continue
-                ptype = str(payload.get("type") or "")
-                if ptype == "user_message":
-                    text = str(payload.get("message") or "").strip()
-                    if text:
-                        messages.append({
-                            "uuid": "u%d" % len(messages),
-                            "role": "user",
-                            "ts": ts,
-                            "text": text,
-                        })
-                elif ptype == "agent_message":
-                    text = str(payload.get("message") or "").strip()
-                    if text:
-                        messages.append({
-                            "uuid": "a%d" % len(messages),
-                            "role": "assistant",
-                            "ts": ts,
-                            "text": text,
-                        })
+                tool = _event_tool(ev)
+                if not tool:
+                    continue
+                # Skip summary event_msg duplicates when the same turn already
+                # has a custom_tool_call — patch_apply_end / web_search_end are
+                # useful only as fallback when no call row existed. Always emit
+                # response_item tools; emit end summaries too (cheap, short).
+                name = tool.get("name") or "tool"
+                detail = tool.get("detail") or ""
+                label = "⚙ %s" % name
+                if detail:
+                    label = "%s  %s" % (label, detail)
+                messages.append({
+                    "uuid": "t%d" % len(messages),
+                    "role": "status",
+                    "metaKind": "tool",
+                    "ts": ts,
+                    "text": label[:240],
+                    "name": name,
+                    "detail": detail,
+                })
     except OSError:
         return messages
     return messages
@@ -980,6 +1172,9 @@ def _render_codex_message(msg: dict) -> None:
     """
     text = (msg.get("text") or "").strip()
     role = msg.get("role") or ""
+    if role in ("status", "notice", "tool"):
+        # Web/Android render status as plain text; no markdown blocks needed.
+        return
     if not text or role not in ("assistant", "user"):
         return
     if role == "user":
@@ -1041,19 +1236,18 @@ class CodexRunner:
         self._interactive_mgr().close_for_session(sid)
         raw = path.read_text(encoding="utf-8", errors="replace")
         lines = raw.splitlines()
-        # Human prompts are the event_msg/user_message records — the same
-        # rows the phone's transcript shows (harness-injected user
-        # response_items never get an event_msg).
+        # Human prompts are the same rows the phone transcript shows:
+        # event_msg/user_message (legacy) or item_completed/UserMessage.
+        # Harness-injected AGENTS.md lives only on response_item and is
+        # skipped by _is_user_prompt_event.
         marks = []
         for i, line in enumerate(lines):
             ev = _safe_json(line)
-            if not isinstance(ev, dict) or ev.get("type") != "event_msg":
+            if not isinstance(ev, dict):
                 continue
-            payload = ev.get("payload") or {}
-            if str(payload.get("type") or "") == "user_message":
-                text = str(payload.get("message") or "").strip()
-                if text:
-                    marks.append((i, text))
+            hit = _event_chat_message(ev)
+            if hit and hit[0] == "user" and hit[1]:
+                marks.append((i, hit[1]))
         if not marks:
             raise providers.RunnerError(
                 "nothing to rewind — no user messages yet")
@@ -1269,31 +1463,51 @@ class CodexRunner:
 
         if et in ("item.started", "item.completed", "item.updated"):
             item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
-            itype = str(item.get("type") or "")
-            if itype == "agent_message":
-                text = str(item.get("text") or "").strip()
+            itype = str(item.get("type") or "").lower()
+            if itype in ("agent_message", "agentmessage"):
+                text = str(item.get("text") or _item_text(item) or "").strip()
                 if text and et == "item.completed":
                     state.setdefault("parts", []).append(text)
                     state.setdefault("full", []).append(text)
                     job.add_event("text", text=text,
                                   blocks=markdown_to_blocks(text))
                     job.set_phase("writing", text[-160:])
-            elif itype in ("command_execution", "command", "shell"):
-                cmd = str(item.get("command") or item.get("cmd") or "shell")
-                detail = str(item.get("aggregated_output") or "")[:200]
+            elif itype in ("command_execution", "command", "shell",
+                           "commandexecution"):
+                cmd = str(item.get("command") or item.get("cmd") or "")
+                if not cmd and item.get("input"):
+                    _, cmd = _parse_codex_tool_input(str(item.get("input")))
+                cmd = cmd or "shell"
                 status = str(item.get("status") or "")
-                if et == "item.started" or status == "in_progress":
-                    job.add_event("tool", name="shell", detail=cmd[:200])
+                if et == "item.started" or status == "in_progress" \
+                        or et == "item.completed":
+                    # Emit on start and on completed-only streams (some CLIs
+                    # only send item.completed for short shell calls).
+                    if et != "item.updated":
+                        job.add_event("tool", name="shell", detail=cmd[:200])
                     job.set_phase("tool", cmd[:120])
-                elif et == "item.completed":
-                    # Keep phase as tool until next event; optional exit code.
+                if et == "item.completed":
                     code = item.get("exit_code")
                     if code not in (None, 0, "0"):
                         job.set_phase("tool", "exit %s" % code)
-            elif itype in ("file_change", "patch", "apply_patch"):
+            elif itype in ("file_change", "patch", "apply_patch", "filechange"):
                 path = str(item.get("path") or item.get("file") or "edit")
-                job.add_event("tool", name="edit", detail=path[:200])
+                if et != "item.updated":
+                    job.add_event("tool", name="edit", detail=path[:200])
                 job.set_phase("tool", path[:120])
+            elif itype in ("web_search", "websearch"):
+                q = str(item.get("query") or item.get("q") or "web search")
+                if et != "item.updated":
+                    job.add_event("tool", name="web_search", detail=q[:200])
+                job.set_phase("tool", q[:120])
+            elif itype in ("function_call", "custom_tool_call", "tool_call"):
+                name, detail = _parse_codex_tool_input(
+                    str(item.get("input") or item.get("arguments") or ""))
+                if item.get("name") and name in ("exec", "tool"):
+                    name = str(item.get("name"))
+                if et != "item.updated":
+                    job.add_event("tool", name=name, detail=detail)
+                job.set_phase("tool", (detail or name)[:120])
             elif itype in ("reasoning", "thought", "agent_reasoning"):
                 job.set_phase("thinking", "")
             return

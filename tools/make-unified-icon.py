@@ -62,7 +62,7 @@ png += chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 6, 0, 0, 0))
 png += chunk(b"IDAT", zlib.compress(b"".join(rows), 9))
 png += chunk(b"IEND", b"")
 
-out = "blackberry/variant/unified/icon.png"
+out = "/Users/xiaowen.ji/Developer/cloud-projects/bb10-remote/blackberry/variant/unified/icon.png"
 with open(out, "wb") as f:
     f.write(png)
 print("wrote", out, len(png), "bytes")

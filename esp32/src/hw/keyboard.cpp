@@ -1,5 +1,6 @@
 #include "hw/keyboard.h"
 #include "board_pins.h"
+#include "hw/i2c_lock.h"
 
 #include <Wire.h>
 
@@ -116,7 +117,11 @@ bool poll(Event *out) {
   if (!ready) return false;
 
   // Drain FIFO
-  int ev = kbd.getEvent();
+  int ev;
+  {
+    I2cLock lock;
+    ev = kbd.getEvent();
+  }
   if (ev <= 0) return false;
   bool press = (ev & 0x80) != 0;  // bit 7: 1 = press, 0 = release
   int k = (ev & 0x7F) - 1;
@@ -209,8 +214,12 @@ bool poll(Event *out) {
   memset(out, 0, sizeof(*out));
   if (serialPoll(out)) return true;
   if (!ready) return false;
-  if (Wire.requestFrom((int)TDECK_KB_ADDR, 1) != 1) return false;
-  int c = Wire.read();
+  int c;
+  {
+    I2cLock lock;
+    if (Wire.requestFrom((int)TDECK_KB_ADDR, 1) != 1) return false;
+    c = Wire.read();
+  }
   if (c <= 0) return false;
   if (c == '\r' || c == '\n') {
     out->enter = true;
