@@ -18,6 +18,10 @@ Bump `agentremoted/__init__.py` → `__version__` in the **same change** as any
 daemon edit (semver patch for fixes/features, minor for API/cap changes).
 `/api/ping` reports it so you can see whether a host picked up a deploy.
 
+**2.5.3** adds `auth` / `provider_details.*.auth` on `/api/ping` (CLI on PATH,
+subscription vs API key, expired/missing) so clients can show login health
+without calling vendor APIs.
+
 | provider | sessions from | runs turns with |
 |----------|---------------|-----------------|
 | `claude` | `~/.claude/projects/**/*.jsonl` | `claude` (headless or interactive TUI) |
@@ -179,7 +183,7 @@ Exact flags are per provider under `agentremoted/providers/`. Caps from
 ## API (overview)
 
 ```
-GET  /api/ping                                  liveness + provider + caps (no auth)
+GET  /api/ping                                  liveness + provider + caps + auth (no auth token)
 GET  /api/usage                                 subscription usage (when supported)
 GET  /api/projects
 GET  /api/sessions?project=<id>&limit=<n>

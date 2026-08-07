@@ -442,11 +442,21 @@ async function chimeJobEnded(profileId, jobId, meta = {}) {
   try {
     const snap = await call(profile, `/api/jobs/${jobId}?since=${since}`,
       { timeout: 15000 });
+    const st = String(snap.status || "").trim();
+    // SSE reconnect / daemon restart drops jobs from the active list while
+    // they are still running — do not chime yet; they will reappear.
+    if (st === "starting" || st === "running") {
+      chimeEnded.delete(key); // allow a real end later
+      return;
+    }
     // User-initiated stop is silent (Android parity).
-    if (snap.status === "stopped") return;
-    if (snap.status === "error") playChime("error");
+    if (st === "stopped") return;
+    // Only explicit error is a failure; pruned jobs (404 handled below) and
+    // empty/unknown status are treated as success.
+    if (st === "error") playChime("error");
     else playChime("done");
   } catch {
+    // 404 after prune of a finished job → success cue, not failure.
     playChime("done");
   }
 }
@@ -532,9 +542,26 @@ async function call(profile, path, { method = "GET", body, timeout = 30000, raw 
 
 // ------------------------------------------------------------------ time
 
-function epochOf(iso) {
-  if (!iso) return 0;
-  const t = Date.parse(iso);
+/**
+ * Normalize last_active/started to ms since epoch.
+ * Daemon running-job rows send a Unix *seconds* float; store sessions send
+ * ISO-8601 strings. Date.parse(number) is NaN, so unhandled floats used to
+ * sort to 0 and bury the working session at the bottom of the list.
+ */
+function epochOf(v) {
+  if (v == null || v === "") return 0;
+  if (typeof v === "number" && Number.isFinite(v)) {
+    // Seconds vs milliseconds (daemon time.time() is seconds).
+    return v < 1e12 ? v * 1000 : v;
+  }
+  const s = String(v).trim();
+  if (!s) return 0;
+  // Numeric string (JSON sometimes stringifies oddly).
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const n = parseFloat(s);
+    if (Number.isFinite(n)) return n < 1e12 ? n * 1000 : n;
+  }
+  const t = Date.parse(s);
   return Number.isFinite(t) ? t : 0;
 }
 function stamp(ms) {
@@ -562,6 +589,32 @@ function dayLabel(ms) {
   if (d.toDateString() === now.toDateString()) return "Today";
   if (d.toDateString() === yday.toDateString()) return "Yesterday";
   return stamp(ms);
+}
+/** Local time for message hover tooltips (native `title`). Today → time only. */
+function messageHoverTime(ts) {
+  if (ts == null || ts === "") return "";
+  let ms = typeof ts === "number" ? ts : epochOf(ts);
+  // Unix seconds (Codex sometimes stores whole seconds as numbers).
+  if (ms > 0 && ms < 1e12) ms *= 1000;
+  if (!ms || !Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "";
+  const timeOpts = {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    hourCycle: "h23",
+  };
+  if (d.toDateString() === new Date().toDateString()) {
+    return d.toLocaleTimeString([], timeOpts);
+  }
+  // Other days: month + day + time (year omitted — rarely useful in a chat).
+  return d.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    ...timeOpts,
+  });
 }
 function elapsed(secs) {
   if (secs < 60) return `${secs}s`;
@@ -923,6 +976,7 @@ async function refreshSessions() {
 
     if (gen !== state.gen) return;
     if (paintTimer) clearTimeout(paintTimer);
+    // Search mode: keep hit ranking (no pin) — user asked for matches.
     state.rows = collected.sort((a, b) => b.sortKey - a.sortKey);
     state.loading = false;
     renderSessions();
@@ -951,10 +1005,83 @@ async function refreshSessions() {
   }));
 
   if (gen !== state.gen) return; // a newer refresh already owns the list
-  state.rows = collected.sort((a, b) => b.sortKey - a.sortKey);
+  state.rows = finalizeSessionRows(collected);
   state.loading = false;
   renderSessions();
   renderStatus();
+}
+
+/**
+ * Keep the open + actively working sessions visible and sorted to the top.
+ * Injects a row when the list API omitted them (round-robin starvation,
+ * stale last_active, multi-host flood) so the session you're in never
+ * "vanishes" from the left column.
+ */
+function finalizeSessionRows(collected) {
+  const rows = collected.slice();
+  const seen = new Set(rows.map((r) => `${r.profileId}/${r.session.id}`));
+  const now = Date.now();
+
+  // Inject sessions known from the live status stream but missing in /api/sessions.
+  for (const [pid, jobs] of Object.entries(state.active || {})) {
+    const profile = profileById(pid);
+    for (const job of jobs || []) {
+      const sid = (job.new_session_id || job.session_id || "").trim();
+      if (!sid) continue;
+      const key = `${pid}/${sid}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const prompt = String(job.prompt || "").replace(/\s+/g, " ").trim();
+      rows.push({
+        profileId: pid,
+        profileName: (profile && (profile.name || profile.baseUrl)) || "Daemon",
+        provider: job.provider || (profile && profile.provider) || "",
+        session: {
+          id: sid,
+          title: prompt ? prompt.slice(0, 80) : "Working…",
+          last_active: now,
+          last_text: prompt.slice(0, 200),
+          cwd: job.cwd || "",
+          running: true,
+          job_id: job.job_id || job.id || "",
+        },
+        sortKey: now,
+      });
+    }
+  }
+
+  // Inject the open session if still missing (idle open, or list starved it).
+  if (state.open && state.open.sessionId && state.open.profileId) {
+    const key = `${state.open.profileId}/${state.open.sessionId}`;
+    if (!seen.has(key)) {
+      const profile = profileById(state.open.profileId);
+      const s = state.open.session || { id: state.open.sessionId };
+      rows.push({
+        profileId: state.open.profileId,
+        profileName: (profile && (profile.name || profile.baseUrl)) || "Daemon",
+        provider: (s.provider || state.open.provider
+          || (profile && profile.provider) || ""),
+        session: { ...s, id: state.open.sessionId },
+        sortKey: epochOf(s.last_active) || now,
+      });
+    }
+  }
+
+  const working = workingKeys();
+  const openKey = state.open
+    ? `${state.open.profileId}/${state.open.sessionId}` : "";
+  for (const row of rows) {
+    const key = `${row.profileId}/${row.session.id}`;
+    let sk = row.sortKey || epochOf(row.session.last_active)
+      || epochOf(row.session.started) || 0;
+    // Pin working / open / daemon-flagged running to "now" so they stay first.
+    if (row.session.running || working.has(key) || key === openKey) {
+      sk = Math.max(sk, now);
+    }
+    row.sortKey = sk;
+  }
+  rows.sort((a, b) => b.sortKey - a.sortKey);
+  return rows;
 }
 
 /**
@@ -1154,7 +1281,15 @@ function renderFilters() {
   };
   box.appendChild(mk("All", null, null));
   state.profiles.forEach((p) => {
-    box.appendChild(mk(p.name || p.baseUrl, p.id, profileHostAccent(p)));
+    const b = mk(p.name || p.baseUrl, p.id, profileHostAccent(p));
+    const feed = state.feeds[p.id];
+    if (feed && feed.error) {
+      b.classList.add("chip-error");
+      b.title = feed.error;
+    } else if (p.host) {
+      b.title = p.host + (p.version ? ` · v${p.version}` : "");
+    }
+    box.appendChild(b);
   });
 }
 
@@ -1218,9 +1353,14 @@ function renderSessions() {
     btn.appendChild(top);
 
     const meta = el("div", "row-meta");
-    const tag = el("span", "tag provider", row.profileName);
-    tag.style.setProperty("--tag", pal.accent);
-    meta.appendChild(tag);
+    // Host chip in this session's harness colour (Mbp+Grok → cyan, not multi purple).
+    // No separate Grok/Claude/Codex tag — host colour already implies harness.
+    const hostTag = el("span", "tag host", row.profileName);
+    hostTag.style.setProperty("--tag", pal.accent);
+    hostTag.title = (pal.label || row.provider)
+      ? `${row.profileName} · ${pal.label || row.provider}`
+      : "Daemon profile";
+    meta.appendChild(hostTag);
     const folder = String(row.session.cwd || "").replace(/\/+$/, "").split("/").pop();
     if (folder) meta.appendChild(el("span", "tag", folder));
     if (row.session.git_branch) meta.appendChild(el("span", "tag", "⑂ " + row.session.git_branch));
@@ -1496,7 +1636,7 @@ function renderChatSub() {
   const profile = profileById(open.profileId);
   const harness = sessionProvider(open.session, profile);
   const pal = providerOf(harness);
-  // Profile name + harness when the host is multi (one machine, several CLIs).
+  // Profile name + harness label when the host is multi (one machine, several CLIs).
   let tagText = open.profileName || (profile && profile.name) || "Daemon";
   if (profileHarnesses(profile).length > 1 && harness)
     tagText = `${tagText} · ${pal.label}`;
@@ -1578,14 +1718,15 @@ function expandMessages(messages, offset) {
   messages.forEach((m, i) => {
     const id = `${offset + i}:${m.uuid || ""}`;
     const text = m.text || "";
+    const ts = m.ts || m.timestamp || m.started || "";
     if (m.role === "user" && text.startsWith("[shell] ! ") && text.includes("\n[output]\n")) {
       const command = text.split("\n[output]\n")[0].replace(/^\[shell\] /, "").trim();
       const body = text.split("\n[output]\n")[1].split("\n[silent]")[0].trim();
-      out.push({ id, role: "user", text: command });
-      if (body) out.push({ id: id + ":out", role: "assistant", text: body });
+      out.push({ id, role: "user", text: command, ts });
+      if (body) out.push({ id: id + ":out", role: "assistant", text: body, ts });
       return;
     }
-    out.push({ id, role: m.role, text, metaKind: m.metaKind || "" });
+    out.push({ id, role: m.role, text, metaKind: m.metaKind || "", ts });
   });
   return out;
 }
@@ -1607,12 +1748,30 @@ function renderTranscript(toBottom) {
   if (toBottom) view.scrollTop = view.scrollHeight;
 }
 
+/**
+ * Tools row: Copy (+ extras) on the left; timestamp only for user prompts,
+ * right-aligned. Shown on hover.
+ */
+function messageToolsRow(item, extraButtons, { showTime = false } = {}) {
+  const tools = el("div", "msg-tools");
+  tools.appendChild(copyButton(item.text));
+  (extraButtons || []).forEach((b) => tools.appendChild(b));
+  if (showTime) {
+    const when = messageHoverTime(item.ts);
+    if (when) {
+      const time = el("span", "msg-time", when);
+      time.title = when;
+      tools.appendChild(time);
+    }
+  }
+  return tools;
+}
+
 function renderMessage(item) {
   const wrap = el("div", `msg ${item.role}${item.severity === "error" ? " error" : ""}`);
   if (item.role === "user") {
     wrap.appendChild(inlineInto(el("span", "body"), item.text));
-    const tools = el("div", "msg-tools");
-    tools.appendChild(copyButton(item.text));
+    const extras = [];
     const profile = profileById(state.open.profileId);
     // Rewind is daemon-side session-file surgery (daemon ≥ 2.5), so it works
     // in BOTH execution modes — gate only on the harness's advertised cap.
@@ -1623,10 +1782,10 @@ function renderMessage(item) {
         const b = el("button", null, "Rewind to here");
         b.type = "button";
         b.addEventListener("click", () => confirmRewind(item, back));
-        tools.appendChild(b);
+        extras.push(b);
       }
     }
-    wrap.appendChild(tools);
+    wrap.appendChild(messageToolsRow(item, extras, { showTime: true }));
     return wrap;
   }
   if (item.role === "status" || item.role === "notice") {
@@ -1634,9 +1793,7 @@ function renderMessage(item) {
     return wrap;
   }
   wrap.appendChild(renderMarkdown(item.text));
-  const tools = el("div", "msg-tools");
-  tools.appendChild(copyButton(item.text));
-  wrap.appendChild(tools);
+  wrap.appendChild(messageToolsRow(item));
   return wrap;
 }
 
@@ -1808,7 +1965,14 @@ async function runShell(command) {
 }
 
 function appendLive(item) {
-  state.items.push({ id: `live-${state.items.length}-${Date.now()}`, live: true, ...item });
+  const row = {
+    id: `live-${state.items.length}-${Date.now()}`,
+    live: true,
+    ...item,
+  };
+  // Prefer an explicit ts from the event; otherwise stamp with now.
+  if (!row.ts) row.ts = new Date().toISOString();
+  state.items.push(row);
   const thread = $("transcript").querySelector(".thread");
   if (thread) {
     thread.appendChild(renderMessage(state.items[state.items.length - 1]));
@@ -1942,6 +2106,7 @@ async function pollJob() {
   }
   if (["done", "error", "stopped"].includes(snap.status)) {
     const notes = [];
+    // Only real job errors — never "failed" for empty/unknown status.
     if (snap.status === "error") notes.push(snap.error || "The turn failed");
     if (snap.status === "stopped") notes.push("Stopped");
     if (snap.dropped_queued) notes.push(`${snap.dropped_queued} queued prompt(s) dropped`);
@@ -2223,9 +2388,21 @@ function editProfile(index) {
               ? ping.providers
               : (ping.provider ? [ping.provider] : []);
             const labels = hs.map((h) => providerOf(h).label).join(" · ") || "Agent";
+            let authLine = "";
+            if (ping.auth && ping.auth.detail) {
+              authLine = `\nAuth: ${ping.auth.detail}`;
+            } else if (ping.provider_details) {
+              const bits = Object.entries(ping.provider_details).map(([n, d]) => {
+                const a = d && d.auth;
+                return a ? `${n}:${a.status || "?"}` : null;
+              }).filter(Boolean);
+              if (bits.length) authLine = `\nAuth: ${bits.join(" · ")}`;
+            }
             testLine.textContent =
-              `${labels} on ${ping.host || "the daemon"} · agentremoted ${ping.version}`;
-            testLine.style.color = "var(--ok)";
+              `${labels} on ${ping.host || "the daemon"} · agentremoted ${ping.version}${authLine}`;
+            const st = (ping.auth && ping.auth.status) || "";
+            testLine.style.color = (st === "missing" || st === "expired")
+              ? "var(--warn)" : "var(--ok)";
           } catch (e) {
             testLine.textContent = e.status === 401
               ? "Reached the daemon, but the token was rejected" : e.message;
@@ -2881,6 +3058,109 @@ function profileReportsUsage(p) {
   return capOf(p, "can_show_usage", true);
 }
 
+/** Dedup key: same harness seat across hosts → one Usage row. */
+function usageIdentityKey(provider, accountId, account, hostFallback) {
+  const p = String(provider || "").toLowerCase().trim();
+  const id = String(accountId || account || "").toLowerCase().trim();
+  if (p && id) return `${p}|${id}`;
+  // No account yet (still loading / unknown) — keep hosts separate until known.
+  return `${p}|host:${hostFallback || "?"}`;
+}
+
+function cleanUsageBuckets(buckets, provider) {
+  const label = providerOf(provider).label || provider || "";
+  const prefix = label ? `${label} · ` : "";
+  return (buckets || []).map((b) => {
+    const t = String(b.title || "");
+    if (prefix && t.startsWith(prefix)) return { ...b, title: t.slice(prefix.length) };
+    return b;
+  });
+}
+
+/**
+ * Merge per-host usage into one list keyed by (provider, account).
+ * Same Claude/Codex/Grok login on Mac + VPS appears once; hosts listed under.
+ */
+function mergeUsageResults(results) {
+  const map = new Map(); // key -> entry
+  const order = [];
+  const push = (entry) => {
+    const key = usageIdentityKey(
+      entry.provider, entry.accountId, entry.account, entry.hosts[0] || "");
+    const prev = map.get(key);
+    if (!prev) {
+      map.set(key, entry);
+      order.push(key);
+      return;
+    }
+    // Merge hosts; prefer the payload that actually has bars.
+    for (const h of entry.hosts) {
+      if (h && !prev.hosts.includes(h)) prev.hosts.push(h);
+    }
+    if ((!prev.buckets || !prev.buckets.length) && entry.buckets && entry.buckets.length) {
+      prev.buckets = entry.buckets;
+      prev.error = entry.error || "";
+      prev.ok = entry.ok;
+    } else if (entry.ok && entry.buckets && entry.buckets.length) {
+      // Both have data — keep higher max% (more recent burn) as a simple pick.
+      const maxOf = (bs) => Math.max(0, ...bs.map((b) => Number(b.percent) || 0), 0);
+      if (maxOf(entry.buckets) >= maxOf(prev.buckets || [])) {
+        prev.buckets = entry.buckets;
+        prev.error = entry.error || prev.error || "";
+      }
+    } else if (!prev.ok && entry.error) {
+      prev.error = prev.error || entry.error;
+    }
+    if (!prev.account && entry.account) prev.account = entry.account;
+    if (!prev.accountId && entry.accountId) prev.accountId = entry.accountId;
+  };
+
+  results.forEach((r) => {
+    const host = (r.profile && (r.profile.name || r.profile.baseUrl)) || "host";
+    if (r.loading) {
+      push({
+        provider: r.profile.provider || "agent",
+        account: "",
+        accountId: "",
+        hosts: [host],
+        buckets: [],
+        ok: true,
+        error: "",
+        loading: true,
+      });
+      return;
+    }
+    if (r.sections && r.sections.length) {
+      r.sections.forEach((sec) => {
+        const provider = sec.provider || r.profile.provider || "";
+        push({
+          provider,
+          account: sec.account || "",
+          accountId: sec.account_id || sec.accountId || "",
+          hosts: [host],
+          buckets: cleanUsageBuckets(sec.buckets || [], provider),
+          ok: sec.ok !== false,
+          error: sec.error || "",
+          loading: false,
+        });
+      });
+      return;
+    }
+    const provider = r.provider || r.profile.provider || "";
+    push({
+      provider,
+      account: r.account || "",
+      accountId: r.accountId || "",
+      hosts: [host],
+      buckets: cleanUsageBuckets(r.buckets || [], provider),
+      ok: !r.error || !!(r.buckets && r.buckets.length),
+      error: r.error || "",
+      loading: false,
+    });
+  });
+  return order.map((k) => map.get(k));
+}
+
 function appendUsageBuckets(body, buckets, accent) {
   (buckets || []).forEach((b) => {
     const item = el("div", "usage-item");
@@ -2906,7 +3186,14 @@ function appendUsageBuckets(body, buckets, accent) {
 async function openUsage() {
   const targets = enabledProfiles().filter(profileReportsUsage);
   const results = targets.map((p) => ({
-    profile: p, loading: true, buckets: [], sections: null, error: "",
+    profile: p,
+    loading: true,
+    buckets: [],
+    sections: null,
+    error: "",
+    provider: p.provider || "",
+    account: "",
+    accountId: "",
   }));
 
   const render = () => modal({
@@ -2916,65 +3203,54 @@ async function openUsage() {
         body.appendChild(el("p", null, "No daemon reports usage."));
         return;
       }
-      results.forEach((r) => {
-        const multi = !!(r.sections && r.sections.length);
-        const hostPal = (multi || profileHarnesses(r.profile).length > 1)
-          ? MULTI : providerOf(r.profile.provider);
-        const head = el("div", "usage-src", r.profile.name);
-        head.style.setProperty("--tag", hostPal.accent);
+      const merged = mergeUsageResults(results);
+      if (!merged.length) {
+        body.appendChild(el("div", "help", "No usage data returned."));
+        return;
+      }
+      const anyLoading = results.some((r) => r.loading);
+      if (anyLoading) {
+        const wait = el("div", "help");
+        wait.appendChild(el("span", "spinner"));
+        // Grok has no REST usage API: the daemon resumes a tmux TUI and
+        // scrapes /usage, which can take tens of seconds.
+        wait.appendChild(document.createTextNode(" Reading daemons…"));
+        body.appendChild(wait);
+      }
+      merged.forEach((row) => {
+        if (row.loading && !(row.buckets && row.buckets.length)) return;
+        const pal = providerOf(row.provider);
+        const titleBits = [pal.label || row.provider || "Agent"];
+        if (row.account) titleBits.push(row.account);
+        const head = el("div", "usage-src", titleBits.join(" · "));
+        head.style.setProperty("--tag", pal.accent);
         body.appendChild(head);
-        if (r.loading) {
-          const wait = el("div", "help");
-          wait.appendChild(el("span", "spinner"));
-          // Grok has no REST usage API: the daemon resumes a tmux TUI and
-          // scrapes /usage, which can take tens of seconds.
-          wait.appendChild(document.createTextNode(
-            multi ? " Reading each harness…" : " Reading…"));
-          body.appendChild(wait);
-          return;
+        if (row.hosts && row.hosts.length) {
+          const via = el("div", "help",
+            row.hosts.length > 1
+              ? `Via ${row.hosts.join(" · ")}`
+              : row.hosts[0]);
+          via.style.marginTop = "2px";
+          via.style.marginBottom = "6px";
+          body.appendChild(via);
         }
-        if (r.error && !multi) {
-          const e = el("div", "help", r.error);
-          e.style.color = "var(--danger)";
+        if (row.error && !(row.buckets && row.buckets.length)) {
+          const e = el("div", "help", row.error);
+          e.style.color = "var(--dim)";
           body.appendChild(e);
           return;
         }
-        if (multi) {
-          r.sections.forEach((sec) => {
-            const pal = providerOf(sec.provider);
-            const sub = el("div", "usage-src", pal.label);
-            sub.style.setProperty("--tag", pal.accent);
-            sub.style.marginTop = "10px";
-            sub.style.fontSize = "13px";
-            body.appendChild(sub);
-            if (sec.ok === false || sec.error) {
-              const e = el("div", "help", sec.error || "Not available");
-              e.style.color = "var(--dim)";
-              body.appendChild(e);
-              return;
-            }
-            if (!(sec.buckets || []).length) {
-              body.appendChild(el("div", "help", "No usage data returned."));
-              return;
-            }
-            // Section header already names the harness — strip "Claude · " prefix
-            // if the multi endpoint tagged flat titles for older clients.
-            const label = pal.label;
-            const cleaned = (sec.buckets || []).map((b) => {
-              const t = String(b.title || "");
-              const prefix = label + " · ";
-              if (t.startsWith(prefix)) return { ...b, title: t.slice(prefix.length) };
-              return b;
-            });
-            appendUsageBuckets(body, cleaned, pal.accent);
-          });
-          return;
+        if (row.error && row.buckets && row.buckets.length) {
+          const note = el("div", "help", row.error);
+          note.style.color = "var(--dim)";
+          note.style.marginBottom = "6px";
+          body.appendChild(note);
         }
-        if (!r.buckets.length) {
+        if (!(row.buckets && row.buckets.length)) {
           body.appendChild(el("div", "help", "No usage data returned."));
           return;
         }
-        appendUsageBuckets(body, r.buckets, hostPal.accent);
+        appendUsageBuckets(body, row.buckets, pal.accent);
       });
     },
     actions: [{ label: "Close", close: true }],
@@ -2982,7 +3258,7 @@ async function openUsage() {
   render();
 
   // Progressive: fast daemons (Claude OAuth) paint immediately; Grok's TUI
-  // scrape is slow and must not block the sheet.
+  // scrape is slow and must not block the sheet. Re-merge after each host.
   results.forEach(async (r) => {
     try {
       const data = await call(r.profile, "/api/usage", { timeout: 95000 });
@@ -2993,6 +3269,9 @@ async function openUsage() {
           r.error = data.error || "Not available";
       } else {
         r.buckets = data.ok === false ? [] : (data.buckets || []);
+        r.provider = data.provider || r.profile.provider || "";
+        r.account = data.account || "";
+        r.accountId = data.account_id || data.accountId || "";
         if (data.ok === false) r.error = data.error || "Not available";
       }
     } catch (e) {

@@ -38,6 +38,7 @@ import subprocess
 import threading
 import time
 import uuid
+from pathlib import Path
 
 from ..config import CONFIG_DIR
 from ..render_blocks import markdown_to_blocks
@@ -476,6 +477,58 @@ class GrokInteractiveManager:
                 time.sleep(_POLL_S)
         self._kill(tui)
 
+    def account_identity(self) -> dict:
+        """xAI / Grok seat identity from ``~/.grok/auth.json`` access JWT.
+
+        Access tokens carry ``sub`` / ``principal_id`` (stable) but not email;
+        that is enough for multi-host dedup of the same login.
+        """
+        import base64
+        home = Path(getattr(self.config, "grok_home_path", None)
+                    or (Path.home() / ".grok")).expanduser()
+        path = home / "auth.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError, TypeError):
+            data = {}
+        if not isinstance(data, dict):
+            return {"account": "", "account_id": ""}
+        sub = ""
+        for _k, entry in data.items():
+            tok = ""
+            if isinstance(entry, dict):
+                tok = str(entry.get("key") or entry.get("access_token")
+                          or entry.get("token") or "").strip()
+            elif isinstance(entry, str):
+                tok = entry.strip()
+            if not tok or tok.count(".") != 2:
+                continue
+            try:
+                part = tok.split(".")[1]
+                part += "=" * (-len(part) % 4)
+                claims = json.loads(base64.urlsafe_b64decode(part.encode("ascii")))
+            except (ValueError, json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(claims, dict):
+                continue
+            sub = str(claims.get("principal_id")
+                      or claims.get("sub") or "").strip()
+            email = str(claims.get("email") or "").strip()
+            if sub or email:
+                return {
+                    "account": email or sub,
+                    "account_id": sub or email,
+                }
+        return {"account": "", "account_id": ""}
+
+    def _with_identity(self, data: dict) -> dict:
+        out = dict(data or {})
+        out["provider"] = "grok"
+        ident = self.account_identity()
+        out["account"] = ident.get("account") or ""
+        out["account_id"] = ident.get("account_id") or out["account"]
+        return out
+
     def fetch_usage(self) -> dict:
         """Read grok's subscription limits, as {"ok", "buckets"} / {"ok",
         "error"} — the shape claude's usage endpoint returns.
@@ -496,15 +549,19 @@ class GrokInteractiveManager:
 
         Nothing here touches the chat TUIs: separate tmux session, separate
         grok session, its own lock (the phone's Refresh button can double-fire).
+
+        Stamps ``provider`` / ``account`` / ``account_id`` for multi-host dedup.
         """
         if not tmux_available():
-            return {"ok": False,
-                    "error": "Usage needs tmux on the host (brew install tmux)."}
+            return self._with_identity({
+                "ok": False,
+                "error": "Usage needs tmux on the host (brew install tmux).",
+            })
         with self._usage_lock:
             sid = self._load_usage_sid()
             out = self._usage_probe(sid)
             if not out.pop("retry", False):
-                return out
+                return self._with_identity(out)
             # The remembered session would not resume (deleted, or written by
             # a grok that no longer reads it). Fall back to a fresh one once.
             log.info("usage session %s did not resume; starting a new one",
@@ -512,7 +569,7 @@ class GrokInteractiveManager:
             self._usage_sid = ""
             out = self._usage_probe("")
             out.pop("retry", None)
-            return out
+            return self._with_identity(out)
 
     def _usage_probe(self, sid: str) -> dict:
         """One resume → /usage → /exit cycle. `retry` in the result means the
@@ -1144,6 +1201,15 @@ class GrokInteractiveManager:
                     job.add_event("text", text=msg,
                                   blocks=markdown_to_blocks(msg))
                     self._done(job, msg)
+                    return
+                # Final journal pump — turn may already be complete on disk
+                # (daemon restart / TUI crash after turn_completed). Prefer
+                # success over a false "exited mid-turn" error.
+                runner._poll_updates(job)
+                runner._flush_text(job)
+                if state.get("turn_done") or state.get("full") or state.get("parts"):
+                    text = "".join(state.get("full") or state.get("parts") or [])
+                    self._done(job, text)
                     return
                 self._fail(job, "grok TUI exited mid-turn")
                 return

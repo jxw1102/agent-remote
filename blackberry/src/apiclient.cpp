@@ -2773,6 +2773,11 @@ void ApiClient::handleJobPoll(int httpStatus, const QVariant &data, bool parseOk
     if (m_jobId.isEmpty())
         return; // job already finished (e.g. stop raced the last poll)
 
+    // Job already pruned after a clean finish — treat as success, not "lost".
+    if (httpStatus == 404) {
+        handleJobEnd(QLatin1String("done"), QString(), QString(), 0);
+        return;
+    }
     if (!networkError.isEmpty() || httpStatus != 200 || !parseOk) {
         // Wi-Fi hiccups happen on a phone; tolerate a few misses.
         m_pollFailures++;
@@ -2843,7 +2848,12 @@ void ApiClient::handleJobPoll(int httpStatus, const QVariant &data, bool parseOk
         }
     }
 
-    QString status = snap["status"].toString();
+    QString status = snap["status"].toString().trimmed();
+    // Status stream blip (reconnect / daemon restart): job left the active
+    // list but is still running — keep polling, do not end as failure.
+    if (status == QLatin1String("starting")
+            || status == QLatin1String("running"))
+        return;
 
     // The daemon chains queued prompts: when a job finishes cleanly it
     // starts the next queued one and points at it. Follow the chain
@@ -2921,24 +2931,25 @@ void ApiClient::handleJobEnd(const QString &status, const QString &newSessionId,
     }
     recomputeLiveStatus();
 
-    if (status == "done") {
-        // The daemon already chained any queued prompts (next_job_id is
-        // followed in handleJobPoll), so reaching here means the chain is
-        // fully drained.
-        m_chime->play(Chime::CueDone);
-        m_jobEndStatus.clear();
-        setTranscriptStatus(QString());
-        refreshTranscript();
-    } else if (status == "stopped") {
-        m_jobEndStatus = tr("Job stopped") + dropQueueNote(droppedQueued);
-        setTranscriptStatus(m_jobEndStatus);
-        refreshTranscript();
-    } else {
+    // Only an explicit daemon "error" is a failure. Unknown/empty status
+    // (and pruned jobs) are treated as success so stream blips never sound
+    // like a failed turn after a clean finish.
+    if (status == QLatin1String("error")) {
         m_chime->play(Chime::CueError);
         QString base = error.isEmpty() ? tr("Job failed")
                                        : (tr("Job failed: ") + error);
         m_jobEndStatus = base + dropQueueNote(droppedQueued);
         setTranscriptStatus(m_jobEndStatus);
+        refreshTranscript();
+    } else if (status == QLatin1String("stopped")) {
+        m_jobEndStatus = tr("Job stopped") + dropQueueNote(droppedQueued);
+        setTranscriptStatus(m_jobEndStatus);
+        refreshTranscript();
+    } else {
+        // "done" or anything else terminal-but-not-error.
+        m_chime->play(Chime::CueDone);
+        m_jobEndStatus.clear();
+        setTranscriptStatus(QString());
         refreshTranscript();
     }
     // The finished job changed previews/ordering on the sessions list.
@@ -3059,54 +3070,171 @@ void ApiClient::onFinished(QNetworkReply *reply)
         return;
     }
 
-    // Unified usage: progressive merge - each daemon's buckets render the
-    // moment they arrive, tagged with their source, ordered by profile.
+    // Unified usage: progressive merge. Each daemon answers when ready;
+    // same (provider, account) seat across hosts is one row (higher %).
     if (kind == "uusage") {
         if (reply->property("usageGen").toInt() != m_usageGen)
             return;
         const int profileIndex = reply->property("profileIndex").toInt();
         QVariantMap prof = m_profiles.value(profileIndex).toMap();
         const QString profileName = prof.value("name").toString();
-        if (ok && data.toMap().value("ok").toBool()) {
-            // Multi-harness hosts return buckets tagged with "provider" so
-            // Claude/Grok/Codex each keep their own accent under one profile.
-            const QString defaultAccent =
-                providerAccent(prof.value("provider").toString());
-            QVariantList buckets = data.toMap().value("buckets").toList();
+        const QString defaultProvider = prof.value("provider").toString();
+        if (ok) {
+            const QVariantMap root = data.toMap();
+            const QString defaultAccent = providerAccent(defaultProvider);
             QVariantList tagged;
-            for (int i = 0; i < buckets.size(); ++i) {
-                QVariantMap b = buckets.at(i).toMap();
-                const QString harness = b.value("provider").toString();
+            auto appendBuckets = [&](const QVariantList &buckets,
+                                     const QString &provider,
+                                     const QString &account,
+                                     const QString &accountId) {
+                const QString harness = provider.isEmpty()
+                        ? defaultProvider : provider;
                 const QString accent = harness.isEmpty()
-                    ? defaultAccent : providerAccent(harness);
-                // source = "Mbp · Claude" when multi tags a harness.
-                b["source"] = harness.isEmpty()
-                    ? profileName
-                    : (profileName + QLatin1String(" · ")
-                       + harness.left(1).toUpper() + harness.mid(1));
-                b["accent"] = accent;
-                tagged.append(b);
+                        ? defaultAccent : providerAccent(harness);
+                const QString harnessLabel = harness.isEmpty()
+                        ? QString()
+                        : (harness.left(1).toUpper() + harness.mid(1));
+                // Strip multi-host "Claude · " prefix from flat bucket titles.
+                const QString prefix = harnessLabel.isEmpty()
+                        ? QString()
+                        : (harnessLabel + QLatin1String(" · "));
+                for (int i = 0; i < buckets.size(); ++i) {
+                    QVariantMap b = buckets.at(i).toMap();
+                    QString title = b.value("title").toString();
+                    if (!prefix.isEmpty() && title.startsWith(prefix))
+                        title = title.mid(prefix.size());
+                    b["title"] = title;
+                    b["provider"] = harness;
+                    b["account"] = account;
+                    b["account_id"] = accountId.isEmpty() ? account : accountId;
+                    // source: "Claude · you@x.com" or host name when unknown.
+                    QString source = harnessLabel.isEmpty()
+                            ? profileName : harnessLabel;
+                    if (!account.isEmpty())
+                        source += QLatin1String(" · ") + account;
+                    else if (!profileName.isEmpty() && !harnessLabel.isEmpty())
+                        source = profileName + QLatin1String(" · ") + harnessLabel;
+                    b["source"] = source;
+                    b["accent"] = accent;
+                    b["host"] = profileName;
+                    tagged.append(b);
+                }
+            };
+            const QVariantList sections = root.value("sections").toList();
+            if (root.value("multi").toBool() && !sections.isEmpty()) {
+                for (int s = 0; s < sections.size(); ++s) {
+                    const QVariantMap sec = sections.at(s).toMap();
+                    if (sec.value("ok").toBool() == false
+                            && sec.value("buckets").toList().isEmpty()) {
+                        QString err = sec.value("error").toString();
+                        if (err.isEmpty())
+                            err = tr("Not available");
+                        const QString prov = sec.value("provider").toString();
+                        m_usageErrors.append(
+                            QString("%1 · %2: %3")
+                                .arg(profileName,
+                                     prov.isEmpty() ? QStringLiteral("agent") : prov,
+                                     err));
+                        continue;
+                    }
+                    appendBuckets(sec.value("buckets").toList(),
+                                  sec.value("provider").toString(),
+                                  sec.value("account").toString(),
+                                  sec.value("account_id").toString());
+                }
+            } else if (root.value("ok").toBool()) {
+                appendBuckets(root.value("buckets").toList(),
+                              root.value("provider").toString().isEmpty()
+                                  ? defaultProvider
+                                  : root.value("provider").toString(),
+                              root.value("account").toString(),
+                              root.value("account_id").toString());
+            } else {
+                QString err = root.value("error").toString();
+                if (err.isEmpty())
+                    err = httpErrorText(httpStatus, data, parseOk, networkError);
+                m_usageErrors.append(
+                    QString("%1: %2").arg(profileName, err));
             }
             m_usageByProfile[profileIndex] = tagged;
         } else {
-            QString err = ok ? data.toMap().value("error").toString()
-                             : QString();
-            if (err.isEmpty())
-                err = httpErrorText(httpStatus, data, parseOk, networkError);
+            QString err = httpErrorText(httpStatus, data, parseOk, networkError);
             m_usageErrors.append(
                 QString("%1: %2").arg(profileName, err));
         }
-        // QMap iterates keys in order -> buckets grouped by profile order.
-        m_usageBuckets.clear();
+        // Merge every host's rows by (provider, account, title) so the same
+        // seat on Mac + VPS is one bar (keep the higher percent).
+        QMap<QString, QVariantMap> merged;
+        QStringList order;
         QMap<int, QVariantList>::const_iterator it =
                 m_usageByProfile.constBegin();
-        for (; it != m_usageByProfile.constEnd(); ++it)
-            m_usageBuckets += it.value();
+        for (; it != m_usageByProfile.constEnd(); ++it) {
+            const QVariantList rows = it.value();
+            for (int i = 0; i < rows.size(); ++i) {
+                QVariantMap b = rows.at(i).toMap();
+                const QString prov = b.value("provider").toString().toLower();
+                QString acct = b.value("account_id").toString();
+                if (acct.isEmpty())
+                    acct = b.value("account").toString();
+                acct = acct.toLower().trimmed();
+                const QString title = b.value("title").toString();
+                QString key;
+                if (!prov.isEmpty() && !acct.isEmpty())
+                    key = prov + QLatin1Char('|') + acct
+                            + QLatin1Char('|') + title;
+                else
+                    key = b.value("source").toString()
+                            + QLatin1Char('|') + title
+                            + QLatin1Char('|') + QString::number(it.key())
+                            + QLatin1Char('|') + QString::number(i);
+                if (!merged.contains(key)) {
+                    merged.insert(key, b);
+                    order.append(key);
+                } else {
+                    QVariantMap prev = merged.value(key);
+                    if (b.value("percent").toInt() > prev.value("percent").toInt()) {
+                        // Keep better fill; preserve multi-host label.
+                        QString host = prev.value("host").toString();
+                        const QString other = b.value("host").toString();
+                        if (!other.isEmpty() && !host.contains(other)) {
+                            if (!host.isEmpty())
+                                host += QLatin1String(" · ");
+                            host += other;
+                        }
+                        b["host"] = host;
+                        // source already names seat; append hosts if multi.
+                        if (host.contains(QLatin1String(" · ")))
+                            b["source"] = b.value("source").toString()
+                                    + QLatin1String("  (") + host + QLatin1Char(')');
+                        merged.insert(key, b);
+                    } else {
+                        QString host = prev.value("host").toString();
+                        const QString other = b.value("host").toString();
+                        if (!other.isEmpty() && !host.contains(other)) {
+                            if (!host.isEmpty())
+                                host += QLatin1String(" · ");
+                            host += other;
+                            prev["host"] = host;
+                            if (host.contains(QLatin1String(" · ")))
+                                prev["source"] = prev.value("source").toString()
+                                        + QLatin1String("  (") + host + QLatin1Char(')');
+                            merged.insert(key, prev);
+                        }
+                    }
+                }
+            }
+        }
+        m_usageBuckets.clear();
+        for (int i = 0; i < order.size(); ++i)
+            m_usageBuckets.append(merged.value(order.at(i)));
         if (--m_usagePending > 0) {
             // Keep the exact "Loading..." string: the sheet's spinner
             // compares against it.
             m_usageStatus = tr("Loading...");
+        } else if (!m_usageErrors.isEmpty() && m_usageBuckets.isEmpty()) {
+            m_usageStatus = m_usageErrors.join(QLatin1String("; "));
         } else if (!m_usageErrors.isEmpty()) {
+            // Partial success: show bars; errors stay in status as a note.
             m_usageStatus = m_usageErrors.join(QLatin1String("; "));
         } else {
             m_usageStatus = m_usageBuckets.isEmpty()
@@ -3119,7 +3247,31 @@ void ApiClient::onFinished(QNetworkReply *reply)
 
     if (kind == "usage") {
         if (ok && data.toMap().value("ok").toBool()) {
-            m_usageBuckets = data.toMap()["buckets"].toList();
+            QVariantMap root = data.toMap();
+            QVariantList buckets = root.value("buckets").toList();
+            const QString account = root.value("account").toString();
+            const QString accountId = root.value("account_id").toString();
+            const QString provider = root.value("provider").toString();
+            QVariantList tagged;
+            for (int i = 0; i < buckets.size(); ++i) {
+                QVariantMap b = buckets.at(i).toMap();
+                if (!provider.isEmpty())
+                    b["provider"] = provider;
+                b["account"] = account;
+                b["account_id"] = accountId.isEmpty() ? account : accountId;
+                if (!account.isEmpty()) {
+                    const QString harness = b.value("provider").toString();
+                    const QString label = harness.isEmpty()
+                            ? account
+                            : (harness.left(1).toUpper() + harness.mid(1)
+                               + QLatin1String(" · ") + account);
+                    b["source"] = label;
+                }
+                if (!b.value("provider").toString().isEmpty())
+                    b["accent"] = providerAccent(b.value("provider").toString());
+                tagged.append(b);
+            }
+            m_usageBuckets = tagged;
             m_usageStatus = m_usageBuckets.isEmpty()
                     ? tr("No usage data available") : QString();
         } else {

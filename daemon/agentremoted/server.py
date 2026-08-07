@@ -16,7 +16,7 @@ name and capability flags so one client binary can gate features at
 runtime.
 
 Endpoints (all under /api, all JSON):
-  GET  /api/ping                                  liveness + provider + caps
+  GET  /api/ping                                  liveness + provider + caps + auth
   GET  /api/usage                                 subscription usage buckets
   GET  /api/projects                              projects, most recent first
   GET  /api/sessions?project=<id>&limit=<n>&all=1  session summaries (all=1:
@@ -249,6 +249,45 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception:
             return 0.0
 
+    @staticmethod
+    def _auth_summary(auth_by: dict) -> dict:
+        """Worst-status rollup across harness auth_health snapshots."""
+        if not auth_by:
+            return {
+                "cli": "",
+                "cli_on_path": False,
+                "mode": "none",
+                "status": "unknown",
+                "detail": "no providers",
+                "by_provider": {},
+            }
+        rank = {
+            "missing": 0,
+            "expired": 1,
+            "warning": 2,
+            "unknown": 3,
+            "ok": 4,
+        }
+        worst_name = None
+        worst_score = 99
+        for name, ah in auth_by.items():
+            st = str((ah or {}).get("status") or "unknown")
+            score = rank.get(st, 3)
+            if score < worst_score:
+                worst_score = score
+                worst_name = name
+        worst = dict(auth_by.get(worst_name) or {})
+        # Compact multi-line summary for Test connection UIs.
+        parts = []
+        for name in sorted(auth_by.keys()):
+            ah = auth_by[name] or {}
+            parts.append("%s: %s" % (name, ah.get("status") or "unknown"))
+        worst["by_provider"] = auth_by
+        worst["detail"] = "; ".join(parts) + (
+            " — " + str(worst.get("detail") or "") if worst.get("detail") else ""
+        )
+        return worst
+
     def _merged_sessions(self, project, limit, user_only):
         """Merge harness lists so every provider stays visible.
 
@@ -345,6 +384,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 title = (prompt[:80] if prompt else "Running…")
                 rid = sid or ("job:%s" % jid)
                 prov = j.get("provider") or name or ""
+                # ISO last_active so web clients that Date.parse() don't
+                # sort running rows to 0 (float seconds used to bury them).
+                try:
+                    from datetime import datetime, timezone
+                    last_iso = datetime.fromtimestamp(
+                        now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                except (OverflowError, ValueError, OSError):
+                    last_iso = now
                 out.append({
                     "id": rid,
                     "project_id": "",
@@ -352,7 +399,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "git_branch": "",
                     "title": title,
                     "started": "",
-                    "last_active": now,
+                    "last_active": last_iso,
                     "last_role": "user",
                     "last_text": prompt[:200],
                     "model": j.get("model") or "",
@@ -716,10 +763,26 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "paths": {n: "/" + n for n in self.bundles},
                 }
                 details = {}
+                auth_by = {}
                 for name, b in self.bundles.items():
                     details[name] = {
                         "caps": b.runner.capabilities(),
                     }
+                    auth_fn = getattr(b.runner, "auth_health", None)
+                    if callable(auth_fn):
+                        try:
+                            ah = auth_fn() or {}
+                        except Exception:
+                            log.exception("auth_health failed for %s", name)
+                            ah = {
+                                "cli": name,
+                                "cli_on_path": False,
+                                "mode": "unknown",
+                                "status": "unknown",
+                                "detail": "auth check failed",
+                            }
+                        details[name]["auth"] = ah
+                        auth_by[name] = ah
                 if self._authorized(query):
                     for name, b in self.bundles.items():
                         details[name]["slash_commands"] = b.runner.slash_commands()
@@ -734,6 +797,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                     except OSError:
                         payload["drop_path"] = str(self.config.drop_path)
                 payload["provider_details"] = details
+                # Aggregate auth: worst status among harnesses (missing > expired
+                # > warning > unknown > ok) so a multi host shows one summary.
+                payload["auth"] = self._auth_summary(auth_by)
                 # Default harness for UIs that need a primary accent.
                 payload["provider"] = list(self.bundles.keys())[0]
                 # Root caps are a union so one-profile clients know what any
@@ -772,6 +838,19 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "provider": self.runner.name,
                 "caps": self.runner.capabilities(),
             }
+            auth_fn = getattr(self.runner, "auth_health", None)
+            if callable(auth_fn):
+                try:
+                    payload["auth"] = auth_fn() or {}
+                except Exception:
+                    log.exception("auth_health failed for %s", self.runner.name)
+                    payload["auth"] = {
+                        "cli": getattr(self.runner, "name", ""),
+                        "cli_on_path": False,
+                        "mode": "unknown",
+                        "status": "unknown",
+                        "detail": "auth check failed",
+                    }
             # Command names can hint at internal workflows — only share the
             # slash-command / model lists with an authenticated caller.
             if self._authorized(query):
@@ -815,9 +894,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/api/usage":
             usage_fn = getattr(self.runner, "usage", None)
             if usage_fn is None:
-                self._send_json({"ok": False, "error": "not supported"})
+                self._send_json({"ok": False, "error": "not supported",
+                                "provider": getattr(self.runner, "name", "") or "",
+                                "account": "", "account_id": ""})
             else:
-                self._send_json(usage_fn())
+                data = usage_fn() or {}
+                if isinstance(data, dict) and not data.get("provider"):
+                    data = dict(data)
+                    data["provider"] = getattr(self.runner, "name", "") or ""
+                self._send_json(data)
             return
 
         if path == "/api/projects":
@@ -923,6 +1008,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if usage_fn is None:
                     sections.append({
                         "provider": name,
+                        "account": "",
+                        "account_id": "",
                         "ok": False,
                         "error": "not supported",
                         "buckets": [],
@@ -934,6 +1021,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                     log.exception("usage probe failed for %s", name)
                     sections.append({
                         "provider": name,
+                        "account": "",
+                        "account_id": "",
                         "ok": False,
                         "error": str(e) or "usage failed",
                         "buckets": [],
@@ -942,15 +1031,21 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if not isinstance(data, dict):
                     sections.append({
                         "provider": name,
+                        "account": "",
+                        "account_id": "",
                         "ok": False,
                         "error": "invalid usage response",
                         "buckets": [],
                     })
                     continue
+                account = str(data.get("account") or "").strip()
+                account_id = str(data.get("account_id") or account).strip()
                 if data.get("ok") is False:
                     log.warning("usage %s: %s", name, data.get("error") or "not available")
                     sections.append({
                         "provider": name,
+                        "account": account,
+                        "account_id": account_id,
                         "ok": False,
                         "error": data.get("error") or "not available",
                         "buckets": [],
@@ -962,6 +1057,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                         continue
                     bucket = dict(raw)
                     bucket["provider"] = name
+                    bucket["account"] = account
+                    bucket["account_id"] = account_id
                     title = str(bucket.get("title") or "").strip()
                     # Prefix once so single-list UIs still show which harness.
                     if title and not title.lower().startswith(label.lower() + " "):
@@ -980,6 +1077,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                              note[:80])
                 sections.append({
                     "provider": name,
+                    "account": account,
+                    "account_id": account_id,
                     "ok": True,
                     "error": note,
                     "buckets": buckets,

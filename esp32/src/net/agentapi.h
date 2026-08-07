@@ -19,6 +19,9 @@ struct UsageBucket {
   String resets;
   String severity;  // normal / warn / …
   int percent = 0;
+  String provider;   // claude / grok / codex
+  String account;    // email or stable id label
+  String accountId;  // stable seat id for multi-host dedup
 };
 
 struct StatusSnap {
@@ -54,7 +57,12 @@ bool uploadText(int daemon, const String &name, const String &text,
                 String *pathOut, String *errOut);
 
 // GET /api/usage — subscription buckets across the daemon's providers.
+// Each bucket may carry provider/account/accountId for cross-host dedup.
 bool fetchUsage(int daemon, std::vector<UsageBucket> *out, String *errOut);
+
+// GET /api/jobs/<id>?since=N — terminal status for end-chime decisions.
+// Returns "done" | "error" | "stopped" | "running" | "starting" | "" (unknown).
+String fetchJobStatus(int daemon, const String &jobId);
 
 // GET /api/sessions/<id>/tui — live host TUI pane (plain text).
 bool fetchTui(int daemon, const String &sessionId, String *textOut,

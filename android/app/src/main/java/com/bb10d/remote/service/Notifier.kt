@@ -93,7 +93,9 @@ object Notifier {
                 when (status) {
                     "done" -> "Turn finished"
                     "stopped" -> "Turn stopped"
-                    else -> "Turn failed"
+                    "error" -> "Turn failed"
+                    // Unknown / empty / still-running blips: never call this "failed".
+                    else -> "Turn finished"
                 },
             )
             .setContentText(if (ok || error.isBlank()) title else error)

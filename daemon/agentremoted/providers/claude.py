@@ -720,6 +720,49 @@ def _parse_retry_after_s(headers) -> int:
         return 300
 
 
+def account_identity(config=None) -> dict:
+    """Stable Claude account labels for cross-host usage dedup.
+
+    Prefer local ``~/.claude.json`` ``oauthAccount`` (no network). Returns
+    ``{"account": email-or-label, "account_id": uuid}`` — either may be "".
+    """
+    email = ""
+    account_id = ""
+    display = ""
+    try:
+        data = json.loads(
+            (Path.home() / ".claude.json").read_text(encoding="utf-8"))
+        oa = data.get("oauthAccount") if isinstance(data, dict) else None
+        if isinstance(oa, dict):
+            email = str(oa.get("emailAddress") or oa.get("email") or "").strip()
+            account_id = str(oa.get("accountUuid") or oa.get("uuid") or "").strip()
+            display = str(oa.get("displayName") or "").strip()
+        if not account_id and isinstance(data, dict):
+            account_id = str(data.get("userID") or "").strip()
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    # API key mode: no subscription seat — still tag so hosts don't merge
+    # incorrectly with OAuth seats.
+    if not email and not account_id and config is not None:
+        env = getattr(config, "claude_env", None) or {}
+        api_key = str(env.get("ANTHROPIC_API_KEY")
+                      or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        if api_key:
+            return {"account": "api-key", "account_id": "api-key"}
+    account = email or display or account_id
+    return {"account": account, "account_id": account_id or account}
+
+
+def _with_identity(data: dict, config=None) -> dict:
+    """Stamp provider + account fields onto a usage payload."""
+    out = dict(data or {})
+    out["provider"] = "claude"
+    ident = account_identity(config)
+    out["account"] = ident.get("account") or ""
+    out["account_id"] = ident.get("account_id") or out["account"]
+    return out
+
+
 def _usage_from_cache(allow_stale: bool, force_any: bool = False) -> dict | None:
     """Return a copy of the cached ok response, or None if unusable.
 
@@ -765,11 +808,14 @@ def fetch_usage(config) -> dict:
     Caches successful Anthropic responses. On HTTP 429 (Anthropic rate limit),
     honors Retry-After as a local cooldown (no further Anthropic calls), serves
     the last good snapshot when available, and phrases wait time in minutes.
+
+    Always includes ``provider`` / ``account`` / ``account_id`` so multi-host
+    clients can merge the same Claude seat across daemons.
     """
     # Fast path: fresh cache (multi /api/usage + repeated opens).
     cached = _usage_from_cache(allow_stale=False)
     if cached is not None:
-        return cached
+        return _with_identity(cached, config)
 
     # Respect Anthropic cooldown — do not burn more 429s.
     cool = _usage_cooldown_remaining()
@@ -781,23 +827,25 @@ def fetch_usage(config) -> dict:
             stale["error"] = (
                 "Anthropic usage cooldown — showing last snapshot. %s" % wait
             ).strip()
-            return stale
-        return {
+            return _with_identity(stale, config)
+        return _with_identity({
             "ok": False,
             "error": (
                 "Anthropic rate-limited the usage API (HTTP 429). "
                 "The daemon is fine. %s" % wait
             ).strip(),
-        }
+        }, config)
 
     token = _oauth_token(config)
     if not token:
         stale = _usage_from_cache(allow_stale=True)
         if stale is not None:
             stale["error"] = "Using cached usage — no Claude sign-in for a refresh."
-            return stale
-        return {"ok": False,
-                "error": "No Claude sign-in found — run `claude` on the Mac to log in."}
+            return _with_identity(stale, config)
+        return _with_identity({
+            "ok": False,
+            "error": "No Claude sign-in found — run `claude` on the Mac to log in.",
+        }, config)
     headers = dict(_USAGE_HEADERS)
     headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(_USAGE_URL, headers=headers)
@@ -806,8 +854,10 @@ def fetch_usage(config) -> dict:
             raw = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
-            return {"ok": False,
-                    "error": "Claude sign-in expired — run `claude` on the Mac."}
+            return _with_identity({
+                "ok": False,
+                "error": "Claude sign-in expired — run `claude` on the Mac.",
+            }, config)
         if e.code == 429:
             # Anthropic rate-limited this host — not agentremoted.
             cool_s = _parse_retry_after_s(getattr(e, "headers", None))
@@ -823,35 +873,45 @@ def fetch_usage(config) -> dict:
                 stale["error"] = (
                     "Anthropic rate-limited usage — showing last snapshot. %s" % wait
                 ).strip()
-                return stale
-            return {
+                return _with_identity(stale, config)
+            return _with_identity({
                 "ok": False,
                 "error": (
                     "Anthropic rate-limited the usage API (HTTP 429). "
                     "The daemon is fine. %s" % wait
                 ).strip(),
-            }
+            }, config)
         log.warning("claude usage: HTTP %s", e.code)
         stale = _usage_from_cache(allow_stale=True)
         if stale is not None:
             stale["stale"] = True
             stale["error"] = "Usage refresh failed (HTTP %d); showing cache." % e.code
-            return stale
-        return {"ok": False, "error": "Usage request failed (HTTP %d)" % e.code}
+            return _with_identity(stale, config)
+        return _with_identity({
+            "ok": False,
+            "error": "Usage request failed (HTTP %d)" % e.code,
+        }, config)
     except (urllib.error.URLError, OSError) as e:
         stale = _usage_from_cache(allow_stale=True)
         if stale is not None:
             stale["stale"] = True
             stale["error"] = "Could not reach Anthropic; showing cache."
-            return stale
-        return {"ok": False, "error": "Could not reach Anthropic: %s" % e}
+            return _with_identity(stale, config)
+        return _with_identity({
+            "ok": False,
+            "error": "Could not reach Anthropic: %s" % e,
+        }, config)
     except (json.JSONDecodeError, ValueError):
-        return {"ok": False, "error": "Unexpected usage response"}
+        return _with_identity({
+            "ok": False,
+            "error": "Unexpected usage response",
+        }, config)
 
     buckets = _buckets_from_usage(raw)
     if buckets:
         _store_usage_cache(buckets)
-    return {"ok": True, "buckets": buckets, "cached": False}
+    return _with_identity(
+        {"ok": True, "buckets": buckets, "cached": False}, config)
 
 
 def list_models(config) -> list:
@@ -2152,6 +2212,72 @@ class ClaudeRunner:
             # user messages (conversation only) and the next turn resumes
             # from there. Session-file surgery — works in BOTH exec modes.
             "rewind": True,
+        }
+
+    def auth_health(self) -> dict:
+        """Local credential snapshot for /api/ping (no network)."""
+        import shutil
+        bin_path = str(getattr(self.config, "claude_bin", None) or "claude")
+        on_path = bool(shutil.which(bin_path) or shutil.which("claude"))
+        env = getattr(self.config, "claude_env", None) or {}
+        api_key = str(env.get("ANTHROPIC_API_KEY")
+                      or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        oauth_env = _reject_bad_env_token(
+            env.get("CLAUDE_CODE_OAUTH_TOKEN")
+            or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
+        data, _store = _read_creds()
+        oauth = data.get("claudeAiOauth") or {}
+        access = str(oauth.get("accessToken", "")).strip()
+        expires_at = oauth.get("expiresAt")
+        fresh = (isinstance(expires_at, (int, float))
+                 and time.time() * 1000 < expires_at - _TOKEN_SKEW_MS)
+        has_refresh = bool(str(oauth.get("refreshToken", "")).strip())
+
+        if api_key:
+            detail = ("ANTHROPIC_API_KEY is set — Claude Code bills API rates "
+                      "(overrides a Pro/Max login when both exist)")
+            if not on_path:
+                detail = "API key present, but `claude` is not on PATH"
+            return {
+                "cli": "claude",
+                "cli_on_path": on_path,
+                "mode": "api_key",
+                "status": "ok" if on_path else "warning",
+                "detail": detail,
+            }
+        if oauth_env:
+            return {
+                "cli": "claude",
+                "cli_on_path": on_path,
+                "mode": "subscription",
+                "status": "ok" if on_path else "warning",
+                "detail": ("CLAUDE_CODE_OAUTH_TOKEN set"
+                           + ("" if on_path else "; `claude` not on PATH")),
+            }
+        if access and fresh:
+            return {
+                "cli": "claude",
+                "cli_on_path": on_path,
+                "mode": "subscription",
+                "status": "ok" if on_path else "warning",
+                "detail": ("claude.ai subscription login looks valid"
+                           + ("" if on_path else "; `claude` not on PATH")),
+            }
+        if access or has_refresh:
+            return {
+                "cli": "claude",
+                "cli_on_path": on_path,
+                "mode": "subscription",
+                "status": "expired",
+                "detail": "Claude sign-in expired or needs refresh — run `claude` /login on this host",
+            }
+        return {
+            "cli": "claude",
+            "cli_on_path": on_path,
+            "mode": "none",
+            "status": "missing",
+            "detail": ("No Claude login or API key on this host"
+                       + ("" if on_path else "; `claude` not on PATH")),
         }
 
     def usage(self) -> dict:

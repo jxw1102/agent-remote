@@ -21,6 +21,7 @@ get_messages) never filter, so a link to any session still resolves.
 Runner — how one turn is executed as a subprocess (used by jobs.JobManager):
     name                                  "claude" | "grok" | "codex"
     capabilities() -> dict                feature flags for /api/ping
+    auth_health() -> dict                 optional CLI/login snapshot for /api/ping
     slash_commands() -> [str]             commands offered to the app
     prepare(job, mode) -> (cmd, env)      build the CLI invocation; may set
                                           job.cwd default; raises RunnerError

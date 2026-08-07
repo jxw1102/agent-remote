@@ -15,10 +15,12 @@ folder is the shared config example + remote/systemd pieces.
 
 | Situation | Do this |
 |-----------|---------|
-| Mac laptop | `cd daemon && ./scripts/install-launchd.sh` |
+| Non-technical / agent-assisted | Root [`../install.sh`](../install.sh) or [`../docs/AGENT_INSTALL.md`](../docs/AGENT_INSTALL.md) |
+| Mac laptop | `../install.sh` or `cd daemon && ./scripts/install-launchd.sh` |
+| Phone HTTPS | `../daemon/scripts/tunnel.sh` |
 | First config anywhere | `cp deploy/config.example.json ~/.agentremoted/config.json` |
 | Remote Linux / VPS | `./deploy/deploy.sh user@host` |
-| Manual systemd | Copy unit + config (see root [README](../README.md#2c-linux--systemd)) |
+| Manual systemd | Copy unit + config (see root [README](../README.md)) |
 
 `deploy.sh` defaults to port **8473** and `PROVIDERS=claude,grok,codex`.
 Override as needed:

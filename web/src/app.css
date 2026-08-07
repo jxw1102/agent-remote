@@ -136,9 +136,13 @@ a { color: var(--accent); }
   color: var(--chip, var(--accent));
   font-weight: 600;
 }
+.chip.chip-error {
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--line));
+  color: var(--danger);
+}
 
 .list-status { color: var(--dim); font-size: 12px; margin-top: 8px; }
-.list-status .err { color: var(--danger); }
+.list-status .err { color: var(--danger); white-space: pre-wrap; }
 
 .sessions {
   flex: 1 1 auto;
@@ -208,11 +212,17 @@ a { color: var(--accent); }
   color: var(--dim);
   white-space: nowrap;
 }
-.tag.provider {
+.tag.provider,
+.tag.host {
   color: var(--tag, var(--accent));
   background: color-mix(in srgb, var(--tag, var(--accent)) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--tag, var(--accent)) 35%, transparent);
   font-weight: 600;
+}
+.tag.host {
+  /* Slightly softer so a harness text badge can sit next to it. */
+  font-weight: 500;
+  opacity: 0.95;
 }
 .tag.waiting { color: var(--warn); background: rgba(224, 180, 84, 0.14); }
 
@@ -445,12 +455,14 @@ button.icon-btn.icon-idle {
 }
 .thread { max-width: 900px; margin: 0 auto; padding: 0 20px; }
 
-.msg { margin-bottom: 16px; }
+.msg {
+  margin-bottom: 16px;
+  position: relative;
+}
 .msg.user {
   background: var(--surface-3);
   border-radius: var(--radius);
   padding: 10px 14px;
-  position: relative;
 }
 .msg.user::before {
   content: "›";
@@ -468,8 +480,26 @@ button.icon-btn.icon-idle {
   font-size: 12.5px;
 }
 .msg.notice.error { color: var(--danger); background: rgba(229, 112, 107, 0.1); }
-.msg-tools { margin-top: 6px; display: flex; gap: 8px; opacity: 0; transition: opacity 0.1s; }
+/* Timestamp sits in the same hover row as Copy / Rewind (right-aligned). */
+.msg-tools {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
 .msg:hover .msg-tools { opacity: 1; }
+.msg-tools .msg-time {
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+  color: var(--dim);
+  white-space: nowrap;
+  line-height: 1.4;
+}
 .msg-tools button { padding: 2px 8px; font-size: 11px; }
 
 .load-older { display: block; margin: 0 auto 18px; }

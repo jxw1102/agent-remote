@@ -1086,6 +1086,45 @@ class GrokRunner:
             "rewind": True,
         }
 
+    def auth_health(self) -> dict:
+        """Local credential snapshot for /api/ping (no network)."""
+        import shutil
+        bin_path = str(getattr(self.config, "grok_bin", None) or "grok")
+        on_path = bool(
+            shutil.which(bin_path)
+            or shutil.which("grok")
+            or Path(os.path.expanduser("~/.grok/bin/grok")).is_file()
+            or Path(os.path.expanduser("~/.local/bin/grok")).is_file()
+        )
+        # Grok stores login in its own CLI home; we only report presence of the
+        # binary and whether a sessions tree exists (not a full OAuth decode).
+        home = Path(getattr(self.config, "grok_home_path", None)
+                    or (Path.home() / ".grok")).expanduser()
+        has_home = home.is_dir()
+        if on_path and has_home:
+            return {
+                "cli": "grok",
+                "cli_on_path": True,
+                "mode": "unknown",
+                "status": "ok",
+                "detail": "grok CLI present — sign-in is whatever `grok` uses on this host",
+            }
+        if on_path:
+            return {
+                "cli": "grok",
+                "cli_on_path": True,
+                "mode": "unknown",
+                "status": "warning",
+                "detail": "grok on PATH but ~/.grok not found yet — run `grok` once to sign in",
+            }
+        return {
+            "cli": "grok",
+            "cli_on_path": False,
+            "mode": "none",
+            "status": "missing",
+            "detail": "`grok` not on PATH",
+        }
+
     def models(self) -> list:
         """Model ids the app offers for -m/--model. Config `models` extends
         the known grok families."""

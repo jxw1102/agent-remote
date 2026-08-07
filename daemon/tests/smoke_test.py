@@ -361,6 +361,9 @@ def run_claude_suite(token):
         ping = json.loads(resp.read().decode())
     check("ping without token", ping.get("ok") is True)
     check("ping reports provider", ping.get("provider") == "claude", ping)
+    auth = ping.get("auth") or {}
+    check("ping includes auth_health", isinstance(auth, dict) and "status" in auth, auth)
+    check("auth reports cli name", auth.get("cli") == "claude", auth)
     caps = ping.get("caps") or {}
     check("claude caps: permissions on",
           caps.get("permissions") is True and caps.get("permission_modes") is True, caps)

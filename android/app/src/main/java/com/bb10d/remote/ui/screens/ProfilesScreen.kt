@@ -339,19 +339,28 @@ fun ProfileEditorScreen(
 
             when (val result = test) {
                 is ProfilesViewModel.TestState.Ok -> Row(
-                    verticalAlignment = Alignment.CenterVertically,
+                    verticalAlignment = Alignment.Top,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
+                    val authStatus = result.caps.auth?.status.orEmpty()
+                    val authTint = when (authStatus) {
+                        "missing", "expired" -> pal.warn
+                        "warning" -> pal.warn
+                        else -> pal.ok
+                    }
                     Icon(
                         Icons.Outlined.CheckCircle,
                         contentDescription = null,
-                        tint = pal.ok,
+                        tint = authTint,
                         modifier = Modifier.size(18.dp),
                     )
                     Spacer(Modifier.width(8.dp))
                     Column {
+                        val harnessLabel = result.caps.harnesses()
+                            .joinToString(" · ") { Accent.forProvider(it).label }
+                            .ifBlank { Accent.forProvider(result.caps.provider).label }
                         Text(
-                            text = "${Accent.forProvider(result.caps.provider).label} on " +
+                            text = "$harnessLabel on " +
                                 result.caps.host.ifBlank { "the daemon" },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface,
@@ -361,6 +370,15 @@ fun ProfileEditorScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = pal.dim,
                         )
+                        val authDetail = result.caps.auth?.detail?.takeIf { it.isNotBlank() }
+                        if (authDetail != null) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = "Auth: $authDetail",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = authTint,
+                            )
+                        }
                     }
                 }
 

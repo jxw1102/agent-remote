@@ -1,7 +1,13 @@
 Agent Remote — connection cheatsheet
 
-Point a client (BB10 / Android / web) at your agentremoted instance.
-One process serves every harness via "providers" in config.json.
+Point a client (BB10 / Android / iOS / web / pager) at your agentremoted
+instance. One process serves every harness via "providers" in config.json.
+
+----------------------------------------------------------------------
+Easiest install (Mac / Linux)
+----------------------------------------------------------------------
+  ./install.sh
+  # or hand docs/AGENT_INSTALL.md to your coding agent
 
 ----------------------------------------------------------------------
 macOS (launchd multi — ./daemon/scripts/install-launchd.sh)
@@ -13,16 +19,17 @@ macOS (launchd multi — ./daemon/scripts/install-launchd.sh)
   tail -f ~/.agentremoted/daemon.log
 
 ----------------------------------------------------------------------
-Linux (systemd unit agentremoted — ./deploy/deploy.sh or manual)
+Linux (user systemd via install.sh, or root via ./deploy/deploy.sh)
 ----------------------------------------------------------------------
   Base URL = http://your-host.example.com:8473
-  Token    = contents of /root/.agentremoted/token
-             (or ~/.agentremoted/token if you run as your user)
+  Token    = contents of ~/.agentremoted/token
+             (or /root/.agentremoted/token if you deploy as root)
 
   Port comes from config.json (default 8473; deploy.sh respects PORT=).
 
-  systemctl status agentremoted
-  journalctl -u agentremoted -f
+  systemctl --user status agentremoted    # install.sh path
+  systemctl status agentremoted           # root unit
+  journalctl --user -u agentremoted -f
   curl -s http://127.0.0.1:8473/api/ping
 
 ----------------------------------------------------------------------
@@ -36,15 +43,24 @@ Phone / remote (recommended: Cloudflare Tunnel)
 ----------------------------------------------------------------------
   Do not expose the daemon port on the public internet.
 
-  Quick tunnel (temporary https://….trycloudflare.com URL):
+  Helper (checks ping, prints token card, runs cloudflared):
+    ./daemon/scripts/tunnel.sh
+
+  Or manually:
     cloudflared tunnel --url http://localhost:8473
-    # other port, e.g. 8080:
-    cloudflared tunnel --url http://localhost:8080
 
   Base URL = the https URL cloudflared prints
   Token    = same host token as above
 
   Named tunnel + your own domain for a stable hostname.
+  Full path: docs/getting-started.md · docs/remote-access.md
+
+----------------------------------------------------------------------
+Auth health (daemon ≥ 2.5.3)
+----------------------------------------------------------------------
+  curl -s http://127.0.0.1:8473/api/ping | python3 -m json.tool
+  # look at "auth" and provider_details.*.auth
+  # status: ok | warning | expired | missing | unknown
 
 ----------------------------------------------------------------------
 Auth headers

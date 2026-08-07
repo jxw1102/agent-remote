@@ -303,18 +303,77 @@ bool fetchUsage(int daemon, std::vector<UsageBucket> *out, String *errOut) {
     if (errOut) *errOut = "bad json";
     return false;
   }
-  for (JsonObject sec : doc["sections"].as<JsonArray>()) {
-    for (JsonObject b : sec["buckets"].as<JsonArray>()) {
-      UsageBucket u;
-      u.title = (const char *)(b["title"] | "");
-      u.resets = (const char *)(b["resets_text"] | "");
-      u.severity = (const char *)(b["severity"] | "normal");
-      u.percent = b["percent"] | 0;
-      out->push_back(u);
-      if (out->size() >= 8) return true;
+  auto pushBucket = [&](JsonObject b, const char *prov, const char *acct,
+                        const char *acctId) {
+    UsageBucket u;
+    u.title = (const char *)(b["title"] | "");
+    u.resets = (const char *)(b["resets_text"] | "");
+    u.severity = (const char *)(b["severity"] | "normal");
+    u.percent = b["percent"] | 0;
+    u.provider = prov && prov[0] ? prov : (const char *)(b["provider"] | "");
+    u.account = acct && acct[0] ? acct : (const char *)(b["account"] | "");
+    u.accountId = acctId && acctId[0] ? acctId
+                                      : (const char *)(b["account_id"] | "");
+    if (u.accountId.isEmpty()) u.accountId = u.account;
+    // Strip multi flat-list prefix "Claude · weekly" → "weekly".
+    int dot = u.title.indexOf(" · ");
+    if (dot > 0 && dot <= 12)
+      u.title = u.title.substring(dot + 3);
+    out->push_back(u);
+  };
+
+  bool multi = doc["multi"] | false;
+  JsonArray sections = doc["sections"].as<JsonArray>();
+  if (multi && !sections.isNull() && sections.size() > 0) {
+    for (JsonObject sec : sections) {
+      const char *prov = sec["provider"] | "";
+      const char *acct = sec["account"] | "";
+      const char *acctId = sec["account_id"] | "";
+      for (JsonObject b : sec["buckets"].as<JsonArray>()) {
+        pushBucket(b, prov, acct, acctId);
+        if (out->size() >= 12) return true;
+      }
+    }
+    return !out->empty() || (doc["ok"] | false);
+  }
+  const char *rootProv = doc["provider"] | "";
+  const char *rootAcct = doc["account"] | "";
+  const char *rootId = doc["account_id"] | "";
+  for (JsonObject b : doc["buckets"].as<JsonArray>()) {
+    pushBucket(b, rootProv, rootAcct, rootId);
+    if (out->size() >= 12) return true;
+  }
+  // Legacy multi without using root: sections already handled; also walk
+  // sections when multi flag missing.
+  if (out->empty()) {
+    for (JsonObject sec : sections) {
+      const char *prov = sec["provider"] | "";
+      const char *acct = sec["account"] | "";
+      const char *acctId = sec["account_id"] | "";
+      for (JsonObject b : sec["buckets"].as<JsonArray>()) {
+        pushBucket(b, prov, acct, acctId);
+        if (out->size() >= 12) return true;
+      }
     }
   }
-  return doc["ok"] | false;
+  return !out->empty() || (doc["ok"] | false);
+}
+
+String fetchJobStatus(int daemon, const String &jobId) {
+  if (jobId.isEmpty()) return "";
+  String body;
+  String err;
+  // Small status-only poll — short timeout so end-chimes stay snappy.
+  if (!httpGet(daemon, "/api/jobs/" + jobId + "?since=999999", &body, nullptr,
+               &err, 4000)) {
+    // 404 after prune of a finished job → treat as success.
+    if (err.indexOf("404") >= 0) return "done";
+    return "";
+  }
+  JsonDocument doc;
+  if (deserializeJson(doc, body)) return "";
+  const char *st = doc["status"] | "";
+  return String(st);
 }
 
 bool fetchTui(int daemon, const String &sessionId, String *textOut,

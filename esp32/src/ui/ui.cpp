@@ -62,6 +62,7 @@ struct PrevJob {
   String id;
   String toolSig;
   bool pending;
+  uint8_t daemon = 0;
 };
 std::vector<PrevJob> prevJobs;
 bool feedSeeded = false;
@@ -70,6 +71,17 @@ uint32_t lastFeedGen = 0;
 bool anyPending = false;
 uint32_t remindNextAt = 0;
 constexpr uint32_t kRemindMs = 30000;
+
+// Vanished jobs — verify terminal status before Done vs Error chime.
+struct EndedPending {
+  String id;
+  uint8_t daemon = 0;
+};
+std::vector<EndedPending> endedQueue;
+SemaphoreHandle_t endedMx = nullptr;
+volatile bool endWorkerBusy = false;
+// Bit0 = Done, bit1 = Error — set by worker, consumed on UI tick.
+volatile uint8_t endChimeFlags = 0;
 
 void show(Screen s, bool backward = false);
 
@@ -136,7 +148,7 @@ void syncWifi() {
 // three https feeds resident that allocation could fail, the job never ran,
 // and its "loading" state spun forever (the endless Usage spinner).
 enum WorkerJob : uint8_t {
-  JOB_SESSIONS, JOB_TUI, JOB_REPLY, JOB_DIAG, JOB_USAGE, JOB_POLL,
+  JOB_SESSIONS, JOB_TUI, JOB_REPLY, JOB_DIAG, JOB_USAGE, JOB_POLL, JOB_END,
 };
 QueueHandle_t workerQ = nullptr;
 
@@ -146,6 +158,7 @@ void runReply();
 void runDiagUpload();
 void runUsageFetch();
 void runStatusPoll();
+void runJobEndChecks();
 
 void workerTask(void *) {
   uint8_t j;
@@ -158,6 +171,7 @@ void workerTask(void *) {
       case JOB_DIAG: runDiagUpload(); break;
       case JOB_USAGE: runUsageFetch(); break;
       case JOB_POLL: runStatusPoll(); break;
+      case JOB_END: runJobEndChecks(); break;
     }
   }
 }
@@ -1170,10 +1184,20 @@ SemaphoreHandle_t usageMx = nullptr;
 std::vector<UsageBucket> usageResult;
 String usageErr;
 
+String usageDedupeKey(const UsageBucket &u) {
+  // Same harness seat across hosts → one bar (provider + account + window).
+  String acct = u.accountId.length() ? u.accountId : u.account;
+  acct.toLowerCase();
+  String prov = u.provider;
+  prov.toLowerCase();
+  if (prov.length() && acct.length())
+    return prov + "|" + acct + "|" + u.title;
+  return String("|") + u.title;  // fallback: title-only
+}
+
 void runUsageFetch() {
   // One daemon at a time, rendered as each answers — never concurrent.
-  // Buckets dedupe by title (the same subscription seen from two hosts
-  // shows once, at the higher percentage).
+  // Dedupe by (provider, account, title) so Mac + VPS same login merges.
   std::vector<UsageBucket> acc;
   String err;
   bool any = false;
@@ -1185,11 +1209,13 @@ void runUsageFetch() {
     if (agentapi::fetchUsage(d, &rows, &e)) {
       any = true;
       for (auto &u : rows) {
+        String key = usageDedupeKey(u);
         bool dup = false;
         for (auto &v : acc) {
-          if (v.title == u.title) {
+          if (usageDedupeKey(v) == key) {
             dup = true;
             if (u.percent > v.percent) v = u;
+            break;
           }
         }
         if (!dup) acc.push_back(u);
@@ -1225,8 +1251,18 @@ void fillUsage() {
     lv_obj_remove_style_all(row);
     lv_obj_set_size(row, LV_PCT(100), 40);
 
+    // "claude · you@x.com — weekly" when account is known; else title alone.
+    String label = u.title;
+    if (u.provider.length() || u.account.length()) {
+      String head = u.provider;
+      if (u.account.length()) {
+        if (head.length()) head += " · ";
+        head += u.account;
+      }
+      if (head.length()) label = head + " — " + u.title;
+    }
     lv_obj_t *t = lv_label_create(row);
-    lv_label_set_text(t, u.title.c_str());
+    lv_label_set_text(t, label.c_str());
     lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
     lv_obj_set_size(t, LV_PCT(55), 16);
     lv_obj_set_style_text_font(t, &lv_font_montserrat_12, 0);
@@ -1985,17 +2021,45 @@ bool refreshSessionsRateLimited() {
   return true;
 }
 
+void runJobEndChecks() {
+  // Resolve vanished jobs on the worker (HTTPS pause + short GET). Only
+  // status "error" → Error chime; running/starting → silence (stream blip);
+  // done/stopped/404/unknown → Done.
+  for (;;) {
+    std::vector<EndedPending> batch;
+    if (endedMx) {
+      xSemaphoreTake(endedMx, portMAX_DELAY);
+      batch.swap(endedQueue);
+      xSemaphoreGive(endedMx);
+    }
+    if (batch.empty()) break;
+    for (auto &e : batch) {
+      pauseHttpsFeed(e.daemon, 5000);
+      String st = agentapi::fetchJobStatus(e.daemon, e.id);
+      st.toLowerCase();
+      if (st == "running" || st == "starting")
+        continue;  // still live — stream glitch, no end cue
+      if (st == "error")
+        endChimeFlags |= 2;
+      else
+        endChimeFlags |= 1;  // done, stopped, empty, 404
+    }
+  }
+  endWorkerBusy = false;
+}
+
 void diffFeed() {
   const auto &jobs = statusfeed::jobs();
 
-  bool sawStart = false, sawDone = false, sawAttention = false, sawTick = false;
+  bool sawStart = false, sawAttention = false, sawTick = false;
   String attnTitle;
+  std::vector<EndedPending> vanished;
 
   for (auto &p : prevJobs) {
     bool still = false;
     for (const auto &j : jobs)
       if (j.jobId == p.id) still = true;
-    if (!still) sawDone = true;
+    if (!still) vanished.push_back({p.id, p.daemon});
   }
 
   bool pendingNow = false;
@@ -2019,8 +2083,19 @@ void diffFeed() {
       cue(chime::Cue::Attention);
       ticker = "needs you: " + attnTitle;
       remindNextAt = millis() + kRemindMs;
-    } else if (sawDone) {
-      cue(chime::Cue::Done);
+    } else if (!vanished.empty()) {
+      // Defer Done/Error until worker confirms terminal status.
+      if (endedMx) {
+        xSemaphoreTake(endedMx, portMAX_DELAY);
+        for (auto &v : vanished) endedQueue.push_back(v);
+        // Cap queue so a reconnect storm cannot grow forever.
+        while (endedQueue.size() > 8) endedQueue.erase(endedQueue.begin());
+        xSemaphoreGive(endedMx);
+      }
+      if (!endWorkerBusy) {
+        endWorkerBusy = true;
+        submitJob(JOB_END);
+      }
       ticker = "turn ended";
     } else if (sawStart) {
       cue(chime::Cue::Status);
@@ -2044,7 +2119,7 @@ void diffFeed() {
   prevJobs.clear();
   for (const auto &j : jobs)
     prevJobs.push_back({j.jobId, toolSigOf(j),
-                        j.pendingPermission || j.pendingQuestion});
+                        j.pendingPermission || j.pendingQuestion, j.daemon});
 
   if (!jobs.empty()) refreshSessionsRateLimited();
 }
@@ -2055,6 +2130,7 @@ void begin(AppConfig *c) {
   cfg = c;
   workerQ = xQueueCreate(8, 1);
   usageMx = xSemaphoreCreateMutex();
+  endedMx = xSemaphoreCreateMutex();
   if (xTaskCreate(workerTask, "worker", 24576, NULL, 1, NULL) != pdPASS)
     dlog::logf("[worker] task create FAILED");
   applyDaemons();
@@ -2100,6 +2176,30 @@ void tick() {
     }
   } else if (tuiFetchState == 2) {
     tuiFetchState = 0;  // drop a result that landed after leaving
+  }
+
+  // Job-end chimes after worker verified terminal status (explicit error only).
+  if (endChimeFlags) {
+    uint8_t f = endChimeFlags;
+    endChimeFlags = 0;
+    if (f & 2) {
+      cue(chime::Cue::Error);
+      ticker = "turn failed";
+    } else if (f & 1) {
+      cue(chime::Cue::Done);
+      ticker = "turn ended";
+    }
+    // More vanished jobs may have queued while the worker ran.
+    if (!endWorkerBusy && endedMx) {
+      bool more = false;
+      xSemaphoreTake(endedMx, portMAX_DELAY);
+      more = !endedQueue.empty();
+      xSemaphoreGive(endedMx);
+      if (more) {
+        endWorkerBusy = true;
+        submitJob(JOB_END);
+      }
+    }
   }
 
   // Reply / diag-upload results land back on the UI thread here.

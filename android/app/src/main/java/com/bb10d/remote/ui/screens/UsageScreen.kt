@@ -55,8 +55,9 @@ import com.bb10d.remote.ui.theme.palette
 @Composable
 fun UsageScreen(vm: UsageViewModel, onBack: () -> Unit, onOpenWeb: (String) -> Unit) {
     val profiles by vm.profiles.collectAsStateWithLifecycle()
-    val results by vm.results.collectAsStateWithLifecycle()
+    val merged by vm.merged.collectAsStateWithLifecycle()
     val pal = palette
+    val usageProfiles = profiles.enabled.filter { it.caps.canShowUsage }
 
     LaunchedEffect(Unit) { vm.refresh() }
 
@@ -82,67 +83,110 @@ fun UsageScreen(vm: UsageViewModel, onBack: () -> Unit, onOpenWeb: (String) -> U
                 .padding(padding)
                 .verticalScroll(rememberScrollState()),
         ) {
-            profiles.enabled.forEach { profile ->
-                val result = results[profile.id]
+            // Profiles that cannot report usage stay listed with a reason.
+            profiles.enabled.filter { !it.caps.canShowUsage }.forEach { profile ->
                 Column(Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        ProviderChip(profile.provider, profile.displayName)
-                        Spacer(Modifier.width(8.dp))
-                        if (result is UsageViewModel.Result.Loading) {
-                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                    ProviderChip(profile.provider, profile.displayName)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "This daemon does not report usage.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = pal.dim,
+                    )
+                    if (profile.provider == "grok") {
+                        TextButton(onClick = { onOpenWeb(GROK_USAGE_URL) }) {
+                            Icon(Icons.Outlined.OpenInBrowser, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Open grok.com usage")
                         }
                     }
-                    Spacer(Modifier.height(12.dp))
-                    when {
-                        !profile.caps.canShowUsage -> Column {
-                            Text(
-                                "This daemon does not report usage.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = pal.dim,
-                            )
-                            if (profile.provider == "grok") {
-                                TextButton(onClick = { onOpenWeb(GROK_USAGE_URL) }) {
-                                    Icon(Icons.Outlined.OpenInBrowser, null)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Open grok.com usage")
-                                }
-                            }
-                        }
+                }
+                Hairline(inset = 16)
+            }
 
-                        result is UsageViewModel.Result.Failed -> ErrorBanner(result.message)
-
-                        result is UsageViewModel.Result.Ok &&
-                            result.sections.isEmpty() && result.buckets.isEmpty() -> Text(
-                            "No usage data returned.",
+            when (val result = merged) {
+                is UsageViewModel.Result.Loading -> {
+                    Row(
+                        Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (usageProfiles.size > 1) "Reading daemons…" else "Reading…",
                             style = MaterialTheme.typography.bodySmall,
                             color = pal.dim,
                         )
+                    }
+                }
 
-                        result is UsageViewModel.Result.Ok && result.sections.isNotEmpty() -> Column {
-                            // Multi-harness host: Claude / Grok / … each get a block.
-                            result.sections.forEach { section ->
-                                val harness = section.provider.ifBlank { profile.provider }
-                                ProviderChip(harness, harness.replaceFirstChar {
-                                    if (it.isLowerCase()) it.titlecase() else it.toString()
-                                })
-                                Spacer(Modifier.height(8.dp))
-                                when {
-                                    section.error.isNotBlank() && section.buckets.isEmpty() -> {
+                is UsageViewModel.Result.Failed -> {
+                    Column(Modifier.padding(16.dp)) {
+                        ErrorBanner(result.message)
+                    }
+                }
+
+                is UsageViewModel.Result.Ok -> {
+                    if (result.sections.isEmpty() && usageProfiles.isNotEmpty()) {
+                        Text(
+                            "No usage data returned.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = pal.dim,
+                            modifier = Modifier.padding(16.dp),
+                        )
+                    }
+                    result.sections.forEach { section ->
+                        val harness = section.provider
+                        Column(Modifier.padding(16.dp)) {
+                            val chipLabel = buildString {
+                                append(
+                                    harness.replaceFirstChar {
+                                        if (it.isLowerCase()) it.titlecase() else it.toString()
+                                    },
+                                )
+                                if (section.account.isNotBlank()) {
+                                    append(" · ")
+                                    append(section.account)
+                                }
+                            }
+                            ProviderChip(harness, chipLabel)
+                            if (section.hosts.isNotEmpty()) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    if (section.hosts.size > 1) {
+                                        "Via ${section.hosts.joinToString(" · ")}"
+                                    } else {
+                                        section.hosts.first()
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = pal.dim,
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            when {
+                                section.error.isNotBlank() && section.buckets.isEmpty() -> {
+                                    Text(
+                                        section.error,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = pal.dim,
+                                    )
+                                }
+                                section.buckets.isEmpty() -> Text(
+                                    "No usage data returned.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = pal.dim,
+                                )
+                                else -> {
+                                    if (section.error.isNotBlank()) {
                                         Text(
                                             section.error,
                                             style = MaterialTheme.typography.bodySmall,
                                             color = pal.dim,
                                         )
+                                        Spacer(Modifier.height(8.dp))
                                     }
-                                    section.buckets.isEmpty() -> Text(
-                                        "No usage data returned.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = pal.dim,
-                                    )
-                                    else -> section.buckets.forEach { bucket ->
-                                        val title = stripHarnessPrefix(
-                                            bucket.title, harness,
-                                        )
+                                    section.buckets.forEach { bucket ->
+                                        val title = stripHarnessPrefix(bucket.title, harness)
                                         UsageBar(
                                             title = title,
                                             percent = bucket.percent,
@@ -153,33 +197,13 @@ fun UsageScreen(vm: UsageViewModel, onBack: () -> Unit, onOpenWeb: (String) -> U
                                         Spacer(Modifier.height(14.dp))
                                     }
                                 }
-                                Spacer(Modifier.height(10.dp))
                             }
                         }
-
-                        result is UsageViewModel.Result.Ok -> Column {
-                            result.buckets.forEach { bucket ->
-                                val harness = bucket.provider.ifBlank { profile.provider }
-                                UsageBar(
-                                    title = bucket.title,
-                                    percent = bucket.percent,
-                                    resets = bucket.resetsText,
-                                    severity = bucket.severity,
-                                    accent = Accent.forProvider(harness).tint,
-                                )
-                                Spacer(Modifier.height(14.dp))
-                            }
-                        }
-
-                        else -> Text(
-                            "Reading…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = pal.dim,
-                        )
+                        Hairline(inset = 16)
                     }
                 }
-                Hairline(inset = 16)
             }
+
             if (profiles.enabled.isEmpty()) {
                 Text(
                     "No enabled profiles.",

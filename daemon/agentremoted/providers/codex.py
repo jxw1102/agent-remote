@@ -587,26 +587,83 @@ def _fetch_usage_via_http(config) -> dict:
     return {"ok": True, "buckets": buckets}
 
 
+def account_identity(config=None) -> dict:
+    """ChatGPT / Codex seat identity for cross-host usage dedup.
+
+    Prefer id_token email, then access_token profile email, then account_id.
+    """
+    email = ""
+    account_id = ""
+    name = ""
+    path = _auth_path(config) if config is not None else (
+        Path.home() / ".codex" / "auth.json")
+    try:
+        data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
+    account_id = str(tokens.get("account_id") or "").strip()
+    for key in ("id_token", "access_token"):
+        tok = str(tokens.get(key) or "").strip()
+        if not tok:
+            continue
+        claims = _jwt_payload(tok)
+        if not email:
+            email = str(claims.get("email") or "").strip()
+            prof = claims.get("https://api.openai.com/profile") or {}
+            if not email and isinstance(prof, dict):
+                email = str(prof.get("email") or "").strip()
+            if not name and isinstance(prof, dict):
+                name = str(prof.get("name") or "").strip()
+            if not name:
+                name = str(claims.get("name") or "").strip()
+        if not account_id:
+            authc = claims.get("https://api.openai.com/auth") or {}
+            if isinstance(authc, dict):
+                account_id = str(authc.get("chatgpt_account_id") or "").strip()
+            if not account_id:
+                account_id = str(claims.get("sub") or "").strip()
+    mode = str(data.get("auth_mode") or "").lower()
+    if not email and not account_id and mode == "apikey":
+        return {"account": "api-key", "account_id": "api-key"}
+    account = email or name or account_id
+    return {"account": account, "account_id": account_id or account}
+
+
+def _with_identity(data: dict, config=None) -> dict:
+    out = dict(data or {})
+    out["provider"] = "codex"
+    ident = account_identity(config)
+    out["account"] = ident.get("account") or ""
+    out["account_id"] = ident.get("account_id") or out["account"]
+    return out
+
+
 def fetch_usage(config) -> dict:
     """Return {"ok": True, "buckets": [...]} or {"ok": False, "error": str}.
 
     Prefer ``codex app-server`` rateLimits RPC (reliable, same auth as the
     CLI). Fall back to ChatGPT HTTP if app-server is unavailable.
+
+    Always stamps ``provider`` / ``account`` / ``account_id`` for multi-host
+    clients that merge the same ChatGPT plan across daemons.
     """
     with _usage_app_server_lock:
         primary = _fetch_usage_via_app_server(config)
     if primary.get("ok"):
-        return primary
+        return _with_identity(primary, config)
     # App-server missing / timed out / auth error — try HTTP once.
     secondary = _fetch_usage_via_http(config)
     if secondary.get("ok"):
-        return secondary
+        return _with_identity(secondary, config)
     # Prefer the more specific of the two errors.
     err = primary.get("error") or secondary.get("error") or "usage failed"
     if secondary.get("error") and "app-server" in str(primary.get("error") or ""):
         err = "%s (HTTP fallback: %s)" % (
             primary.get("error"), secondary.get("error"))
-    return {"ok": False, "error": err}
+    return _with_identity({"ok": False, "error": err}, config)
 
 
 def _preview(text: str, n: int = _MAX_PREVIEW) -> str:
@@ -1113,9 +1170,9 @@ class CodexStore:
 def _build_transcript(path: Path | None) -> list:
     """Coalesce rollout JSONL into [{role, text, ts}] for the phone.
 
-    Chat turns + compact tool status rows (shell / edit / web_search) so the
-    transcript mirrors live job tool events. Tool *outputs* stay off the
-    history (noisy; same idea as Claude/Grok).
+    Conversation only (user + assistant). Tool activity is live job state —
+    the banner/ticker — same as Claude/Grok; tool rows are not persisted in
+    the transcript.
     """
     if path is None or not path.is_file():
         return []
@@ -1126,38 +1183,17 @@ def _build_transcript(path: Path | None) -> list:
                 ev = _safe_json(line)
                 if not isinstance(ev, dict):
                     continue
-                ts = str(ev.get("timestamp") or "")
                 hit = _event_chat_message(ev)
-                if hit:
-                    role, text = hit
-                    prefix = "u" if role == "user" else "a"
-                    messages.append({
-                        "uuid": "%s%d" % (prefix, len(messages)),
-                        "role": role,
-                        "ts": ts,
-                        "text": text,
-                    })
+                if not hit:
                     continue
-                tool = _event_tool(ev)
-                if not tool:
-                    continue
-                # Skip summary event_msg duplicates when the same turn already
-                # has a custom_tool_call — patch_apply_end / web_search_end are
-                # useful only as fallback when no call row existed. Always emit
-                # response_item tools; emit end summaries too (cheap, short).
-                name = tool.get("name") or "tool"
-                detail = tool.get("detail") or ""
-                label = "⚙ %s" % name
-                if detail:
-                    label = "%s  %s" % (label, detail)
+                role, text = hit
+                ts = str(ev.get("timestamp") or "")
+                prefix = "u" if role == "user" else "a"
                 messages.append({
-                    "uuid": "t%d" % len(messages),
-                    "role": "status",
-                    "metaKind": "tool",
+                    "uuid": "%s%d" % (prefix, len(messages)),
+                    "role": role,
                     "ts": ts,
-                    "text": label[:240],
-                    "name": name,
-                    "detail": detail,
+                    "text": text,
                 })
     except OSError:
         return messages
@@ -1324,6 +1360,69 @@ class CodexRunner:
             # from there. Works in BOTH exec modes — codex's own TUI has no
             # rewind, but the daemon does not need one.
             "rewind": True,
+        }
+
+    def auth_health(self) -> dict:
+        """Local credential snapshot for /api/ping (no network)."""
+        import shutil
+        bin_path = _codex_bin(self.config)
+        on_path = bool(shutil.which(bin_path))
+        api_key = str(os.environ.get("OPENAI_API_KEY") or "").strip()
+        path = _auth_path(self.config)
+        data = {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                data = raw
+        except (OSError, ValueError, json.JSONDecodeError):
+            data = {}
+        mode_field = str(data.get("auth_mode") or "").lower()
+        tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
+        access = str(tokens.get("access_token") or "").strip()
+        refresh = str(tokens.get("refresh_token") or "").strip()
+
+        if mode_field == "apikey" or (api_key and not access):
+            return {
+                "cli": "codex",
+                "cli_on_path": on_path,
+                "mode": "api_key",
+                "status": "ok" if on_path else "warning",
+                "detail": ("OpenAI API key mode"
+                           + ("" if on_path else "; `codex` not on PATH")),
+            }
+        if access and _jwt_fresh(access):
+            return {
+                "cli": "codex",
+                "cli_on_path": on_path,
+                "mode": "subscription",
+                "status": "ok" if on_path else "warning",
+                "detail": ("ChatGPT / Codex login looks valid"
+                           + ("" if on_path else "; `codex` not on PATH")),
+            }
+        if access or refresh:
+            return {
+                "cli": "codex",
+                "cli_on_path": on_path,
+                "mode": "subscription",
+                "status": "expired",
+                "detail": "Codex sign-in expired — run `codex` login on this host",
+            }
+        if api_key:
+            return {
+                "cli": "codex",
+                "cli_on_path": on_path,
+                "mode": "api_key",
+                "status": "ok" if on_path else "warning",
+                "detail": "OPENAI_API_KEY set"
+                          + ("" if on_path else "; `codex` not on PATH"),
+            }
+        return {
+            "cli": "codex",
+            "cli_on_path": on_path,
+            "mode": "none",
+            "status": "missing",
+            "detail": ("No Codex login or API key on this host"
+                       + ("" if on_path else "; `codex` not on PATH")),
         }
 
     # Verified in codex's own TUI command list: /compact and /exit are

@@ -66,11 +66,23 @@ object FlexibleEpochSerializer : KSerializer<Double> {
 }
 
 @Serializable
+data class AuthHealthDto(
+    val cli: String = "",
+    @SerialName("cli_on_path") val cliOnPath: Boolean = false,
+    /** subscription | api_key | none | unknown */
+    val mode: String = "",
+    /** ok | warning | expired | missing | unknown */
+    val status: String = "",
+    val detail: String = "",
+)
+
+@Serializable
 data class ProviderDetailDto(
     val caps: Map<String, Boolean> = emptyMap(),
     @SerialName("slash_commands") val slashCommands: List<String> = emptyList(),
     val models: List<String> = emptyList(),
     val efforts: List<String> = emptyList(),
+    val auth: AuthHealthDto? = null,
 )
 
 @Serializable
@@ -90,6 +102,8 @@ data class PingDto(
     val providers: List<String> = emptyList(),
     @SerialName("provider_details")
     val providerDetails: Map<String, ProviderDetailDto> = emptyMap(),
+    /** Aggregate harness login snapshot (daemon ≥ 2.5.3). */
+    val auth: AuthHealthDto? = null,
 )
 
 /**
@@ -275,6 +289,9 @@ data class UsageBucketDto(
     val severity: String = "normal",
     /** Multi-daemon root tags each bucket with the harness name. */
     val provider: String = "",
+    /** Logged-in account label (email when known) for cross-host dedup. */
+    val account: String = "",
+    @SerialName("account_id") val accountId: String = "",
 )
 
 @Serializable
@@ -283,6 +300,10 @@ data class UsageSectionDto(
     val ok: Boolean = true,
     val error: String = "",
     val buckets: List<UsageBucketDto> = emptyList(),
+    /** Display label for the seat (email preferred). */
+    val account: String = "",
+    /** Stable seat id for merging the same login across hosts. */
+    @SerialName("account_id") val accountId: String = "",
 )
 
 @Serializable
@@ -293,6 +314,10 @@ data class UsageDto(
     /** Multi-harness host: one section per provider (claude / grok / …). */
     val multi: Boolean = false,
     val sections: List<UsageSectionDto> = emptyList(),
+    /** Single-provider hosts stamp the harness + account on the root too. */
+    val provider: String = "",
+    val account: String = "",
+    @SerialName("account_id") val accountId: String = "",
 )
 
 @Serializable
@@ -379,6 +404,7 @@ data class Caps(
     val multi: Boolean = false,
     val providers: List<String> = emptyList(),
     val providerDetails: Map<String, ProviderDetailDto> = emptyMap(),
+    val auth: AuthHealthDto? = null,
 ) {
     operator fun get(key: String): Boolean = flags[key] == true
 
@@ -501,6 +527,7 @@ data class Caps(
             multi = ping.multi,
             providers = ping.providers,
             providerDetails = ping.providerDetails,
+            auth = ping.auth,
         )
     }
 }

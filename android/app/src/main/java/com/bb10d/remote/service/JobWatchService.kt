@@ -170,19 +170,32 @@ class JobWatchService : Service() {
         val snapshot = runCatching {
             client.job(watched.jobId, watched.nextSeq.coerceAtLeast(0))
         }.getOrNull()
-        val status = snapshot?.status ?: "done"
+        // Stream blips (SSE reconnect, daemon restart) drop jobs from the
+        // active list while they are still running. Re-fetch before we claim
+        // failure — only terminal statuses get a notification.
+        val status = snapshot?.status?.trim().orEmpty().ifEmpty { "done" }
+        if (status == "starting" || status == "running") {
+            return
+        }
         if (status == "stopped" && snapshot?.error.isNullOrBlank()) {
             // A stop the user asked for needs no announcement.
             return
         }
         val title = snapshot?.resultText?.takeIf { it.isNotBlank() }?.lineSequence()?.first()
             ?: watched.prompt.ifBlank { "Turn finished" }
+        // Only explicit "error" is a failure; unknown/empty → finished OK
+        // (job may already be pruned after a clean done).
+        val announce = when (status) {
+            "error" -> "error"
+            "stopped" -> "stopped"
+            else -> "done"
+        }
         Notifier.finished(
             context = this,
             ref = watched.ref,
             title = title.take(180),
-            status = status,
-            error = snapshot?.error.orEmpty(),
+            status = announce,
+            error = if (announce == "error") snapshot?.error.orEmpty() else "",
         )
         repo.refreshSession(watched.ref)
     }
