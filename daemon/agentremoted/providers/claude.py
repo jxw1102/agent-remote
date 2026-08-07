@@ -82,7 +82,21 @@ _PHASE_BY_TOOL = {
     "WebSearch": "browsing",
     "Task": "delegating",
     "Agent": "delegating",
+    "TaskCreate": "planning",
+    "TaskUpdate": "planning",
+    "TaskList": "planning",
+    "TodoWrite": "planning",
+    "TodoRead": "planning",
 }
+
+# Claude Code task list tools. Current CLIs use TaskCreate/TaskUpdate and
+# persist items under ~/.claude/tasks/<session-id>/*.json; older builds used
+# TodoWrite with the full list only in the transcript tool input.
+_TASK_TOOLS = frozenset({
+    "TaskCreate", "TaskUpdate", "TaskList", "TodoWrite", "TodoRead",
+})
+_TASKS_ROOT = Path.home() / ".claude" / "tasks"
+_TODO_JSONL_SCAN = 256 * 1024
 
 def tool_detail(tool_input: dict, max_len: int = 200) -> str:
     """One short single-line snippet for the phone status banner / permission.
@@ -93,6 +107,17 @@ def tool_detail(tool_input: dict, max_len: int = 200) -> str:
     """
     if not isinstance(tool_input, dict):
         return ""
+    # Task tools: subject / status beats generic DETAIL_KEYS.
+    for key in ("subject", "content", "status", "taskId", "activeForm"):
+        val = tool_input.get(key)
+        if isinstance(val, str) and val.strip():
+            text = " ".join(val.split())
+            if len(text) > max_len:
+                text = text[: max_len - 1] + "…"
+            return text
+    todos = tool_input.get("todos")
+    if isinstance(todos, list) and todos:
+        return "%d todos" % len(todos)
     for key in _DETAIL_KEYS:
         val = tool_input.get(key)
         if isinstance(val, str) and val.strip():
@@ -106,6 +131,184 @@ def tool_detail(tool_input: dict, max_len: int = 200) -> str:
             tail = keep - head
             return text[:head] + "…" + text[-tail:]
     return ""
+
+
+def _task_status_norm(raw) -> str:
+    s = str(raw or "pending").strip().lower()
+    if s in ("completed", "complete", "done", "finished"):
+        return "completed"
+    if s in ("in_progress", "in-progress", "active", "doing", "running", "wip"):
+        return "in_progress"
+    if s in ("cancelled", "canceled", "dropped", "deleted"):
+        return "cancelled"
+    return "pending"
+
+
+def _task_item_from_disk(obj: dict, fallback_id: str = "") -> dict:
+    content = str(obj.get("subject") or obj.get("content") or "").strip()
+    if not content:
+        return None
+    return {
+        "id": str(obj.get("id") or fallback_id or ""),
+        "content": content,
+        "status": _task_status_norm(obj.get("status")),
+        "activeForm": str(obj.get("activeForm") or ""),
+        "description": str(obj.get("description") or ""),
+    }
+
+
+def _task_items_from_todowrite(todos) -> list:
+    """Normalize TodoWrite `todos: [{content,status,activeForm}]` rows."""
+    out = []
+    if not isinstance(todos, list):
+        return out
+    for i, t in enumerate(todos):
+        if not isinstance(t, dict):
+            continue
+        content = str(t.get("content") or t.get("subject") or "").strip()
+        if not content:
+            continue
+        out.append({
+            "id": str(t.get("id") or i + 1),
+            "content": content,
+            "status": _task_status_norm(t.get("status")),
+            "activeForm": str(t.get("activeForm") or ""),
+            "description": str(t.get("description") or ""),
+        })
+    return out
+
+
+def load_claude_tasks(session_id: str, session_file: Path = None) -> list:
+    """Current todo/task list for a Claude Code session.
+
+    Prefer on-disk TaskCreate storage (~/.claude/tasks/<session_id>/*.json).
+    Fall back to the last TodoWrite payload in the transcript for older
+    sessions that never wrote the tasks directory.
+    """
+    if not session_id or not _is_safe_id(session_id):
+        return []
+    items = []
+    tdir = _TASKS_ROOT / session_id
+    if tdir.is_dir():
+        for f in tdir.glob("*.json"):
+            try:
+                obj = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            item = _task_item_from_disk(obj, fallback_id=f.stem)
+            if item:
+                items.append(item)
+        if items:
+            def _sort_key(it):
+                sid = it.get("id") or ""
+                return (0, int(sid)) if str(sid).isdigit() else (1, str(sid))
+            items.sort(key=_sort_key)
+            return items
+    if session_file is not None:
+        return _todos_from_jsonl_tail(session_file)
+    return []
+
+
+def _todos_from_jsonl_tail(path: Path) -> list:
+    """Last TodoWrite tool_use input in the transcript (legacy path)."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    try:
+        with open(path, "rb") as f:
+            if size > _TODO_JSONL_SCAN:
+                f.seek(size - _TODO_JSONL_SCAN)
+            chunk = f.read()
+    except OSError:
+        return []
+    text = chunk.decode("utf-8", errors="replace")
+    last = None
+    for line in text.splitlines():
+        if "TodoWrite" not in line:
+            continue
+        obj = _safe_json(line)
+        if not isinstance(obj, dict):
+            continue
+        msg = obj.get("message") or {}
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") == "TodoWrite":
+                todos = (block.get("input") or {}).get("todos")
+                if isinstance(todos, list) and todos:
+                    last = todos
+    return _task_items_from_todowrite(last) if last else []
+
+
+def format_todos_markdown(items: list):
+    """(markdown_text, signature) matching grok's phone-friendly checklist."""
+    rows, done, current = [], 0, ""
+    for e in items or []:
+        if not isinstance(e, dict):
+            continue
+        text = " ".join(str(e.get("content") or "").split())
+        if not text:
+            continue
+        status = _task_status_norm(e.get("status"))
+        if status == "completed":
+            done += 1
+            rows.append("- [x] " + text)
+        elif status == "cancelled":
+            rows.append("- [ ] ~~" + text + "~~")
+        elif status == "in_progress":
+            current = text
+            rows.append("- [ ] **%s**" % text)
+        else:
+            rows.append("- [ ] " + text)
+    if not rows:
+        return "", ""
+    sig = "\n".join(rows)
+    head = "**Todo %d/%d**" % (done, len(rows))
+    if current:
+        head += " — " + current
+    return head + "\n" + sig, sig
+
+
+def emit_claude_todos(job, session_id: str = "", *, tool_input=None) -> bool:
+    """Push a deduped markdown checklist onto the job when the list changes.
+
+    ``tool_input`` with a TodoWrite-shaped ``todos`` list is used immediately
+    (disk may lag or never exist for that format). Otherwise re-read
+    ``~/.claude/tasks/<session_id>/``.
+    """
+    items = None
+    if isinstance(tool_input, dict) and isinstance(tool_input.get("todos"), list):
+        items = _task_items_from_todowrite(tool_input.get("todos"))
+    sid = (session_id or getattr(job, "session_id", None)
+           or getattr(job, "new_session_id", None)
+           or (job.runner_state or {}).get("session_id") or "")
+    if not items and sid:
+        items = load_claude_tasks(str(sid))
+    if not items:
+        return False
+    text, sig = format_todos_markdown(items)
+    if not text:
+        return False
+    state = job.runner_state
+    if state.get("todo_sig") == sig:
+        return False
+    state["todo_sig"] = sig
+    # Same as grok: one markdown checklist text event (GFM checkboxes).
+    job.add_event("text", text=text, blocks=markdown_to_blocks(text))
+    current = ""
+    for i in items:
+        if _task_status_norm(i.get("status")) == "in_progress":
+            current = i.get("activeForm") or i.get("content") or ""
+            break
+    if current:
+        job.set_phase("planning", current[-160:])
+    return True
 
 
 # ------------------------------------------------------------- subscription usage
@@ -1903,7 +2106,21 @@ class ClaudeRunner:
                         # Exact prefix, straight from a real call — the most
                         # reliable source of a server's permission-rule name.
                         self._seen_mcp_servers.add(name[5:].split("__")[0])
-                    detail = tool_detail(block.get("input") or {})
+                    tool_input = block.get("input") or {}
+                    if name in _TASK_TOOLS:
+                        # Full checklist instead of a one-line tool stub —
+                        # same pattern as grok's plan/todo_write events.
+                        sid = (obj.get("session_id")
+                               or getattr(job, "session_id", None)
+                               or getattr(job, "new_session_id", None)
+                               or "")
+                        if isinstance(tool_input, dict):
+                            emit_claude_todos(job, str(sid or ""),
+                                              tool_input=tool_input)
+                        else:
+                            emit_claude_todos(job, str(sid or ""))
+                        continue
+                    detail = tool_detail(tool_input if isinstance(tool_input, dict) else {})
                     job.add_event("tool", name=name, detail=detail)
                     job.set_phase(_PHASE_BY_TOOL.get(name, "tool"),
                                   detail or name)
@@ -1919,9 +2136,24 @@ class ClaudeRunner:
                           is_error=bool(obj.get("is_error")),
                           duration_ms=obj.get("duration_ms", 0),
                           cost_usd=obj.get("total_cost_usd", 0))
+            # Final disk re-read: TaskUpdate files may land after the tool line.
+            sid = (getattr(job, "session_id", None)
+                   or getattr(job, "new_session_id", None) or "")
+            if sid:
+                emit_claude_todos(job, str(sid))
 
     def tick(self, job):
-        pass
+        # Catch TaskCreate/TaskUpdate disk writes that lag the stream line.
+        now = time.time()
+        last = float(job.runner_state.get("todo_tick_at") or 0)
+        if now - last < 1.5:
+            return
+        job.runner_state["todo_tick_at"] = now
+        sid = (getattr(job, "session_id", None)
+               or getattr(job, "new_session_id", None)
+               or job.runner_state.get("session_id") or "")
+        if sid:
+            emit_claude_todos(job, str(sid))
 
     def finalize(self, job, returncode, stderr_tail):
         return None  # exit code decides

@@ -3,7 +3,6 @@ an orange chevron '>' and a cyan underscore on a dark CIRCLE."""
 import struct
 import zlib
 import math
-from pathlib import Path
 
 W = H = 114
 
@@ -63,8 +62,7 @@ png += chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 6, 0, 0, 0))
 png += chunk(b"IDAT", zlib.compress(b"".join(rows), 9))
 png += chunk(b"IEND", b"")
 
-_root = Path(__file__).resolve().parents[1]
-out = str(_root / "blackberry" / "variant" / "unified" / "icon.png")
+out = "blackberry/variant/unified/icon.png"
 with open(out, "wb") as f:
     f.write(png)
 print("wrote", out, len(png), "bytes")

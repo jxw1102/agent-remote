@@ -1,14 +1,14 @@
 # Agent Remote (Android)
 
-One Android app for every [`agentremoted`](../bb10-remote/daemon) host you run —
+One Android app for every [`agentremoted`](../daemon) host you run —
 Claude on your Mac, Grok on a VPS, multi-harness, or several profiles at once.
-It is the Android counterpart to [Agent Remote](../bb10-remote/) on BlackBerry
+It is the Android counterpart to [Agent Remote](../) on BlackBerry
 and web: the HTTP API is identical for every provider, and `/api/ping` says
 which harness is answering and what it can do.
 
 **Daemon install (Mac launchd / Linux systemd):** see
-[bb10-remote/README.md](../bb10-remote/README.md#quick-start--run-the-daemon)
-and [bb10-remote/daemon/README.md](../bb10-remote/daemon/README.md).
+[bb10-remote/README.md](../README.md#quick-start--run-the-daemon)
+and [daemon/README.md](../daemon/README.md).
 
 ```
 Profiles                      Unified session list           Transcript

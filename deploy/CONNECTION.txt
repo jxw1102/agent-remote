@@ -32,6 +32,21 @@ Foreground (any OS)
   Token: PYTHONPATH=. python3 -m agentremoted --print-token
 
 ----------------------------------------------------------------------
+Phone / remote (recommended: Cloudflare Tunnel)
+----------------------------------------------------------------------
+  Do not expose the daemon port on the public internet.
+
+  Quick tunnel (temporary https://….trycloudflare.com URL):
+    cloudflared tunnel --url http://localhost:8473
+    # other port, e.g. 8080:
+    cloudflared tunnel --url http://localhost:8080
+
+  Base URL = the https URL cloudflared prints
+  Token    = same host token as above
+
+  Named tunnel + your own domain for a stable hostname.
+
+----------------------------------------------------------------------
 Auth headers
 ----------------------------------------------------------------------
   curl -s -H "Authorization: Bearer <TOKEN>" \

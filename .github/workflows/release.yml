@@ -7,10 +7,11 @@
 # read for the tarball name and release notes; keep them in sync.
 #
 # Assets:
-#   - agent-remote.html          web client (single file)
-#   - AgentRemote.apk            Android release
-#   - AgentRemote.bar            BlackBerry 10 (Docker NDK; best-effort)
-#   - agentremoted-<ver>.tar.gz  packaged daemon + deploy helpers
+#   - agent-remote.html                     web client (single file)
+#   - AgentRemote.apk                       Android release
+#   - AgentRemote.bar                       BlackBerry 10 (Docker NDK; best-effort)
+#   - agentremoted-<ver>.tar.gz             packaged daemon + deploy helpers
+#   - agentremote-full-tlora-pager.bin     LILYGO T-LoRa Pager full flash image (0x0)
 
 name: Release
 
@@ -173,8 +174,49 @@ jobs:
           path: dist/AgentRemote.bar
           if-no-files-found: warn
 
+  pager:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+            esp32/.pio
+          key: pio-esp32-${{ hashFiles('esp32/platformio.ini') }}
+          restore-keys: |
+            pio-esp32-
+      - name: Install PlatformIO
+        run: pip install -U platformio
+      - name: Build LILYGO T-LoRa Pager firmware
+        working-directory: esp32
+        run: |
+          pio run -e tlora_pager_sx1262
+          python3 scripts/package-full-firmware.py
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          # Full flash image (bootloader + partitions + boot_app0 + app @ 0x0).
+          cp -f dist/agentremote-full-tlora-pager.bin \
+            "$GITHUB_WORKSPACE/dist/agentremote-full-tlora-pager.bin"
+          ls -la "$GITHUB_WORKSPACE/dist/agentremote-full-tlora-pager.bin"
+          # Sanity: full image must be larger than the app alone.
+          FULL=$(stat -c%s "$GITHUB_WORKSPACE/dist/agentremote-full-tlora-pager.bin")
+          APP=$(stat -c%s .pio/build/tlora_pager_sx1262/firmware.bin)
+          test "$FULL" -gt "$APP"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pager-firmware-full
+          path: dist/agentremote-full-tlora-pager.bin
+          if-no-files-found: error
+
   publish:
-    needs: [version, web, daemon, android, blackberry]
+    needs: [version, web, daemon, android, blackberry, pager]
     runs-on: ubuntu-latest
     if: >-
       always()
@@ -182,6 +224,7 @@ jobs:
       && needs.web.result == 'success'
       && needs.daemon.result == 'success'
       && needs.android.result == 'success'
+      && needs.pager.result == 'success'
     steps:
       - uses: actions/checkout@v4
       - name: Download artifacts
@@ -195,6 +238,7 @@ jobs:
           cp -f artifacts/web-html/agent-remote.html release/
           cp -f artifacts/daemon-tarball/agentremoted-*.tar.gz release/
           cp -f artifacts/android-apk/AgentRemote.apk release/
+          cp -f artifacts/pager-firmware-full/agentremote-full-tlora-pager.bin release/
           if [ -f artifacts/blackberry-bar/AgentRemote.bar ]; then
             cp -f artifacts/blackberry-bar/AgentRemote.bar release/
           fi
@@ -202,6 +246,7 @@ jobs:
           test -f release/agent-remote.html
           test -f release/AgentRemote.apk
           test -f "release/agentremoted-${VER}.tar.gz"
+          test -f release/agentremote-full-tlora-pager.bin
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -217,6 +262,7 @@ jobs:
             | `agent-remote.html` | Web client (open locally or host as static file) |
             | `AgentRemote.apk` | Android app (sideload) |
             | `AgentRemote.bar` | BlackBerry 10 app (when the NDK image build succeeds) |
+            | `agentremote-full-tlora-pager.bin` | LILYGO T-LoRa Pager **full** flash image (bootloader + partitions + app). Flash at `0x0`: `esptool.py --chip esp32s3 write_flash 0x0 agentremote-full-tlora-pager.bin` |
 
             Get started: extract the daemon tarball, run `agentremoted`, then open the web HTML (or install APK/BAR) and **Add a daemon** with the host URL and token from `~/.agentremoted/token`.
 

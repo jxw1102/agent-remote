@@ -1,0 +1,52 @@
+#pragma once
+// Minimal Agent Remote HTTP client for the pager (ESP32).
+
+#include <Arduino.h>
+#include <vector>
+
+struct SessionRow {
+  String id;
+  String title;
+  String cwd;
+  String provider;
+  bool working = false;
+  uint8_t daemon = 0;  // which configured daemon owns this session
+};
+
+struct StatusSnap {
+  bool ok = false;
+  int working = 0;
+  bool needsYou = false;   // permission / question
+  String phase;
+  String tool;
+  String error;
+};
+
+namespace agentapi {
+
+// Register daemon [idx] (0-based); count gates every per-daemon call.
+void setDaemonCount(int count);
+int daemonCount();
+void configure(int idx, const String &baseUrl, const String &token);
+bool ping(int daemon, String *versionOut = nullptr, String *errOut = nullptr);
+bool fetchSessions(int daemon, std::vector<SessionRow> *out,
+                   String *errOut = nullptr);
+bool sendPrompt(int daemon, const String &sessionId, const String &prompt,
+                String *errOut = nullptr);
+bool newSession(int daemon, const String &cwd, const String &prompt,
+                const String &provider, String *errOut = nullptr);
+// Lightweight fallback status poll for one daemon.
+StatusSnap pollStatus(int daemon);
+
+// Last status signature for chime de-dup.
+String statusSignature(const StatusSnap &s);
+
+// Upload raw text to POST /api/attachments?name=… → host path (diag logs).
+bool uploadText(int daemon, const String &name, const String &text,
+                String *pathOut, String *errOut);
+
+// GET /api/sessions/<id>/tui — live host TUI pane (plain text).
+bool fetchTui(int daemon, const String &sessionId, String *textOut,
+              bool *attachedOut, String *errOut);
+
+}  // namespace agentapi

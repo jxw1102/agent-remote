@@ -932,6 +932,18 @@ class InteractiveManager:
                     continue
                 break
             offset, transcript = self._drain(job, tui, transcript, offset, state)
+            # TaskCreate writes land under ~/.claude/tasks/ slightly after the
+            # tool_use line; re-read so the phone checklist stays current.
+            now = time.time()
+            if now - float(state.get("todo_tick_at") or 0) >= 1.5:
+                state["todo_tick_at"] = now
+                from .claude import emit_claude_todos
+                sid = (tui.session_id
+                       or getattr(job, "session_id", None)
+                       or getattr(job, "new_session_id", None)
+                       or "")
+                if sid:
+                    emit_claude_todos(job, str(sid))
             # A hook-delivered ask (see on_hook/PreToolUse) is the same
             # thing as one spotted in the transcript, just earlier.
             if tui.hook_ask and not state["ask"]:
@@ -1124,7 +1136,7 @@ class InteractiveManager:
         Plus the TUI-only shapes: bash-mode (!) lines arrive as user messages
         with <bash-*> markers, /command echo and output as system lines with
         subtype local_command."""
-        from .claude import tool_detail, _PHASE_BY_TOOL
+        from .claude import tool_detail, _PHASE_BY_TOOL, _TASK_TOOLS, emit_claude_todos
         from ..render_blocks import markdown_to_blocks
         if obj.get("isSidechain"):
             return
@@ -1154,7 +1166,18 @@ class InteractiveManager:
                     # answer them with keys once it replies.
                     self._ask_seen(job, block.get("input") or {}, state)
                     continue
-                detail = tool_detail(block.get("input") or {})
+                tool_input = block.get("input") or {}
+                if name in _TASK_TOOLS:
+                    sid = (obj.get("session_id")
+                           or getattr(job, "session_id", None)
+                           or getattr(job, "new_session_id", None)
+                           or state.get("session_id")
+                           or "")
+                    emit_claude_todos(
+                        job, str(sid or ""),
+                        tool_input=tool_input if isinstance(tool_input, dict) else None)
+                    continue
+                detail = tool_detail(tool_input if isinstance(tool_input, dict) else {})
                 job.add_event("tool", name=name, detail=detail)
                 job.set_phase(_PHASE_BY_TOOL.get(name, "tool"), detail or name)
             elif block.get("type") == "thinking":

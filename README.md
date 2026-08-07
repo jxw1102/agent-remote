@@ -1,7 +1,7 @@
 # Agent Remote
 
 Drive **Claude Code**, **Grok**, and **Codex** from a phone or browser.
-Clients: **web**, **Android**, **BlackBerry 10**, and **LILYGO T-LoRa Pager** firmware (`pager/`).
+Clients: **web**, **Android**, **BlackBerry 10**, **iOS**, and **LILYGO / T-Deck** firmware (`esp32/`).
 
 One Python daemon (`agentremoted`) fronts the host CLIs; clients talk to it
 over a token-authenticated HTTP API.
@@ -13,9 +13,14 @@ starting a session.
 | Client | Location |
 |--------|----------|
 | BlackBerry 10 (Cascades) | `blackberry/` → `AgentRemote.bar` |
-| Web (single HTML file) | `web/` |
+| Web (single HTML file) | `web/` — or the **hosted client** below |
 | Android | `android/` |
 | iOS (iPhone / iPad) | `ios/` → SwiftUI app + XcodeGen |
+
+**Hosted web client** (no build step): open
+[https://nice-dune-0415af003.7.azurestaticapps.net/](https://nice-dune-0415af003.7.azurestaticapps.net/),
+then **Add a daemon** with your host Base URL and token. The page only talks
+to the daemons you configure — it does not host `agentremoted` for you.
 
 **Releases** (APK, BAR, single-file web HTML, and a packaged daemon tarball) are
 published on GitHub when the daemon version changes — see
@@ -134,16 +139,45 @@ More detail: [daemon/README.md](daemon/README.md).
 
 | Field | Example |
 |-------|---------|
-| Base URL | `http://127.0.0.1:8473` |
+| Base URL | `http://127.0.0.1:8473` (LAN) or your Cloudflare Tunnel URL |
 | Token | contents of `~/.agentremoted/token` on that host |
 
-- **Web:** `cd web && python3 build.py && ./serve.sh`  
+- **Web (easiest):** open the hosted client at
+  [https://nice-dune-0415af003.7.azurestaticapps.net/](https://nice-dune-0415af003.7.azurestaticapps.net/)
+  and add your daemon URL + token  
+- **Web (local):** `cd web && python3 build.py && ./serve.sh`  
 - **BlackBerry:** `cd blackberry && ./build-bar-docker.sh`, sideload, Settings → profile  
 - **Android:** see [`android/`](android/)
 
 `GET /api/ping` reports `multi`, `providers`, and capability flags.
 
 See also [deploy/CONNECTION.txt](deploy/CONNECTION.txt).
+
+### Reach it from your phone (recommended: Cloudflare Tunnel)
+
+Do **not** open the daemon port on the public internet. Prefer a tunnel so
+clients get HTTPS without firewall changes or a VPS.
+
+[cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/)
+quick tunnel (no Cloudflare account required for a temporary URL):
+
+```bash
+# match the port in config.json (default 8473)
+cloudflared tunnel --url http://localhost:8473
+```
+
+If you run the daemon on another port (e.g. `8080`):
+
+```bash
+cloudflared tunnel --url http://localhost:8080
+```
+
+`cloudflared` prints a URL like `https://….trycloudflare.com` — paste that as
+the client **Base URL**, and keep using the same host token. Stop the tunnel
+when you are done; the hostname expires with the process.
+
+For a stable hostname, create a named Cloudflare Tunnel and route a domain
+you control. The token still authenticates every request.
 
 ## Layout
 
@@ -169,13 +203,16 @@ Needs Docker with a BB NDK image (`delaya73/bbndk` or `accupara/bbndk`). On
 Apple Silicon, if you see `exec format error`, turn **off** “Use Rosetta for
 x86/amd64 emulation” in Docker Desktop.
 
-## Networking (BB10)
+## Networking
 
-- Prefer **plain HTTP + shared token** to the phone: BB10’s TLS stack is old.
-  On the public internet, put a reverse proxy in front, or set `tls_cert` /
-  `tls_key` in config for an HTTPS origin.
-- Live status: **`/sse/status`** (works through HTTPS proxies) and
-  **`/ws/status`** (plain `http://` base URLs).
+- **Phone over the internet:** Cloudflare Tunnel (above) is the recommended
+  path — free HTTPS, no open ports, works with Android / web / BB10.
+- **BB10:** prefer plain HTTP + shared token on LAN (old TLS stack). Through
+  Cloudflare you get HTTPS termination at the edge, which BB10 clients handle
+  better than a self-signed daemon cert. You can also put any reverse proxy in
+  front, or set `tls_cert` / `tls_key` in config for an HTTPS origin.
+- Live status: **`/sse/status`** (works through HTTPS proxies / tunnels) and
+  **`/ws/status`** (plain `http://` base URLs; often blocked behind tunnels).
 
 ## App features (summary)
 

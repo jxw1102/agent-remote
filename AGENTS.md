@@ -14,7 +14,8 @@ Whenever you change a **client-side** feature, behaviour, or API contract, consi
 | Web | `web/` |
 | Android | `android/` (Compose) |
 | BlackBerry 10 | `blackberry/` (Cascades / QML + C++) |
-| LILYGO T-LoRa Pager | `pager/` (ESP32-S3 firmware) |
+| iOS | `ios/` (SwiftUI) |
+| LILYGO T-LoRa Pager / T-Deck | `esp32/` (ESP32-S3 firmware) |
 
 Examples of work that almost always spans clients:
 
