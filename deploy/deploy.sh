@@ -5,7 +5,7 @@
 #   KEY=~/.ssh/id_ed25519 PORT=8473 ./deploy.sh user@host
 #   PROVIDERS=grok,codex PORT=2096 ./deploy.sh user@host
 #
-# Installs to /opt/daemon, keeps any existing agentremoted token,
+# Installs to /opt/bb10-remote/daemon, keeps any existing agentremoted token,
 # reuses TLS certs under ~/.agentremoted/tls when present, restarts the unit.
 set -euo pipefail
 
@@ -81,7 +81,7 @@ print(json.dumps(
 ))
 PY
 
-cp /opt/deploy/agentremoted.service /etc/systemd/system/
+cp /opt/bb10-remote/deploy/agentremoted.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable agentremoted
 systemctl restart agentremoted

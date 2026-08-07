@@ -7,7 +7,7 @@ folder is the shared config example + remote/systemd pieces.
 | File | Role |
 |------|------|
 | [`config.example.json`](config.example.json) | Multi-provider template → copy to `~/.agentremoted/config.json` (or `/root/.agentremoted/…`) |
-| [`agentremoted.service`](agentremoted.service) | systemd unit (`WorkingDirectory=/opt/daemon`) |
+| [`agentremoted.service`](agentremoted.service) | systemd unit (`WorkingDirectory=/opt/bb10-remote/daemon`) |
 | [`deploy.sh`](deploy.sh) | One-shot: rsync tree over SSH, write multi config, enable unit |
 | [`CONNECTION.txt`](CONNECTION.txt) | URL / token / curl cheatsheet for clients |
 
