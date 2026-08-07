@@ -442,6 +442,50 @@ QString ApiClient::providerAccent(const QString &provider) const
                : QString::fromLatin1(BRAND_ACCENT_COLOR);
 }
 
+// File-local helper: BB10 GCC 4.6 has no C++11 lambdas. Tags usage buckets
+// with harness + account for multi-host merge (see uusage handler).
+static void appendUsageBuckets(QVariantList *tagged,
+                               const QVariantList &buckets,
+                               const QString &provider,
+                               const QString &account,
+                               const QString &accountId,
+                               const QString &defaultProvider,
+                               const QString &defaultAccent,
+                               const QString &profileName,
+                               const ApiClient *client)
+{
+    if (!tagged || !client)
+        return;
+    const QString harness = provider.isEmpty() ? defaultProvider : provider;
+    const QString accent = harness.isEmpty()
+            ? defaultAccent : client->providerAccent(harness);
+    const QString harnessLabel = harness.isEmpty()
+            ? QString()
+            : (harness.left(1).toUpper() + harness.mid(1));
+    const QString prefix = harnessLabel.isEmpty()
+            ? QString()
+            : (harnessLabel + QLatin1String(" · "));
+    for (int i = 0; i < buckets.size(); ++i) {
+        QVariantMap b = buckets.at(i).toMap();
+        QString title = b.value("title").toString();
+        if (!prefix.isEmpty() && title.startsWith(prefix))
+            title = title.mid(prefix.size());
+        b["title"] = title;
+        b["provider"] = harness;
+        b["account"] = account;
+        b["account_id"] = accountId.isEmpty() ? account : accountId;
+        QString source = harnessLabel.isEmpty() ? profileName : harnessLabel;
+        if (!account.isEmpty())
+            source += QLatin1String(" · ") + account;
+        else if (!profileName.isEmpty() && !harnessLabel.isEmpty())
+            source = profileName + QLatin1String(" · ") + harnessLabel;
+        b["source"] = source;
+        b["accent"] = accent;
+        b["host"] = profileName;
+        tagged->append(b);
+    }
+}
+
 QStringList ApiClient::profileHarnesses() const
 {
     if (m_activeProfile < 0 || m_activeProfile >= m_profiles.size())
@@ -3083,43 +3127,8 @@ void ApiClient::onFinished(QNetworkReply *reply)
             const QVariantMap root = data.toMap();
             const QString defaultAccent = providerAccent(defaultProvider);
             QVariantList tagged;
-            auto appendBuckets = [&](const QVariantList &buckets,
-                                     const QString &provider,
-                                     const QString &account,
-                                     const QString &accountId) {
-                const QString harness = provider.isEmpty()
-                        ? defaultProvider : provider;
-                const QString accent = harness.isEmpty()
-                        ? defaultAccent : providerAccent(harness);
-                const QString harnessLabel = harness.isEmpty()
-                        ? QString()
-                        : (harness.left(1).toUpper() + harness.mid(1));
-                // Strip multi-host "Claude · " prefix from flat bucket titles.
-                const QString prefix = harnessLabel.isEmpty()
-                        ? QString()
-                        : (harnessLabel + QLatin1String(" · "));
-                for (int i = 0; i < buckets.size(); ++i) {
-                    QVariantMap b = buckets.at(i).toMap();
-                    QString title = b.value("title").toString();
-                    if (!prefix.isEmpty() && title.startsWith(prefix))
-                        title = title.mid(prefix.size());
-                    b["title"] = title;
-                    b["provider"] = harness;
-                    b["account"] = account;
-                    b["account_id"] = accountId.isEmpty() ? account : accountId;
-                    // source: "Claude · you@x.com" or host name when unknown.
-                    QString source = harnessLabel.isEmpty()
-                            ? profileName : harnessLabel;
-                    if (!account.isEmpty())
-                        source += QLatin1String(" · ") + account;
-                    else if (!profileName.isEmpty() && !harnessLabel.isEmpty())
-                        source = profileName + QLatin1String(" · ") + harnessLabel;
-                    b["source"] = source;
-                    b["accent"] = accent;
-                    b["host"] = profileName;
-                    tagged.append(b);
-                }
-            };
+            // BB10 NDK is GCC 4.6 / pre-C++11 — no lambdas, no QStringLiteral.
+            // Tag each bucket with harness + account so multi-host merge works.
             const QVariantList sections = root.value("sections").toList();
             if (root.value("multi").toBool() && !sections.isEmpty()) {
                 for (int s = 0; s < sections.size(); ++s) {
@@ -3133,22 +3142,28 @@ void ApiClient::onFinished(QNetworkReply *reply)
                         m_usageErrors.append(
                             QString("%1 · %2: %3")
                                 .arg(profileName,
-                                     prov.isEmpty() ? QStringLiteral("agent") : prov,
+                                     prov.isEmpty() ? QLatin1String("agent") : prov,
                                      err));
                         continue;
                     }
-                    appendBuckets(sec.value("buckets").toList(),
-                                  sec.value("provider").toString(),
-                                  sec.value("account").toString(),
-                                  sec.value("account_id").toString());
+                    appendUsageBuckets(&tagged,
+                                       sec.value("buckets").toList(),
+                                       sec.value("provider").toString(),
+                                       sec.value("account").toString(),
+                                       sec.value("account_id").toString(),
+                                       defaultProvider, defaultAccent,
+                                       profileName, this);
                 }
             } else if (root.value("ok").toBool()) {
-                appendBuckets(root.value("buckets").toList(),
-                              root.value("provider").toString().isEmpty()
-                                  ? defaultProvider
-                                  : root.value("provider").toString(),
-                              root.value("account").toString(),
-                              root.value("account_id").toString());
+                appendUsageBuckets(&tagged,
+                                   root.value("buckets").toList(),
+                                   root.value("provider").toString().isEmpty()
+                                       ? defaultProvider
+                                       : root.value("provider").toString(),
+                                   root.value("account").toString(),
+                                   root.value("account_id").toString(),
+                                   defaultProvider, defaultAccent,
+                                   profileName, this);
             } else {
                 QString err = root.value("error").toString();
                 if (err.isEmpty())

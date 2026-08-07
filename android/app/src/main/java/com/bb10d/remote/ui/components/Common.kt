@@ -27,16 +27,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.PathFillType
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -45,10 +40,11 @@ import com.bb10d.remote.ui.theme.Accent
 import com.bb10d.remote.ui.theme.palette
 
 /**
- * Host profile name (text) + harness brand mark (logo).
+ * Which agent answered, at a glance.
  *
- * In a merged list the host name answers "which machine"; the logo answers
- * "which CLI". Compact mode is logo-only (profile lists of harnesses).
+ * Coloured dot = harness; text = host profile name (or harness label when
+ * compact). No vector brand logos — those broke release builds (PathBuilder
+ * has curveTo, not cubicTo) and match the web client's text chips.
  */
 @Composable
 fun ProviderChip(
@@ -58,150 +54,28 @@ fun ProviderChip(
     compact: Boolean = false,
 ) {
     val accent = Accent.forProvider(provider)
-    val logo = remember(provider) { ProviderLogos.forProvider(provider) }
     Row(
-        modifier = modifier,
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(accent.tint.copy(alpha = 0.14f))
+            .border(1.dp, accent.tint.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 6.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (!compact && profileName.isNotBlank()) {
-            Text(
-                text = profileName,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
         Box(
-            modifier = Modifier
-                .size(if (compact) 20.dp else 22.dp)
-                .clip(RoundedCornerShape(6.dp))
-                .background(accent.tint.copy(alpha = 0.16f))
-                .border(1.dp, accent.tint.copy(alpha = 0.4f), RoundedCornerShape(6.dp)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = logo,
-                contentDescription = accent.label,
-                tint = accent.tint,
-                modifier = Modifier.size(if (compact) 12.dp else 14.dp),
-            )
-        }
-    }
-}
-
-/** Simplified brand silhouettes for Claude / Grok / Codex (UI chrome only). */
-object ProviderLogos {
-    fun forProvider(provider: String?): ImageVector = when (provider?.lowercase()) {
-        "claude" -> Claude
-        "grok" -> Grok
-        "codex" -> Codex
-        else -> Neutral
-    }
-
-    val Claude: ImageVector by lazy {
-        ImageVector.Builder(
-            name = "provider.claude",
-            defaultWidth = 24.dp,
-            defaultHeight = 24.dp,
-            viewportWidth = 24f,
-            viewportHeight = 24f,
-        ).apply {
-            // Starburst / asterisk.
-            path(fill = SolidColor(Color.Black)) {
-                moveTo(12f, 2.2f)
-                lineTo(13.55f, 8.25f)
-                lineTo(19.5f, 8.05f)
-                lineTo(14.6f, 11.55f)
-                lineTo(16.55f, 17.35f)
-                lineTo(12f, 14.2f)
-                lineTo(7.45f, 17.35f)
-                lineTo(9.4f, 11.55f)
-                lineTo(4.5f, 8.05f)
-                lineTo(10.45f, 8.25f)
-                close()
-            }
-        }.build()
-    }
-
-    val Grok: ImageVector by lazy {
-        ImageVector.Builder(
-            name = "provider.grok",
-            defaultWidth = 24.dp,
-            defaultHeight = 24.dp,
-            viewportWidth = 24f,
-            viewportHeight = 24f,
-        ).apply {
-            // Geometric X.
-            path(fill = SolidColor(Color.Black)) {
-                moveTo(4.5f, 4.5f)
-                horizontalLineTo(8.7f)
-                lineTo(12f, 9.2f)
-                lineTo(15.3f, 4.5f)
-                horizontalLineTo(19.5f)
-                lineTo(13.8f, 12f)
-                lineTo(19.9f, 19.5f)
-                horizontalLineTo(15.7f)
-                lineTo(12f, 14.8f)
-                lineTo(8.3f, 19.5f)
-                horizontalLineTo(4.1f)
-                lineTo(10.2f, 12f)
-                close()
-            }
-        }.build()
-    }
-
-    val Codex: ImageVector by lazy {
-        ImageVector.Builder(
-            name = "provider.codex",
-            defaultWidth = 24.dp,
-            defaultHeight = 24.dp,
-            viewportWidth = 24f,
-            viewportHeight = 24f,
-        ).apply {
-            // Six-petal blossom + center.
-            path(
-                fill = SolidColor(Color.Black),
-                pathFillType = PathFillType.EvenOdd,
-            ) {
-                moveTo(12f, 2.5f)
-                cubicTo(13.4f, 4.1f, 13.7f, 6f, 13.2f, 7.7f)
-                cubicTo(14.9f, 7.2f, 16.8f, 7.5f, 18.4f, 8.9f)
-                cubicTo(16.8f, 10.3f, 14.9f, 10.6f, 13.2f, 10.1f)
-                cubicTo(13.7f, 11.8f, 13.4f, 13.7f, 12f, 15.3f)
-                cubicTo(10.6f, 13.7f, 10.3f, 11.8f, 10.8f, 10.1f)
-                cubicTo(9.1f, 10.6f, 7.2f, 10.3f, 5.6f, 8.9f)
-                cubicTo(7.2f, 7.5f, 9.1f, 7.2f, 10.8f, 7.7f)
-                cubicTo(10.3f, 6f, 10.6f, 4.1f, 12f, 2.5f)
-                close()
-                moveTo(12f, 9.5f)
-                cubicTo(13.38f, 9.5f, 14.5f, 10.62f, 14.5f, 12f)
-                cubicTo(14.5f, 13.38f, 13.38f, 14.5f, 12f, 14.5f)
-                cubicTo(10.62f, 14.5f, 9.5f, 13.38f, 9.5f, 12f)
-                cubicTo(9.5f, 10.62f, 10.62f, 9.5f, 12f, 9.5f)
-                close()
-            }
-        }.build()
-    }
-
-    val Neutral: ImageVector by lazy {
-        ImageVector.Builder(
-            name = "provider.neutral",
-            defaultWidth = 24.dp,
-            defaultHeight = 24.dp,
-            viewportWidth = 24f,
-            viewportHeight = 24f,
-        ).apply {
-            path(fill = SolidColor(Color.Black)) {
-                moveTo(12f, 5f)
-                cubicTo(15.87f, 5f, 19f, 8.13f, 19f, 12f)
-                cubicTo(19f, 15.87f, 15.87f, 19f, 12f, 19f)
-                cubicTo(8.13f, 19f, 5f, 15.87f, 5f, 12f)
-                cubicTo(5f, 8.13f, 8.13f, 5f, 12f, 5f)
-                close()
-            }
-        }.build()
+            Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(accent.tint),
+        )
+        Spacer(Modifier.width(5.dp))
+        Text(
+            text = if (compact) accent.label else profileName.ifBlank { accent.label },
+            style = MaterialTheme.typography.labelSmall,
+            color = accent.tint,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
