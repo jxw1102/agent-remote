@@ -88,6 +88,13 @@ _SUBMIT_RETRIES = 2
 _CRASH_STALL_S = 20.0     # dead-looking pane this long = crashed
 _LOST_STOP_S = 180.0      # healthy-idle chat turn with no Stop = hook lost
 
+# Typed-ahead messages (type_text) don't map 1:1 onto Stop hooks: claude pulls
+# queued messages into the turn that is already running, so N messages can end
+# in fewer than N Stops. After a Stop, the pane — not the count — decides
+# whether another turn is really coming.
+_STOP_SETTLE_S = 2.0      # let the ended turn's spinner clear first
+_STOP_CONFIRM_S = 8.0     # window for a queued message to take the pane
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 # tmux session name prefix: `tmux ls` should read as "claude" at a glance
@@ -330,6 +337,30 @@ class InteractiveManager:
     def _pane_busy(self, name: str) -> bool:
         """A model turn is in flight (the TUI's spinner line offers Esc)."""
         return "esc to interrupt" in self._pane_text(name).lower()
+
+    def _pane_queued(self, name: str) -> bool:
+        """Typed-ahead messages are still waiting in the TUI's own queue."""
+        return "queued message" in self._pane_text(name).lower()
+
+    def _next_turn_starts(self, job, tui) -> bool:
+        """After a Stop with typed-ahead debt: does another turn really begin?
+
+        Poll the pane past a short settle (the ended turn's spinner can
+        linger a moment) and report busy = a queued message took the pane.
+        An idle prompt through the whole window means the finished turn
+        already consumed the queue — no further Stop is coming."""
+        deadline = time.time() + _STOP_CONFIRM_S
+        settle_end = time.time() + _STOP_SETTLE_S
+        while time.time() < deadline:
+            with job.lock:
+                if job.status == "stopped":
+                    return False
+            if time.time() >= settle_end and (
+                    tui.compacting or tui.hook_ask
+                    or self._pane_busy(tui.name)):
+                return True
+            time.sleep(_POLL_S)
+        return False
 
     def _pane_healthy(self, name: str) -> bool:
         """True while the TUI's chrome is on screen. Checks only the bottom
@@ -915,10 +946,14 @@ class InteractiveManager:
         while True:
             if tui.stop_event.wait(_POLL_S):
                 # Turn finished. A message typed into the pane mid-turn
-                # (type_text) is the TUI's own queue: it starts running now,
-                # so keep this job on watch instead of ending here.
-                if tui.typed_ahead > 0:
-                    tui.typed_ahead -= 1
+                # (type_text) sits in the TUI's own queue and MAY start the
+                # next turn now — but claude also pulls queued messages into
+                # the turn that just ended, so several messages can share
+                # one Stop. The count is a hint, not a contract: keep the
+                # job on watch only if the pane shows another turn starting.
+                if ((tui.typed_ahead > 0 or self._pane_queued(tui.name))
+                        and self._next_turn_starts(job, tui)):
+                    tui.typed_ahead = max(0, tui.typed_ahead - 1)
                     tui.stop_event.clear()
                     state["local_done"] = 0.0
                     submit_t = life_t = time.time()
@@ -930,6 +965,7 @@ class InteractiveManager:
                         deadline = time.time() + timeout_s
                     job.set_phase("thinking", "")
                     continue
+                tui.typed_ahead = 0
                 break
             offset, transcript = self._drain(job, tui, transcript, offset, state)
             # TaskCreate writes land under ~/.claude/tasks/ slightly after the

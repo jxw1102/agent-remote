@@ -749,10 +749,17 @@ class CodexStore:
         return [self._summary(r) for r in rows[:limit]]
 
     def search_sessions(self, query, project_id=None, limit=25, user_only=True):
+        return list(self.iter_search_sessions(
+            query, project_id=project_id, limit=limit, user_only=user_only))
+
+    def iter_search_sessions(self, query, project_id=None, limit=25, user_only=True):
+        """Yield hits: sqlite meta fields first, then rollout body scans."""
         if not (query or "").strip():
-            return []
+            return
         q = query.strip()
-        out = []
+        limit = max(1, min(int(limit or 25), 100))
+        yielded = 0
+        need_body = []
         for row in self._rows(user_only=user_only):
             if project_id and _munge_cwd(row["cwd"] or "") != project_id:
                 continue
@@ -769,17 +776,25 @@ class CodexStore:
                         snippet = search_util.make_snippet(field, q)
                         break
                 snippet = snippet or search_util.make_snippet(hay, q)
+            if snippet:
+                s = self._summary(row)
+                s["snippet"] = snippet
+                yield s
+                yielded += 1
+                if yielded >= limit:
+                    return
             else:
-                # Fall back to scanning the rollout file (cheap head scan).
-                snippet = self._search_rollout(row["rollout_path"] or "", q)
+                need_body.append(row)
+        for row in need_body:
+            if yielded >= limit:
+                return
+            snippet = self._search_rollout(row["rollout_path"] or "", q)
             if not snippet:
                 continue
             s = self._summary(row)
             s["snippet"] = snippet
-            out.append(s)
-            if len(out) >= max(1, min(int(limit or 25), 200)):
-                break
-        return out
+            yield s
+            yielded += 1
 
     def get_session(self, session_id: str):
         con = self._connect()

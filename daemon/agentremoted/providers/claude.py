@@ -1106,6 +1106,102 @@ def _preview(text: str, max_len: int = _MAX_PREVIEW) -> str:
     return text
 
 
+# Phone/web composers inject attachments as:
+#   [attached: /Users/…/.agentremoted/uploads/….png]
+# Using that path (or its basename) as the session *title* makes the left
+# list repeat the same filename the transcript already shows as a chip.
+_ATTACHED_LINE_RE = re.compile(r"^\[attached:\s*([^\]]+)\]\s*$", re.I)
+_ATTACHED_ANY_RE = re.compile(r"\[attached:\s*([^\]]+)\]", re.I)
+_FILENAME_TITLE_RE = re.compile(
+    r"(?i)^(?:screenshot[\s_\-]*.*)?\S+\.(?:png|jpe?g|gif|webp|heic|bmp|pdf|mov|mp4|m4a|wav|zip)$"
+)
+
+
+def _is_attachment_only(text: str) -> bool:
+    """True when the human message is only one or more [attached: …] lines."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    return all(_ATTACHED_LINE_RE.match(ln) for ln in lines)
+
+
+def _strip_attachment_lines(text: str) -> str:
+    """Remove [attached: …] lines; keep the rest of the prompt."""
+    if not text or "[attached:" not in text.lower():
+        return (text or "").strip()
+    kept = []
+    for ln in text.splitlines():
+        if _ATTACHED_LINE_RE.match(ln.strip()):
+            continue
+        kept.append(ln)
+    return "\n".join(kept).strip()
+
+
+def _attachment_label(text: str) -> str:
+    """Generic list label (Image / PDF / File) — never the raw filename."""
+    name = ""
+    m = _ATTACHED_ANY_RE.search(text or "")
+    if m:
+        name = os.path.basename(m.group(1).strip().strip("\"'"))
+    elif text:
+        name = os.path.basename(text.strip())
+    ext = name.rsplit(".", 1)[-1].lower() if name and "." in name else ""
+    if ext in ("png", "jpg", "jpeg", "gif", "webp", "heic", "bmp"):
+        return "Image"
+    if ext == "pdf":
+        return "PDF"
+    if ext in ("mp4", "mov", "webm"):
+        return "Video"
+    if ext in ("mp3", "wav", "m4a", "aac"):
+        return "Audio"
+    return "Attachment"
+
+
+def _looks_like_filename_title(title: str) -> bool:
+    t = " ".join((title or "").split())
+    if not t:
+        return False
+    if _FILENAME_TITLE_RE.match(t):
+        return True
+    # Common phone/desktop screenshot basenames without needing a full match.
+    low = t.lower()
+    return low.startswith("screenshot") and any(
+        low.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".heic", ".webp")
+    )
+
+
+def _list_title_source(first_user: str, last_text: str, last_role: str,
+                       cwd: str, fallback: str) -> str:
+    """Pick list-row title material that is not a bare attachment filename."""
+    for candidate in (first_user, last_text if last_role == "user" else ""):
+        prose = _strip_attachment_lines(candidate)
+        if prose:
+            return prose
+    # Attachment-only (or title would be the filename): generic label + folder.
+    attach_src = first_user if _is_attachment_only(first_user) else (
+        last_text if _is_attachment_only(last_text) else "")
+    if attach_src or _looks_like_filename_title(fallback):
+        folder = (cwd or "").rstrip("/").rsplit("/", 1)[-1] if cwd else ""
+        label = _attachment_label(attach_src or fallback or "")
+        return ("%s · %s" % (label, folder)) if folder else label
+    return fallback or ""
+
+
+def _list_preview_text(last_text: str, title: str) -> str:
+    """last_text for the list row — drop if it only repeats the title/filename."""
+    if not last_text:
+        return ""
+    if _is_attachment_only(last_text):
+        return ""  # chip already shows the file in the transcript
+    prose = _strip_attachment_lines(last_text)
+    if not prose:
+        return ""
+    # Same string as title (after collapse) → no second line.
+    if " ".join(prose.split()).lower() == " ".join((title or "").split()).lower():
+        return ""
+    return prose
+
+
 def _read_head_lines(path: Path, max_bytes: int):
     with open(path, "rb") as f:
         chunk = f.read(max_bytes)
@@ -1304,54 +1400,82 @@ class ClaudeStore:
 
     def search_sessions(self, query: str, project_id: str = None,
                         limit: int = 25, user_only: bool = True) -> list:
-        """Full-text search over session titles + human-visible message text.
+        """Full-text search; batch API. Prefer iter_search_sessions for streaming."""
+        results = list(self.iter_search_sessions(
+            query, project_id=project_id, limit=limit, user_only=user_only))
+        results.sort(key=search_util.rank_key, reverse=True)
+        return results
 
-        Scans the most recent MAX_SCAN sessions (optionally filtered by
-        project). Returns session summaries plus a `snippet` of the first
-        match; the phone highlights the query client-side.
+    def iter_search_sessions(self, query: str, project_id: str = None,
+                             limit: int = 25, user_only: bool = True):
+        """Yield hits as they are found (newest sessions first).
+
+        Two passes so the UI can paint quickly:
+          1) title / last_text / cwd only (cheap)
+          2) head+tail body scan for the rest
         """
         q = search_util.normalize_query(query)
         if not q:
-            return []
+            return
         files = []
         if not self.projects_dir.is_dir():
-            return []
+            return
         if project_id:
             proj = self._project_dir(project_id)
             if proj is None:
-                return []
+                return
             files = list(proj.glob("*.jsonl"))
         else:
             for entry in self.projects_dir.iterdir():
                 if entry.is_dir():
                     files.extend(entry.glob("*.jsonl"))
-        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        try:
+            files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        except OSError:
+            pass
 
-        results = []
+        limit = max(1, min(int(limit or 25), 100))
+        yielded = 0
+        need_body = []  # (path, summary) after meta miss
+
         for path in files[:search_util.MAX_SCAN]:
             if user_only and not self._is_user_session(path):
                 continue
-            summary = self._session_summary(path)
+            summary = self._session_summary(path, light=True)
             if not summary:
                 continue
-            hit = self._match_session(path, summary, q)
+            hit = self._match_meta(summary, q)
+            if hit is not None:
+                row = dict(summary)
+                row["snippet"] = hit
+                yield row
+                yielded += 1
+                if yielded >= limit:
+                    return
+            else:
+                need_body.append((path, summary))
+
+        for path, summary in need_body:
+            if yielded >= limit:
+                return
+            hit = self._match_body(path, q)
             if hit is None:
                 continue
             row = dict(summary)
             row["snippet"] = hit
-            results.append(row)
-            if len(results) >= limit:
-                break
-        results.sort(key=search_util.rank_key, reverse=True)
-        return results
+            yield row
+            yielded += 1
 
     def _match_session(self, path: Path, summary: dict, query: str):
-        """Return a snippet for the first hit in this session, or None.
+        """Return a snippet for the first hit, or None (meta then body)."""
+        hit = self._match_meta(summary, query)
+        if hit is not None:
+            return hit
+        return self._match_body(path, query)
 
-        Cheap fields (title / last_text / cwd) first; only open the full
-        transcript when those miss. Line-level `query in line` reject skips
-        JSON parse for the vast majority of lines.
-        """
+    @staticmethod
+    def _match_meta(summary: dict, query: str):
+        """Title / last_text / cwd only — no file body I/O."""
         title = summary.get("title") or ""
         if search_util.contains_ci(title, query):
             return search_util.make_snippet(title, query)
@@ -1361,22 +1485,43 @@ class ClaudeStore:
         cwd = summary.get("cwd") or ""
         if search_util.contains_ci(cwd, query):
             return search_util.make_snippet(cwd, query)
+        return None
 
-        q_lower = query.casefold()
+    def _match_body(self, path: Path, query: str):
+        """Head+tail transcript scan. Line reject skips JSON parse for most lines."""
+        q_folded = query.lower() if query.isascii() else query.casefold()
+        ascii_q = query.isascii()
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if q_lower not in line.casefold():
-                        continue
-                    msg = self._parse_line(line)
-                    if not msg:
-                        continue
-                    text = msg.get("text") or ""
-                    if search_util.contains_ci(text, query):
-                        return search_util.make_snippet(text, query)
+            for line in self._search_body_lines(path):
+                if not search_util.line_may_match(line, q_folded, ascii_needle=ascii_q):
+                    continue
+                msg = self._parse_line(line)
+                if not msg:
+                    continue
+                text = msg.get("text") or ""
+                if search_util.contains_ci(text, query):
+                    return search_util.make_snippet(text, query)
         except OSError:
             return None
         return None
+
+    @staticmethod
+    def _search_body_lines(path: Path):
+        """Yield transcript lines for body search (full small files; head+tail large)."""
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+        head_n = search_util.SEARCH_HEAD_BYTES
+        tail_n = search_util.SEARCH_TAIL_BYTES
+        if size <= head_n + tail_n:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                yield from f
+            return
+        for line in _read_head_lines(path, head_n):
+            yield line
+        for line in _read_tail_lines(path, tail_n):
+            yield line
 
     def find_session_file(self, session_id: str) -> Path:
         """Locate a session transcript by uuid across all projects."""
@@ -1476,13 +1621,20 @@ class ClaudeStore:
                 return obj["cwd"]
         return ""
 
-    def _session_summary(self, path: Path) -> dict:
+    def _session_summary(self, path: Path, *, light: bool = False) -> dict:
+        """Build a session list row.
+
+        ``light=True`` (search path): skip compaction scan and do not queue
+        Haiku title generation — use cached titles only. Cuts search latency
+        and avoids kicking off dozens of title jobs per keystroke.
+        """
         head = _read_head_lines(path, _HEAD_BYTES)
         tail = _read_tail_lines(path, _TAIL_BYTES)
 
         summary_text = ""
         ai_title = ""
         first_user_text = ""
+        first_attach_only = ""
         cwd = ""
         git_branch = ""
         started = ""
@@ -1500,8 +1652,22 @@ class ClaudeStore:
                 git_branch = obj["gitBranch"]
             if not started and obj.get("timestamp"):
                 started = obj["timestamp"]
-            if obj.get("type") == "user" and not first_user_text:
-                first_user_text = _human_user_text(obj)
+            if obj.get("type") == "user":
+                t = _human_user_text(obj)
+                if not t:
+                    continue
+                # Prefer a real prompt over a lone [attached: …] for titles.
+                if not first_user_text:
+                    if _is_attachment_only(t):
+                        if not first_attach_only:
+                            first_attach_only = t
+                    else:
+                        first_user_text = t
+                elif first_attach_only and not _is_attachment_only(t):
+                    # Upgrade: later user message has prose.
+                    first_user_text = t
+        if not first_user_text and first_attach_only:
+            first_user_text = first_attach_only
 
         last_ts = ""
         last_role = ""
@@ -1527,7 +1693,11 @@ class ClaudeStore:
                     text = _human_user_text(obj)
                 else:
                     text = _text_of(obj.get("message"))
-                if text:
+                # Prefer real prose over a lone [attached: …] for list preview.
+                if text and (obj["type"] == "assistant" or not _is_attachment_only(text)):
+                    last_role = obj["type"]
+                    last_text = text
+                elif text and not last_text:
                     last_role = obj["type"]
                     last_text = text
             if last_ts and last_text and tail_title and model:
@@ -1538,20 +1708,46 @@ class ClaudeStore:
         # re-summarizes from each compaction's summary blob. Until it is
         # generated, fall back to Claude Code's own title / first line so the
         # row is never blank.
-        base_title = _preview(tail_title or ai_title or summary_text
-                              or first_user_text, _MAX_TITLE) or path.stem
+        # Never use a bare attachment filename as the list title — the
+        # transcript already shows that chip (user: "do not repeat the same").
+        prose_fallback = _list_title_source(
+            first_user_text, last_text, last_role, cwd,
+            tail_title or ai_title or summary_text or first_user_text or path.stem)
+        base_title = _preview(prose_fallback, _MAX_TITLE) or path.stem
         title = base_title
-        compactions, first, last_summary = self._scan_session(path)
-        if not first:
-            first = first_user_text or last_text
-        if first or last_summary:
-            sig, src = _title_source(compactions, first, last_summary)
-            cached = self._titles.get(path.stem, sig)
-            if cached:
-                title = cached
-            else:
-                self._titles.request(path.stem, sig, src)
+        if light:
+            # Any cached title for this id — never queue Haiku from search.
+            with self._titles._lock:
+                entry = self._titles._map.get(path.stem)
+                if entry and entry.get("title"):
+                    cached_title = entry["title"]
+                    # Ignore cached titles that are just the attachment name.
+                    if not _looks_like_filename_title(cached_title):
+                        title = cached_title
+        else:
+            compactions, first, last_summary = self._scan_session(path)
+            # Title the prose part of the first message, not [attached: …].
+            first_for_title = _strip_attachment_lines(first_user_text) or first_user_text
+            if not first:
+                first = first_for_title or _strip_attachment_lines(last_text) or last_text
+            if first and _is_attachment_only(first):
+                first = prose_fallback
+            if first or last_summary:
+                sig, src = _title_source(compactions, first, last_summary)
+                # Don't send attachment-only blobs to Haiku as the title source.
+                if src and _is_attachment_only(src):
+                    src = prose_fallback
+                cached = self._titles.get(path.stem, sig)
+                if cached and not _looks_like_filename_title(cached):
+                    title = cached
+                elif src and not _is_attachment_only(src):
+                    self._titles.request(path.stem, sig, src)
 
+        try:
+            size_bytes = path.stat().st_size
+        except OSError:
+            size_bytes = 0
+        preview = _list_preview_text(last_text, title)
         return {
             "id": path.stem,
             "project_id": path.parent.name,
@@ -1561,9 +1757,9 @@ class ClaudeStore:
             "started": started,
             "last_active": last_ts,
             "last_role": last_role,
-            "last_text": _preview(last_text),
+            "last_text": _preview(preview) if preview else "",
             "model": model,
-            "size_bytes": path.stat().st_size,
+            "size_bytes": size_bytes,
         }
 
     def _parse_line(self, line: str, obj=None) -> dict:

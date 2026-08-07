@@ -5,11 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/bb10-remote/daemon
+WorkingDirectory=/opt/daemon
 # Config: ~/.agentremoted/config.json  ("providers": [...], port, tls_cert/tls_key, …)
 # Token:  ~/.agentremoted/token
 Environment=AGENTREMOTED_HOME=/root/.agentremoted
-Environment=PYTHONPATH=/opt/bb10-remote/daemon
+Environment=PYTHONPATH=/opt/daemon
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.grok/bin:/root/.local/bin
 Environment=HOME=/root
 ExecStart=/usr/bin/python3 -m agentremoted

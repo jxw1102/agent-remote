@@ -7,7 +7,7 @@ and web: the HTTP API is identical for every provider, and `/api/ping` says
 which harness is answering and what it can do.
 
 **Daemon install (Mac launchd / Linux systemd):** see
-[bb10-remote/README.md](../README.md#quick-start--run-the-daemon)
+[README.md](../README.md#quick-start--run-the-daemon)
 and [daemon/README.md](../daemon/README.md).
 
 ```

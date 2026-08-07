@@ -396,14 +396,18 @@ class GrokStore:
 
     def search_sessions(self, query: str, project_id: str = None,
                         limit: int = 25, user_only: bool = True) -> list:
-        """Full-text search over session titles + message text in updates.jsonl.
+        """Full-text search; batch API. Prefer iter_search_sessions for streaming."""
+        results = list(self.iter_search_sessions(
+            query, project_id=project_id, limit=limit, user_only=user_only))
+        results.sort(key=search_util.rank_key, reverse=True)
+        return results
 
-        Newest sessions first (by summary mtime). Returns session summaries
-        plus a `snippet` of the first match for client-side highlighting.
-        """
+    def iter_search_sessions(self, query: str, project_id: str = None,
+                             limit: int = 25, user_only: bool = True):
+        """Yield hits as found: meta pass first, then body scans."""
         q = search_util.normalize_query(query)
         if not q:
-            return []
+            return
 
         candidates = []
         for sdir in self._iter_session_dirs():
@@ -425,23 +429,42 @@ class GrokStore:
             candidates.append((mtime, sdir, summary, pid))
         candidates.sort(key=lambda t: t[0], reverse=True)
 
-        results = []
+        limit = max(1, min(int(limit or 25), 100))
+        yielded = 0
+        need_body = []
+
         for _, sdir, summary, pid in candidates[:search_util.MAX_SCAN]:
             row = self._session_summary(sdir, summary, pid)
-            hit = self._match_session(sdir, row, q)
+            hit = self._match_meta(row, q)
+            if hit is not None:
+                out = dict(row)
+                out["snippet"] = hit
+                yield out
+                yielded += 1
+                if yielded >= limit:
+                    return
+            else:
+                need_body.append((sdir, row))
+
+        for sdir, row in need_body:
+            if yielded >= limit:
+                return
+            hit = self._match_body(sdir, q)
             if hit is None:
                 continue
             out = dict(row)
             out["snippet"] = hit
-            results.append(out)
-            if len(results) >= limit:
-                break
-        results.sort(key=search_util.rank_key, reverse=True)
-        return results
+            yield out
+            yielded += 1
 
     def _match_session(self, sdir: Path, row: dict, query: str):
-        """Snippet for the first hit, or None. Title/last_text first, then
-        a cheap line-reject scan of updates.jsonl for user/assistant text."""
+        hit = self._match_meta(row, query)
+        if hit is not None:
+            return hit
+        return self._match_body(sdir, query)
+
+    @staticmethod
+    def _match_meta(row: dict, query: str):
         title = row.get("title") or ""
         if search_util.contains_ci(title, query):
             return search_util.make_snippet(title, query)
@@ -451,33 +474,55 @@ class GrokStore:
         cwd = row.get("cwd") or ""
         if search_util.contains_ci(cwd, query):
             return search_util.make_snippet(cwd, query)
+        return None
 
+    def _match_body(self, sdir: Path, query: str):
+        """Head+tail scan of updates.jsonl for user/assistant text."""
         updates = sdir / "updates.jsonl"
         if not updates.is_file():
             return None
-        q_lower = query.casefold()
+        q_folded = query.lower() if query.isascii() else query.casefold()
+        ascii_q = query.isascii()
         role_map = {
             "user_message_chunk": "user",
             "agent_message_chunk": "assistant",
         }
         try:
-            with open(updates, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if q_lower not in line.casefold():
-                        continue
-                    ev = _safe_json(line)
-                    if not ev:
-                        continue
-                    update = (ev.get("params") or {}).get("update") or {}
-                    kind = update.get("sessionUpdate", "")
-                    if kind not in role_map:
-                        continue
-                    # Never match on injected content the user never typed.
-                    text = (_human_text(update.get("content"))
-                            if role_map[kind] == "user"
-                            else _content_text(update.get("content")))
-                    if search_util.contains_ci(text, query):
-                        return search_util.make_snippet(text, query)
+            size = updates.stat().st_size
+            head_n = search_util.SEARCH_HEAD_BYTES
+            tail_n = search_util.SEARCH_TAIL_BYTES
+
+            def _lines():
+                if size <= head_n + tail_n:
+                    with open(updates, "r", encoding="utf-8", errors="replace") as f:
+                        yield from f
+                    return
+                with open(updates, "rb") as f:
+                    head = f.read(head_n).decode("utf-8", errors="replace")
+                    for line in head.splitlines():
+                        yield line
+                    if size > head_n:
+                        f.seek(max(0, size - tail_n))
+                        tail = f.read().decode("utf-8", errors="replace")
+                        parts = tail.splitlines()
+                        for line in parts[1:] if parts else []:
+                            yield line
+
+            for line in _lines():
+                if not search_util.line_may_match(line, q_folded, ascii_needle=ascii_q):
+                    continue
+                ev = _safe_json(line)
+                if not ev:
+                    continue
+                update = (ev.get("params") or {}).get("update") or {}
+                kind = update.get("sessionUpdate", "")
+                if kind not in role_map:
+                    continue
+                text = (_human_text(update.get("content"))
+                        if role_map[kind] == "user"
+                        else _content_text(update.get("content")))
+                if search_util.contains_ci(text, query):
+                    return search_util.make_snippet(text, query)
         except OSError:
             return None
         return None
@@ -577,7 +622,12 @@ class GrokStore:
 
 
 def _first_user_preview(updates_path: Path) -> str:
-    """First user text in the transcript head — grok's title fallback."""
+    """First user text in the transcript head — grok's title fallback.
+
+    Skips pure ``[attached: …]`` lines so the session list does not repeat
+    the attachment filename already shown as a chip in the transcript.
+    """
+    attach_only = ""
     try:
         with open(updates_path, "r", encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f):
@@ -589,10 +639,32 @@ def _first_user_preview(updates_path: Path) -> str:
                 update = (ev.get("params") or {}).get("update") or {}
                 if update.get("sessionUpdate") == "user_message_chunk":
                     text = " ".join(_human_text(update.get("content")).split())
-                    if text:
-                        return text
+                    if not text:
+                        continue
+                    # Same convention as Claude: strip lone attachment markers.
+                    if text.lower().startswith("[attached:") and text.endswith("]"):
+                        if not attach_only:
+                            attach_only = text
+                        continue
+                    return text
     except OSError:
         pass
+    if attach_only:
+        # Generic label — never the raw basename.
+        name = attach_only[10:-1].strip()  # after [attached:
+        if name.startswith(":"):
+            name = name[1:].strip()
+        # [attached: path] already matched; extract path mid-string if needed.
+        import re
+        m = re.search(r"\[attached:\s*([^\]]+)\]", attach_only, re.I)
+        path = (m.group(1).strip() if m else name)
+        base = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        ext = base.rsplit(".", 1)[-1].lower() if "." in base else ""
+        if ext in ("png", "jpg", "jpeg", "gif", "webp", "heic", "bmp"):
+            return "Image"
+        if ext == "pdf":
+            return "PDF"
+        return "Attachment"
     return ""
 
 

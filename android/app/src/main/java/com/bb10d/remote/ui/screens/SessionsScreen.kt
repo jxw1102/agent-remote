@@ -66,6 +66,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bb10d.remote.data.SessionDto
 import com.bb10d.remote.data.SessionRef
 import com.bb10d.remote.data.SessionRow
 import com.bb10d.remote.data.Time
@@ -457,7 +458,8 @@ private fun SessionCard(
                 }
             }
             Text(
-                text = row.session.title.ifBlank { "Untitled session" },
+                // Don't echo attachment filenames — the transcript chip already shows them.
+                text = listTitle(row.session),
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 2,
@@ -506,7 +508,7 @@ private fun SessionCard(
             }
         }
 
-        val preview = if (searching) row.session.snippet else row.session.lastText
+        val preview = listPreview(row.session, searching)
         if (preview.isNotBlank()) {
             Spacer(Modifier.height(6.dp))
             Text(
@@ -519,4 +521,60 @@ private fun SessionCard(
         }
     }
 }
+
+/** Session list title: never a bare attachment filename (chip lives in chat). */
+private fun listTitle(session: SessionDto): String {
+    val t = session.title.trim()
+    if (t.isEmpty()) return "Untitled session"
+    if (looksLikeFilenameTitle(t) || isAttachmentOnly(t)) {
+        val folder = session.cwd.trimEnd('/').substringAfterLast('/')
+        val label = attachmentLabel(t)
+        return if (folder.isNotEmpty()) "$label · $folder" else label
+    }
+    return t
+}
+
+private fun listPreview(session: SessionDto, searching: Boolean): String {
+    val raw = if (searching) session.snippet else session.lastText
+    val text = raw.replace('\n', ' ').trim()
+    if (text.isEmpty() || isAttachmentOnly(text)) return ""
+    val title = listTitle(session)
+    if (text.equals(title, ignoreCase = true)) return ""
+    if (looksLikeFilenameTitle(text) && looksLikeFilenameTitle(title)) return ""
+    return text
+}
+
+private fun isAttachmentOnly(text: String): Boolean {
+    val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+    if (lines.isEmpty()) return false
+    return lines.all { ATTACHED_LINE.matches(it) }
+}
+
+private fun looksLikeFilenameTitle(text: String): Boolean {
+    val t = text.trim()
+    if (t.isEmpty()) return false
+    if (FILENAME_EXT.containsMatchIn(t)) return true
+    val low = t.lowercase()
+    return low.startsWith("screenshot") && FILENAME_EXT.containsMatchIn(low)
+}
+
+private fun attachmentLabel(text: String): String {
+    val fromAttach = ATTACHED_ANY.find(text)?.groupValues?.getOrNull(1)
+    val name = (fromAttach ?: text).substringAfterLast('/').substringAfterLast('\\')
+    val ext = name.substringAfterLast('.', "").lowercase()
+    return when (ext) {
+        "png", "jpg", "jpeg", "gif", "webp", "heic", "bmp" -> "Image"
+        "pdf" -> "PDF"
+        "mp4", "mov", "webm" -> "Video"
+        "mp3", "wav", "m4a", "aac" -> "Audio"
+        else -> "Attachment"
+    }
+}
+
+private val ATTACHED_LINE = Regex("""^\[attached:\s*[^\]]+\]$""", RegexOption.IGNORE_CASE)
+private val ATTACHED_ANY = Regex("""\[attached:\s*([^\]]+)\]""", RegexOption.IGNORE_CASE)
+private val FILENAME_EXT = Regex(
+    """\.(png|jpe?g|gif|webp|heic|bmp|pdf|mov|mp4|m4a|wav|zip)$""",
+    RegexOption.IGNORE_CASE,
+)
 

@@ -23,6 +23,7 @@ Endpoints (all under /api, all JSON):
                                                   include agent-spawned and
                                                   contentless sessions too)
   GET  /api/sessions/search?q=<text>&project=&limit=&all=1  full-text search
+  GET  /api/sessions/search?…&stream=1                      NDJSON progressive hits
   GET  /api/sessions/<id>                         one session's summary
   GET  /api/sessions/<id>/messages?offset=&limit= transcript window (default: tail)
   POST /api/sessions/<id>/continue {prompt, permission_mode?}
@@ -275,17 +276,146 @@ class ApiHandler(BaseHTTPRequestHandler):
         return rows
 
     def _merged_search(self, q, project, limit, user_only):
-        rows = []
-        for name, b in (self.bundles or {}).items():
+        """Search every harness in parallel — sequential 3× was the multi lag."""
+        import concurrent.futures
+
+        bundles = list((self.bundles or {}).items())
+        if not bundles:
+            return []
+
+        def _one(item):
+            name, b = item
             search_fn = getattr(b.store, "search_sessions", None)
             if search_fn is None:
-                continue
-            for s in search_fn(q, project, limit, user_only=user_only):
-                s = dict(s)
-                s["provider"] = name
-                rows.append(s)
+                return []
+            out = []
+            try:
+                for s in search_fn(q, project, limit, user_only=user_only):
+                    s = dict(s)
+                    s["provider"] = name
+                    out.append(s)
+            except Exception:
+                log.exception("search failed for provider %s", name)
+            return out
+
+        rows = []
+        # Small pool: one worker per harness (usually 1–3).
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(bundles))) as pool:
+            for part in pool.map(_one, bundles):
+                rows.extend(part)
         rows.sort(key=self._activity_sort_key, reverse=True)
         return rows[:limit]
+
+    def _stream_search(self, q, project, limit, user_only, multi=False):
+        """NDJSON progressive search: one JSON object per line.
+
+        Lines:
+          {"type":"hit","session":{...}}
+          {"type":"done","query":"...","count":N}
+        Web clients paint each hit as it arrives; phones keep the batch API.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        # Streaming: do not set Content-Length; close when finished.
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self._cors_headers()
+        self.end_headers()
+
+        count = 0
+        try:
+            if multi:
+                for row in self._iter_merged_search(q, project, limit, user_only):
+                    self._write_ndjson({"type": "hit", "session": row})
+                    count += 1
+            else:
+                it_fn = getattr(self.store, "iter_search_sessions", None)
+                if it_fn is None:
+                    search_fn = getattr(self.store, "search_sessions", None)
+                    rows = search_fn(q, project, limit, user_only=user_only) if search_fn else []
+                    for row in rows:
+                        self._write_ndjson({"type": "hit", "session": row})
+                        count += 1
+                else:
+                    for row in it_fn(q, project, limit, user_only=user_only):
+                        self._write_ndjson({"type": "hit", "session": row})
+                        count += 1
+            self._write_ndjson({"type": "done", "query": q, "count": count})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:
+            log.exception("stream search failed")
+            try:
+                self._write_ndjson({"type": "error", "error": "search failed"})
+            except Exception:
+                pass
+
+    def _write_ndjson(self, obj):
+        line = self._json_bytes(obj) + b"\n"
+        self.wfile.write(line)
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
+
+    def _iter_merged_search(self, q, project, limit, user_only):
+        """Yield multi-provider hits as each harness produces them (parallel)."""
+        import concurrent.futures
+        import queue
+        import threading
+
+        bundles = list((self.bundles or {}).items())
+        if not bundles:
+            return
+        q_out = queue.Queue()
+        sentinel = object()
+
+        def _worker(name, b):
+            try:
+                it_fn = getattr(b.store, "iter_search_sessions", None)
+                if it_fn is not None:
+                    for s in it_fn(q, project, limit, user_only=user_only):
+                        s = dict(s)
+                        s["provider"] = name
+                        q_out.put(s)
+                else:
+                    search_fn = getattr(b.store, "search_sessions", None)
+                    if search_fn is None:
+                        return
+                    for s in search_fn(q, project, limit, user_only=user_only):
+                        s = dict(s)
+                        s["provider"] = name
+                        q_out.put(s)
+            except Exception:
+                log.exception("stream search failed for provider %s", name)
+            finally:
+                q_out.put(sentinel)
+
+        threads = []
+        for name, b in bundles:
+            t = threading.Thread(target=_worker, args=(name, b), daemon=True)
+            t.start()
+            threads.append(t)
+
+        done = 0
+        yielded = 0
+        while done < len(threads) and yielded < limit:
+            item = q_out.get()
+            if item is sentinel:
+                done += 1
+                continue
+            yield item
+            yielded += 1
+
+        # Drain remaining sentinels so workers can exit cleanly.
+        while done < len(threads):
+            item = q_out.get()
+            if item is sentinel:
+                done += 1
+        for t in threads:
+            t.join(timeout=0.1)
 
     def log_message(self, fmt, *args):
         log.info("%s %s", self._caller_ip(), fmt % args)
@@ -580,6 +710,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/api/sessions/search":
             # Full-text over titles + human-visible message text. The phone
             # highlights `q` in title/snippet client-side (brand accent).
+            # stream=1 → NDJSON progressive hits (web); default stays JSON.
             from . import search_util
             q = search_util.normalize_query((query.get("q") or [""])[0])
             if not q:
@@ -587,12 +718,15 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             project = (query.get("project") or [None])[0]
             limit = min(max(self._int_param(query, "limit", 25), 1), 100)
+            user_only = not self._flag(query, "all")
+            if self._flag(query, "stream"):
+                self._stream_search(q, project, limit, user_only, multi=False)
+                return
             search_fn = getattr(self.store, "search_sessions", None)
             if search_fn is None:
                 self._error(501, "search not supported")
                 return
-            results = search_fn(q, project, limit,
-                                user_only=not self._flag(query, "all"))
+            results = search_fn(q, project, limit, user_only=user_only)
             self._send_json({"query": q, "results": results})
             return
 
@@ -762,8 +896,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             project = (query.get("project") or [None])[0]
             limit = min(max(self._int_param(query, "limit", 25), 1), 100)
-            results = self._merged_search(
-                q, project, limit, user_only=not self._flag(query, "all"))
+            user_only = not self._flag(query, "all")
+            if self._flag(query, "stream"):
+                self._stream_search(q, project, limit, user_only, multi=True)
+                return
+            results = self._merged_search(q, project, limit, user_only=user_only)
             self._send_json({"query": q, "results": results})
             return
         m = _SESSION_MSGS.match(path)

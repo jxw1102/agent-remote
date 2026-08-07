@@ -50,7 +50,7 @@ cp ../deploy/config.example.json ~/.agentremoted/config.json
 On first run the daemon creates **`~/.agentremoted/token`**. Show it:
 
 ```bash
-cd /path/to/agent-remote/daemon
+cd /path/to/daemon
 PYTHONPATH=. python3 -m agentremoted --print-token
 ```
 
@@ -60,7 +60,7 @@ Clients send that value as `X-Auth-Token`, `Authorization: Bearer …`, or
 ### Foreground (macOS, Linux, anywhere)
 
 ```bash
-cd /path/to/agent-remote/daemon
+cd /path/to/daemon
 PYTHONPATH=. python3 -m agentremoted
 ```
 
@@ -75,7 +75,7 @@ curl -s "http://127.0.0.1:8473/api/ping"
 Script: [`scripts/install-launchd.sh`](scripts/install-launchd.sh)
 
 ```bash
-cd /path/to/agent-remote/daemon
+cd /path/to/daemon
 ./scripts/install-launchd.sh          # install / update + start
 ./scripts/install-launchd.sh --remove # stop and uninstall
 ```
@@ -125,19 +125,19 @@ Stock unit ([`deploy/agentremoted.service`](../deploy/agentremoted.service)):
 
 | Setting | Value |
 |---------|--------|
-| Code | `/opt/bb10-remote/daemon` |
+| Code | `/opt/daemon` |
 | Home | `/root/.agentremoted` |
 | Start | `/usr/bin/python3 -m agentremoted` |
 
 ```bash
 sudo mkdir -p /opt/bb10-remote
-sudo cp -a daemon deploy /opt/bb10-remote/
+sudo cp -a daemon deploy /opt/
 
 sudo mkdir -p /root/.agentremoted
-sudo cp /opt/bb10-remote/deploy/config.example.json \
+sudo cp /opt/deploy/config.example.json \
         /root/.agentremoted/config.json
 
-sudo cp /opt/bb10-remote/deploy/agentremoted.service /etc/systemd/system/
+sudo cp /opt/deploy/agentremoted.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now agentremoted
 ```

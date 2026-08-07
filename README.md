@@ -111,7 +111,7 @@ Installs under `/opt/bb10-remote`, multi-shaped config under
 
 ```bash
 sudo mkdir -p /opt/bb10-remote
-sudo cp -a daemon deploy /opt/bb10-remote/
+sudo cp -a daemon deploy /opt/
 
 sudo mkdir -p /root/.agentremoted
 sudo cp deploy/config.example.json /root/.agentremoted/config.json
@@ -129,7 +129,7 @@ sudo cat /root/.agentremoted/token
 curl -s http://127.0.0.1:8473/api/ping
 ```
 
-The unit uses `WorkingDirectory=/opt/bb10-remote/daemon` and
+The unit uses `WorkingDirectory=/opt/daemon` and
 `AGENTREMOTED_HOME=/root/.agentremoted`. For a non-root install, copy the unit
 and change those paths (and `User=`).
 
@@ -182,7 +182,7 @@ you control. The token still authenticates every request.
 ## Layout
 
 ```
-bb10-remote/
+
   daemon/           agentremoted (Python), providers, tests, launchd script
   web/              browser client (no npm) → one HTML file
   blackberry/       Cascades BB10 app → AgentRemote.bar

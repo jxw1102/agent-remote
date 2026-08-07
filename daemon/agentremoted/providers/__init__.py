@@ -7,6 +7,7 @@ Store — read-only view over the agent's on-disk session transcripts:
     list_sessions(project_id=None, limit=25, user_only=True) -> [summary]
     search_sessions(query, project_id=None, limit=25, user_only=True)
         -> [summary + {snippet}]  full-text over title + message text
+    iter_search_sessions(...)  (optional) yield hits as found for stream=1
 
 `user_only` (the default, and what the app asks for) lists only sessions the
 human started: no subagent transcripts the agent spawned for itself, and no

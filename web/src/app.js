@@ -818,14 +818,82 @@ async function refreshSessions() {
 
   const query = state.query.trim();
   const all = state.settings.showAll ? "&all=1" : "";
+
+  // Search: progressive NDJSON stream — paint each hit as it arrives.
+  if (query) {
+    const collected = [];
+    const seen = new Set(); // profileId/sessionId
+    let paintTimer = 0;
+    const paint = () => {
+      if (gen !== state.gen) return;
+      state.rows = collected.slice().sort((a, b) => b.sortKey - a.sortKey);
+      state.loading = true; // still scanning body for more hits
+      renderSessions();
+      renderStatus();
+    };
+    const schedulePaint = () => {
+      if (paintTimer) return;
+      paintTimer = setTimeout(() => { paintTimer = 0; paint(); }, 40);
+    };
+    const addHit = (profile, s) => {
+      const sid = s.id || s.session_id || "";
+      const key = `${profile.id}/${sid}`;
+      if (sid && seen.has(key)) return;
+      if (sid) seen.add(key);
+      collected.push({
+        profileId: profile.id,
+        profileName: profile.name || profile.baseUrl,
+        provider: s.provider || profile.provider || "",
+        session: s,
+        sortKey: epochOf(s.last_active) || epochOf(s.started),
+      });
+      schedulePaint();
+    };
+
+    // Clear stale non-matching rows on first paint of a new query.
+    if (gen === state.gen) {
+      state.rows = [];
+      renderSessions();
+    }
+
+    await Promise.all(targets.map(async (profile) => {
+      const path = `/api/sessions/search?q=${encodeURIComponent(query)}&limit=40&stream=1${all}`;
+      let hits = 0;
+      try {
+        await streamSearch(profile, path, (s) => {
+          hits += 1;
+          addHit(profile, s);
+        }, gen, 45000);
+        state.feeds[profile.id] = { count: hits };
+      } catch (e) {
+        // Network / old proxy: fall back to batch JSON search.
+        try {
+          const data = await call(profile,
+            `/api/sessions/search?q=${encodeURIComponent(query)}&limit=40${all}`,
+            { timeout: 45000 });
+          (data.results || []).forEach((s) => addHit(profile, s));
+          state.feeds[profile.id] = { count: (data.results || []).length };
+        } catch (e2) {
+          state.feeds[profile.id] = { error: e2.message || e.message };
+        }
+      }
+    }));
+
+    if (gen !== state.gen) return;
+    if (paintTimer) clearTimeout(paintTimer);
+    state.rows = collected.sort((a, b) => b.sortKey - a.sortKey);
+    state.loading = false;
+    renderSessions();
+    renderStatus();
+    return;
+  }
+
   const collected = [];
   await Promise.all(targets.map(async (profile) => {
-    const path = query
-      ? `/api/sessions/search?q=${encodeURIComponent(query)}&limit=40${all}`
-      : `/api/sessions?limit=40${all}`;
+    const path = `/api/sessions?limit=40${all}`;
     try {
       const data = await call(profile, path, { timeout: 45000 });
-      const list = query ? (data.results || []) : (data.sessions || []);
+      const list = data.sessions || [];
       list.forEach((s) => collected.push({
         profileId: profile.id,
         profileName: profile.name || profile.baseUrl,
@@ -847,8 +915,134 @@ async function refreshSessions() {
   renderStatus();
 }
 
+/**
+ * Progressive search: daemon streams NDJSON lines
+ *   {"type":"hit","session":{...}} / {"type":"done",...}
+ */
+async function streamSearch(profile, path, onHit, gen, timeout = 45000) {
+  const url = profile.baseUrl.replace(/\/+$/, "") + path;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { "X-Auth-Token": profile.token, Accept: "application/x-ndjson" },
+      signal: ctrl.signal,
+      credentials: "omit",
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const msg = res.status === 401 ? "Token rejected by the daemon" : `HTTP ${res.status}`;
+      throw new DaemonError(res.status, msg);
+    }
+    // Non-streaming JSON fallback if proxy rewrote content-type.
+    const ctype = (res.headers.get("content-type") || "").toLowerCase();
+    if (ctype.includes("application/json") && !ctype.includes("ndjson")) {
+      const data = await res.json();
+      (data.results || []).forEach((s) => { if (gen === state.gen) onHit(s); });
+      return;
+    }
+    if (!res.body || !res.body.getReader) {
+      const text = await res.text();
+      text.split("\n").forEach((line) => {
+        if (!line.trim() || gen !== state.gen) return;
+        try {
+          const ev = JSON.parse(line);
+          if (ev.type === "hit" && ev.session) onHit(ev.session);
+        } catch { /* skip */ }
+      });
+      return;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (gen !== state.gen) {
+        try { reader.cancel(); } catch { /* ignore */ }
+        break;
+      }
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try {
+          const ev = JSON.parse(line);
+          if (ev.type === "hit" && ev.session) onHit(ev.session);
+          else if (ev.type === "error") throw new DaemonError(0, ev.error || "search failed");
+        } catch (e) {
+          if (e instanceof DaemonError) throw e;
+          // partial/malformed line — ignore
+        }
+      }
+    }
+  } catch (e) {
+    if (e instanceof DaemonError) throw e;
+    if (e.name === "AbortError") throw new DaemonError(0, "The daemon did not answer in time");
+    throw new DaemonError(0, e.message || "Request failed");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function visibleRows() {
   return state.rows.filter((r) => !state.filter || r.profileId === state.filter);
+}
+
+/** List title: never echo a bare attachment filename (transcript shows the chip). */
+function listTitle(session) {
+  const t = String((session && session.title) || "").trim();
+  if (!t) return "Untitled session";
+  if (looksLikeFilenameTitle(t) || isAttachmentOnly(t)) {
+    const folder = String((session && session.cwd) || "").replace(/\/+$/, "").split("/").pop();
+    const label = attachmentLabel(t);
+    return folder ? `${label} · ${folder}` : label;
+  }
+  return t;
+}
+
+/** List preview: hide if it only repeats the title or is [attached: …]. */
+function listPreview(session, query) {
+  const raw = query
+    ? (session.snippet || session.last_text || "")
+    : (session.last_text || "");
+  const text = String(raw).replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (isAttachmentOnly(text)) return "";
+  const title = listTitle(session).toLowerCase();
+  if (text.toLowerCase() === title) return "";
+  // Same screenshot name as title (common when daemon still sends filename).
+  if (looksLikeFilenameTitle(text) && looksLikeFilenameTitle(listTitle(session))) return "";
+  return text;
+}
+
+function isAttachmentOnly(text) {
+  const lines = String(text || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return false;
+  return lines.every((l) => /^\[attached:\s*[^\]]+\]$/i.test(l));
+}
+
+function looksLikeFilenameTitle(text) {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (/\.(png|jpe?g|gif|webp|heic|bmp|pdf|mov|mp4|m4a|wav|zip)$/i.test(t)) return true;
+  const low = t.toLowerCase();
+  return low.startsWith("screenshot") && /\.(png|jpe?g|heic|webp)$/i.test(low);
+}
+
+function attachmentLabel(text) {
+  const m = String(text || "").match(/\[attached:\s*([^\]]+)\]/i)
+    || String(text || "").match(/([^/\\]+\.\w+)\s*$/);
+  const name = m ? String(m[1] || m[0]).split(/[/\\]/).pop() : "";
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  if (["png", "jpg", "jpeg", "gif", "webp", "heic", "bmp"].includes(ext)) return "Image";
+  if (ext === "pdf") return "PDF";
+  if (["mp4", "mov", "webm"].includes(ext)) return "Video";
+  if (["mp3", "wav", "m4a", "aac"].includes(ext)) return "Audio";
+  return "Attachment";
 }
 
 function workingKeys() {
@@ -973,7 +1167,7 @@ function renderSessions() {
       dot.style.background = pal.accent;
       top.appendChild(dot);
     }
-    top.appendChild(el("div", "row-title", row.session.title || "Untitled session"));
+    top.appendChild(el("div", "row-title", listTitle(row.session)));
     top.appendChild(el("div", "row-when", stamp(row.sortKey)));
     btn.appendChild(top);
 
@@ -1004,8 +1198,7 @@ function renderSessions() {
       if (row.session.id) copySessionId(row.session.id);
     });
 
-    const preview = state.query ? (row.session.snippet || row.session.last_text)
-                               : row.session.last_text;
+    const preview = listPreview(row.session, state.query);
     if (preview) {
       const box = el("div", "row-preview");
       highlightInto(box, String(preview).replace(/\s+/g, " ").trim(), state.query);
@@ -2951,8 +3144,27 @@ function wire() {
   $("search").addEventListener("input", (e) => {
     state.query = e.target.value;
     clearTimeout(searchTimer);
-    // Each keystroke would otherwise fan out one request per daemon.
-    searchTimer = setTimeout(refreshSessions, 300);
+    // Instant filter on the list we already have, then debounced server
+    // full-text search (titles + body) replaces it. Avoids a fan-out on
+    // every keystroke feeling like the UI is stuck.
+    const q = state.query.trim();
+    if (q && state.rows.length) {
+      const needle = q.toLowerCase();
+      const local = state.rows.filter((row) => {
+        const s = row.session || {};
+        const hay = [s.title, s.last_text, s.snippet, s.cwd, s.id]
+          .filter(Boolean).join("\n").toLowerCase();
+        return hay.includes(needle);
+      });
+      if (local.length) {
+        state.rows = local;
+        renderSessions();
+      }
+    } else if (!q) {
+      searchTimer = setTimeout(refreshSessions, 50);
+      return;
+    }
+    searchTimer = setTimeout(refreshSessions, 400);
   });
 
   const prompt = $("prompt");
