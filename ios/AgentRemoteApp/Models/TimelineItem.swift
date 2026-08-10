@@ -35,3 +35,5 @@ struct PendingPermissionUI: Identifiable, Equatable {
     let detail: String
     var id: String { requestId }
 }
+
+// PendingQuestionUI lives next to ChatViewModel (uses QuestionItem from the kit).

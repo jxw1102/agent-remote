@@ -2,100 +2,82 @@
 
 Two pieces:
 
-- **`AgentRemoteKit/`** — a Swift package with the daemon protocol types and the
-  `AgentRemoteClient` networking layer. Cross-platform, has its own test suite (`swift test`), no
-  SwiftUI/UIKit dependency — verified to build and pass on Linux as part of developing this (no
-  Xcode available in that environment), including a live smoke test against a real daemon
-  instance before the permanent fixture-based tests replaced it.
-- **`AgentRemoteApp/`** — the SwiftUI app source.
-- **`project.yml`** — an [XcodeGen](https://github.com/yonaskolb/XcodeGen) spec that generates the
-  actual `.xcodeproj` (gitignored — regenerate it, don't hand-edit a checked-in project file).
+- **`AgentRemoteKit/`** — Swift package: daemon protocol types + `AgentRemoteClient` networking.
+  Cross-platform, no SwiftUI. `swift build` works with Command Line Tools; full `swift test`
+  needs Xcode (XCTest).
+- **`AgentRemoteApp/`** — SwiftUI app (iPhone + iPad).
+- **`project.yml`** — [XcodeGen](https://github.com/yonaskolb/XcodeGen) spec (generated
+  `.xcodeproj` is gitignored).
 
-## Generating and building the Xcode project
+## Generate and build
 
 ```bash
-brew install xcodegen   # if you don't have it
+brew install xcodegen   # if needed
 cd ios
-xcodegen generate       # writes AgentRemote.xcodeproj from project.yml
+xcodegen generate
 open AgentRemote.xcodeproj
 ```
 
-In Xcode: pick your Apple ID as the signing team (free account is enough for personal
-sideloading — re-sign every 7 days, or use a paid developer account for the usual 1 year), then
-build & run on your iPhone/iPad over USB (or archive for TestFlight/ad-hoc).
+In Xcode: pick a signing team, then run on iPhone/iPad (or Simulator).  
+`TARGETED_DEVICE_FAMILY` is `1,2` (iPhone + iPad).
 
-Re-run `xcodegen generate` any time `project.yml` changes, or after pulling changes that touched
-it — the generated `.xcodeproj` is gitignored on purpose.
+Re-run `xcodegen generate` after `project.yml` changes.
 
-## Architecture: talking to an agentremoted daemon
+## Architecture (aligned with Android / web)
 
-This app speaks the REST + job-polling protocol of
-[agentremoted](https://github.com/jxw1102/agent-remote) ("bb10d" in some deployments — same
-daemon, just a renamed package) — **not** a persistent WebSocket carrying the whole conversation.
-The whole networking story:
+Same agentremoted HTTP API as the other clients:
 
-- **Auth**: every request carries the daemon's shared token as an `X-Auth-Token` header. No SSH,
-  no per-connection handshake — `AddConnectionView` just needs a base URL and that token.
-- **Sessions are driven by jobs, not a socket**: `POST /api/sessions/new` (or `.../continue`)
-  returns a `job_id` immediately; the client polls `GET /api/jobs/<id>?since=<seq>` (a plain
-  0-based event-index cursor, not a real long-poll) until the job finishes. `ChatViewModel.pollJob`
-  is the whole client-side state machine — see its doc comments and
-  `backend`-adjacent `PROTOCOL_SPEC.md`-derived fixtures in `AgentRemoteKitTests` for the exact
-  event shapes (`init`/`text`/`tool`/`result`/`permission`/`permission_resolved`/…).
-- **`/ws/status`** is a best-effort, secondary feed (which jobs are running right now, across every
-  session) — `DaemonClient` keeps it open for activity indicators, but nothing functional depends
-  on it; a dropped status stream never blocks a chat.
-- There's **no persistent connection to lose**. Every other call is an independent HTTP request,
-  so unlike the old SSH-tunnel design, `SessionHub` doesn't need to "reestablish" anything after
-  the app backgrounds/foregrounds — it just resumes the status stream.
+| Concept | iOS | Android |
+|--------|-----|---------|
+| Multi-host profiles | `ProfileStore` + Keychain tokens | `ProfileStore` + encrypted prefs |
+| Unified session list | `AppModel.rows` (merged, activity-sorted) | `AgentRepository.sessions` |
+| Open transcript | `ChatViewModel` + job poll | `TranscriptViewModel` |
+| Caps / catalogues | `PingResponse` + `provider_details` | `Caps` / `ProviderDetailDto` |
+| Live status | `/ws/status` per profile | SSE/WS per profile |
 
-### Known protocol limitations (daemon-side, not this client cutting corners)
+There is **no** persistent chat socket — only REST jobs + optional status stream.
 
-- **No tool-call history on resume.** The daemon only persists user/assistant *text*; tool
-  calls/results are explicitly "transient job state," never written to the transcript. Resuming a
-  session shows text-only history — there's no way to recover a past turn's tool activity once its
-  job is pruned, from this client or any other.
-- **No mid-session model/permission-mode change call.** `model`/`permissionMode` are just fields on
-  the *next* `new`/`continue` request — picking one in the UI doesn't take effect until you send
-  the next message.
-- **No session-delete endpoint.** Sessions are just Claude Code's own transcript files; the
-  daemon's API has no route to remove one, so this app doesn't offer to either.
-- **Live TUI needs a recent daemon build.** `caps.live_tui` is absent (not just `false`) on older
-  deployments — this app hides the Live TUI button whenever that cap is missing, and treats a
-  `GET .../tui` 404 as "not supported here" rather than a hard error either way.
+### Navigation
+
+- **iPad (regular width):** `NavigationSplitView` — **left** unified session list, **right** transcript.
+- **iPhone (compact):** same split view collapses to a stack (list → detail).
+
+Root entry is **Sessions**, not “pick a server first” (matches Android). Profiles / usage /
+drop / settings live in the toolbar menu and sheets.
+
+### Multi-harness
+
+`/api/ping` multi fields (`multi`, `providers`, `provider_details`) drive:
+
+- New-session harness picker (Claude / Grok / Codex)
+- Per-session model list and effort picker (effort hidden for Claude)
+- Provider accent colors on list rows and chat chrome
 
 ## What's implemented
 
-- Add/list servers (`ConnectionListView`, `AddConnectionView`) — just a name, base URL, and daemon
-  token (Keychain via `KeychainStore`); non-secret metadata is in `UserDefaults` (`ProfileStore`).
-- Connect flow (`ConnectingView`): verifies the token with `GET /api/ping`, surfaces the daemon's
-  real error message on failure (401 vs a network error vs an invalid URL).
-- Project/session picker (`ProjectView`): every resumable session, grouped by working directory;
-  start a new one in an existing or brand-new folder.
-- Chat (`ChatView`): assistant text (markdown), tool-call markers, a permission-request sheet with
-  Allow/Deny, a model picker (raw ids from `/api/ping`), and slash-command autocomplete (bare
-  names — this daemon doesn't provide per-command descriptions).
-- **Live TUI** (`LiveTuiView`): polls the pane (plain text; ANSI/color deferred — see the protocol
-  spec's own recommendation) and sends keys/text.
-- **File drop** (`DropView`): list/download/delete the host's drop folder, upload an attachment.
-- **Usage** (`UsageView`): renders `/api/usage`'s ready-to-format buckets.
+- Multi-profile daemons; one merged session list with search + profile filter chips
+- Resume session / new session (harness, cwd/projects, interactive toggle)
+- Chat: markdown transcript, tools, stop, slash autocomplete
+- Permission Allow/Deny sheet
+- AskUserQuestion sheet
+- Model + effort pickers (session harness catalogues)
+- Live TUI sheet (when `caps.live_tui`)
+- Host drop files + usage sheets
+- Settings: theme, show-all-sessions, default execution/model/effort
+- Provider-tinted UI (Claude / Grok / Codex)
 
-## What's not implemented yet (deliberately out of scope for v1)
+## Protocol notes (daemon-side)
 
-- Only one server connection at a time (matches "personal use" scope).
-- AskUserQuestion isn't rendered in the chat timeline yet — the `question`/`question_resolved`
-  event shape wasn't empirically verified (no live trigger during protocol research); driving it
-  correctly needs that shape pinned down first.
-- ANSI/color rendering in Live TUI (plain-text pane only).
-- No editing of a saved server's token after creation — delete and re-add for now.
+- Tool calls are not in durable history — resume is text-only.
+- Model/effort/permission mode apply on the **next** message.
+- No session-delete API.
 
-## Testing without a full round trip
+## Testing
 
-`AgentRemoteKit`'s test suite (`cd ios/AgentRemoteKit && swift test`) decodes/encodes fixtures
-copied verbatim from real captured daemon responses (ping, sessions, job events including a
-pending permission, status push, usage, error bodies) using the same `.convertFromSnakeCase`
-decoder `AgentRemoteClient` actually uses. The whole package also builds and its networking layer
-(`URLSession`, `URLSessionWebSocketTask`) compiles on Linux — verified while developing this, no
-Xcode available in that environment. What's *not* verified outside Xcode is the SwiftUI layer
-itself — build it and walk through: add server → connect → open a session → send a message →
-approve a permission prompt, before trusting it further.
+```bash
+cd ios/AgentRemoteKit && swift build    # always
+cd ios/AgentRemoteKit && swift test    # needs full Xcode
+```
+
+Manual smoke: add server → sessions list fills → open Claude/Grok row → send message →
+permission prompt if needed → New session with harness picker on multi daemon.

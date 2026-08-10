@@ -3,12 +3,47 @@ import Foundation
 import FoundationNetworking
 #endif
 
-public enum AgentRemoteError: Error, Sendable, Equatable {
+public enum AgentRemoteError: Error, Sendable, Equatable, LocalizedError, CustomNSError {
     case invalidURL
     case invalidResponse
     /// A daemon error body, tagged with the HTTP status so callers can distinguish e.g. 401 vs 404.
     case daemon(status: Int, message: String)
     case decoding(String)
+    /// URLSession / network failure (connection refused, ATS, offline, …).
+    case network(String)
+
+    public static var errorDomain: String { "AgentRemoteKit.AgentRemoteError" }
+
+    public var errorCode: Int {
+        switch self {
+        case .invalidURL: return 0
+        case .invalidResponse: return 1
+        case .daemon: return 2
+        case .decoding: return 3
+        case .network: return 4
+        }
+    }
+
+    public var errorUserInfo: [String: Any] {
+        [NSLocalizedDescriptionKey: errorDescription ?? "Unknown Agent Remote error."]
+    }
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "Invalid server URL."
+        case .invalidResponse:
+            return "Unexpected response from the daemon (not HTTP)."
+        case .daemon(let status, let message):
+            if status == 401 { return "Invalid auth token." }
+            if status == 0 { return message }
+            return "Server error (\(status)): \(message)"
+        case .decoding(let detail):
+            return "Couldn't read the daemon response: \(detail)"
+        case .network(let detail):
+            return detail
+        }
+    }
 }
 
 /// Talks to one `agentremoted` daemon instance over plain HTTP + token auth. No persistent
@@ -40,8 +75,16 @@ public struct AgentRemoteClient: Sendable {
     // MARK: - Core request plumbing
 
     private func buildURL(_ path: String, query: [String: String?] = [:]) throws -> URL {
-        guard var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false) else {
+        // Prefer URLComponents path join so "/api/ping" and "api/ping" both work.
+        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             throw AgentRemoteError.invalidURL
+        }
+        let basePath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let rel = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if basePath.isEmpty {
+            components.path = "/" + rel
+        } else {
+            components.path = "/" + basePath + "/" + rel
         }
         let items = query.compactMap { key, value -> URLQueryItem? in
             guard let value else { return nil }
@@ -64,6 +107,7 @@ public struct AgentRemoteClient: Sendable {
         let url = try buildURL(path, query: query)
         var request = URLRequest(url: url)
         request.httpMethod = method
+        request.timeoutInterval = 30
         if requiresAuth {
             request.setValue(token, forHTTPHeaderField: "X-Auth-Token")
         }
@@ -75,8 +119,18 @@ public struct AgentRemoteClient: Sendable {
             request.setValue(contentType ?? "application/octet-stream", forHTTPHeaderField: "Content-Type")
         }
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw AgentRemoteError.invalidResponse }
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            let msg = (error as? URLError).map { urlErrorMessage($0, url: url) }
+                ?? error.localizedDescription
+            throw AgentRemoteError.network(msg)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw AgentRemoteError.invalidResponse
+        }
 
         guard (200..<300).contains(http.statusCode) else {
             let message = (try? Self.decoder.decode(DaemonErrorBody.self, from: data))?.error
@@ -88,6 +142,19 @@ public struct AgentRemoteClient: Sendable {
             return try Self.decoder.decode(Response.self, from: data)
         } catch {
             throw AgentRemoteError.decoding(String(describing: error))
+        }
+    }
+
+    private func urlErrorMessage(_ error: URLError, url: URL) -> String {
+        switch error.code {
+        case .appTransportSecurityRequiresSecureConnection:
+            return "HTTP blocked by App Transport Security for \(url.host ?? url.absoluteString). Use https:// or allow local networking."
+        case .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet:
+            return "Could not reach \(url.host ?? "daemon") (\(error.localizedDescription)). Is agentremoted running?"
+        case .timedOut:
+            return "Timed out connecting to \(url.host ?? "daemon")."
+        default:
+            return error.localizedDescription
         }
     }
 
@@ -131,6 +198,12 @@ public struct AgentRemoteClient: Sendable {
             "limit": String(limit),
             "all": all ? "1" : nil,
         ])
+    }
+
+    /// Search and return rows as plain `SessionSummary` (snippet + provider preserved).
+    public func searchSessionSummaries(query: String, project: String? = nil, limit: Int = 25, all: Bool = false) async throws -> [SessionSummary] {
+        try await searchSessions(query: query, project: project, limit: limit, all: all)
+            .results.map { $0.asSummary() }
     }
 
     public func session(id: String) async throws -> SessionSummary {

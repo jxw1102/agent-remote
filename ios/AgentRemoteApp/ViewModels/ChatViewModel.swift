@@ -2,11 +2,7 @@ import AgentRemoteKit
 import Combine
 import Foundation
 
-/// Drives one session against the daemon's job model: `send()` starts a new job (via
-/// `POST /api/sessions/new` the first time, `.../continue` after) and polls it to completion,
-/// following `nextJobId` if the daemon auto-chains a queued prompt. There's no persisted tool-call
-/// history — resuming a session shows only past user/assistant text, by daemon design (tool
-/// activity is transient job state, never written to the transcript).
+/// Drives one session: job poll loop for new/continue, history load for resume.
 @MainActor
 final class ChatViewModel: ObservableObject, Identifiable, Hashable {
     nonisolated static func == (lhs: ChatViewModel, rhs: ChatViewModel) -> Bool { lhs === rhs }
@@ -18,30 +14,33 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         case failed(String)
     }
 
-    /// Stable identity assigned at creation — a brand-new session has no daemon-side id yet, so
-    /// navigation and the session hub's cache key off this instead.
     nonisolated let localId: String
-    /// The session id this chat was opened to resume (nil for a brand-new session).
     let resumeId: String?
+    let profileId: UUID
     let cwd: String
-    /// Human-facing session name (the summary from the picker); nil for a brand-new session.
     let sessionName: String?
+    /// Harness for this session (claude|grok|codex).
+    @Published private(set) var provider: String
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var items: [TimelineItem] = []
     @Published var pendingPermission: PendingPermissionUI?
+    @Published var pendingQuestion: PendingQuestionUI?
     @Published var draftText = ""
     @Published var selectedModel: String = ""
+    @Published var selectedEffort: String = ""
     @Published var permissionMode: String = ""
 
-    /// The real daemon-side session id — empty until either resumed or the first job's `init`
-    /// event reports it. Track as `newSessionId.isEmpty ? sessionId : newSessionId`, same rule the
-    /// daemon itself uses.
     private(set) var sessionId: String
-    /// The model reported by the most recent job's `init` event (or "" before any turn has run).
     @Published private(set) var model: String = ""
 
+    /// Fired when a brand-new session gets a real daemon id (for list re-key).
+    var onSessionIdResolved: ((String) -> Void)?
+
     private let client: DaemonClient
+    /// Exposed for Live TUI sheet (same connection as this chat).
+    var liveDaemonClient: DaemonClient { client }
+    private weak var settings: SettingsStore?
     private var currentJobId: String?
     private var pollTask: Task<Void, Never>?
     private var permissionIndex: [String: Int] = [:]
@@ -58,21 +57,79 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         switch phase {
         case .failed: return "Couldn't continue"
         case .idle, .running:
-            let parts = [Self.prettyModel(model), Self.prettyMode(permissionMode)].filter { !$0.isEmpty }
+            let harness = ProviderAccent.forProvider(provider).label
+            let parts = [harness, Self.prettyModel(model), Self.prettyMode(permissionMode)].filter { !$0.isEmpty }
             return parts.isEmpty ? "Ready" : parts.joined(separator: " · ")
         }
     }
 
-    init(client: DaemonClient, cwd: String, sessionName: String?, resume: String?) {
+    var accent: ProviderAccent { ProviderAccent.forProvider(provider) }
+
+    init(
+        client: DaemonClient,
+        profileId: UUID,
+        cwd: String,
+        sessionName: String?,
+        resume: String?,
+        provider: String,
+        settings: SettingsStore?
+    ) {
         self.client = client
+        self.profileId = profileId
         self.cwd = cwd
         self.sessionName = sessionName
         self.resumeId = resume
+        self.provider = provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         self.sessionId = resume ?? ""
         self.localId = UUID().uuidString
+        self.settings = settings
+        // Seed overrides from app settings.
+        if let s = settings?.settings {
+            selectedModel = s.modelOverride
+            selectedEffort = s.effortOverride
+            permissionMode = s.permissionMode == "interactive" ? "interactive" : ""
+        }
         if resume != nil {
             loadHistory()
         }
+    }
+
+    // MARK: - Catalogues (per open harness)
+
+    private var ping: PingResponse? {
+        if case .connected(let p) = client.state { return p }
+        return nil
+    }
+
+    var availableModels: [String] {
+        ping?.models(for: provider) ?? client.availableModels
+    }
+
+    var availableEfforts: [String] {
+        let list = ping?.efforts(for: provider) ?? []
+        return list
+    }
+
+    var canSetModel: Bool {
+        ping?.caps(for: provider).canSetModel ?? (ping?.caps.canSetModel ?? false)
+    }
+
+    var canSetEffort: Bool {
+        if provider == "claude" { return false }
+        return ping?.caps(for: provider).canSetEffort ?? false
+    }
+
+    var liveTuiEnabled: Bool {
+        ping?.caps(for: provider).liveTuiEnabled ?? false
+    }
+
+    var availableSlashCommands: [String] {
+        var list = ping?.slashCommands(for: provider) ?? client.availableSlashCommands
+        // Always surface these so older daemons / every client can invoke them.
+        for cmd in ["/rewind", "/goal"] where !list.contains(cmd) {
+            list.append(cmd)
+        }
+        return list
     }
 
     func send() {
@@ -81,6 +138,15 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         items.append(.userText(id: UUID().uuidString, text: text))
         draftText = ""
         phase = .running
+
+        // Persist last-used overrides into settings.
+        if let settings {
+            settings.settings.modelOverride = selectedModel
+            settings.settings.effortOverride = selectedEffort
+            if permissionMode == "interactive" {
+                settings.settings.permissionMode = "interactive"
+            }
+        }
 
         Task {
             guard let agentClient = client.agentClient else {
@@ -91,15 +157,19 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                 let jobId: String
                 if sessionId.isEmpty {
                     jobId = try await agentClient.startSession(NewSessionRequest(
-                        cwd: cwd, prompt: text,
+                        cwd: cwd.isEmpty ? nil : cwd,
+                        prompt: text,
+                        provider: provider.isEmpty ? nil : provider,
                         permissionMode: permissionMode.isEmpty ? nil : permissionMode,
-                        model: selectedModel.isEmpty ? nil : selectedModel
+                        model: selectedModel.isEmpty ? nil : selectedModel,
+                        effort: selectedEffort.isEmpty ? nil : selectedEffort
                     ))
                 } else {
                     jobId = try await agentClient.continueSession(id: sessionId, ContinueSessionRequest(
                         prompt: text,
                         permissionMode: permissionMode.isEmpty ? nil : permissionMode,
-                        model: selectedModel.isEmpty ? nil : selectedModel
+                        model: selectedModel.isEmpty ? nil : selectedModel,
+                        effort: selectedEffort.isEmpty ? nil : selectedEffort
                     ))
                 }
                 startPolling(jobId)
@@ -117,18 +187,27 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         }
     }
 
+    func respondToQuestion(answers: [[String]], notes: [String]?, cancel: Bool) {
+        guard let q = pendingQuestion, let jobId = currentJobId else { return }
+        pendingQuestion = nil
+        Task {
+            try? await client.agentClient?.resolveQuestion(
+                jobId: jobId,
+                QuestionAnswerRequest(requestId: q.requestId, answers: cancel ? nil : answers, notes: notes, cancel: cancel)
+            )
+        }
+    }
+
     func interrupt() {
         guard let jobId = currentJobId, phase == .running else { return }
         Task { try? await client.agentClient?.stopJob(jobId: jobId) }
     }
 
-    /// Slash commands (bare names — this daemon's `/api/ping` doesn't provide per-command
-    /// descriptions/argument hints) matching what's currently typed.
     var commandSuggestions: [String] {
         guard draftText.hasPrefix("/") else { return [] }
         let query = String(draftText.dropFirst()).lowercased()
         guard !query.contains(" ") else { return [] }
-        let all = client.availableSlashCommands
+        let all = availableSlashCommands.map { $0.hasPrefix("/") ? String($0.dropFirst()) : $0 }
         let matches = query.isEmpty ? all : all.filter { $0.lowercased().hasPrefix(query) }
         return Array(matches.prefix(30))
     }
@@ -137,33 +216,48 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         draftText = "/\(name) "
     }
 
-    // MARK: - Model selection
-
-    /// This daemon has no "change the running session's model" call — `model` is only a field on
-    /// the next `new`/`continue` request, so selecting one here just changes what the *next*
-    /// message will ask for.
-    var availableModels: [String] { client.availableModels }
-
     func selectModel(_ model: String) {
         selectedModel = model == "default" ? "" : model
+    }
+
+    func selectEffort(_ effort: String) {
+        selectedEffort = effort == "default" ? "" : effort
     }
 
     func isCurrentModel(_ model: String) -> Bool {
         (selectedModel.isEmpty ? "default" : selectedModel) == model
     }
 
+    func isCurrentEffort(_ effort: String) -> Bool {
+        (selectedEffort.isEmpty ? "default" : selectedEffort) == effort
+    }
+
     static func modelLabel(_ raw: String) -> String {
         if raw.isEmpty || raw == "default" { return "Default" }
-        let withoutPrefix = raw.replacingOccurrences(of: "claude-", with: "")
+        let withoutPrefix = raw
+            .replacingOccurrences(of: "claude-", with: "")
+            .replacingOccurrences(of: "gpt-", with: "")
         return withoutPrefix.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
     }
 
-    // MARK: - History (resumed sessions only)
+    // MARK: - History
 
     private func loadHistory() {
         guard let resumeId else { return }
         Task {
-            guard let agentClient = client.agentClient else { return }
+            // Wait briefly for the multi-host pool to finish connecting this profile.
+            var agentClient = client.agentClient
+            if agentClient == nil {
+                for _ in 0..<40 {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    agentClient = client.agentClient
+                    if agentClient != nil { break }
+                }
+            }
+            guard let agentClient else {
+                items = [.systemNotice(id: UUID().uuidString, text: "Not connected — pull to refresh sessions and reopen.")]
+                return
+            }
             do {
                 let response = try await agentClient.messages(sessionId: resumeId)
                 var loaded: [TimelineItem] = []
@@ -174,9 +268,14 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                     ))
                 }
                 for message in response.messages {
-                    loaded.append(message.role == "user"
-                        ? .userText(id: message.id, text: message.text)
-                        : .assistantText(id: message.id, text: message.text))
+                    switch message.role {
+                    case "user":
+                        loaded.append(.userText(id: message.id, text: message.text))
+                    case "status":
+                        loaded.append(.systemNotice(id: message.id, text: message.text))
+                    default:
+                        loaded.append(.assistantText(id: message.id, text: message.text))
+                    }
                 }
                 items = loaded
             } catch {
@@ -209,12 +308,22 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                 return
             }
             since = job.nextSeq
-            if !job.resolvedSessionId.isEmpty { sessionId = job.resolvedSessionId }
+            if !job.resolvedSessionId.isEmpty {
+                let first = sessionId.isEmpty
+                sessionId = job.resolvedSessionId
+                if first { onSessionIdResolved?(sessionId) }
+            }
 
             for event in job.events { apply(event, job: job) }
 
             pendingPermission = job.pendingPermission.map {
                 PendingPermissionUI(requestId: $0.requestId, toolName: $0.toolName, detail: $0.detail)
+            }
+            if let q = job.pendingQuestion, !q.requestId.isEmpty {
+                pendingQuestion = PendingQuestionUI(requestId: q.requestId, questions: q.questions)
+            } else if job.pendingQuestion == nil {
+                // Only clear when the server dropped it (not when we haven't answered yet).
+                // Keep local sheet until user responds or job ends.
             }
 
             switch job.status {
@@ -235,6 +344,12 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                     continue
                 }
                 currentJobId = nil
+                pendingQuestion = nil
+                if job.status == .error, !job.error.isEmpty, items.last.map({
+                    if case .turnResult(_, _, let err) = $0 { return !err } else { return true }
+                }) ?? true {
+                    // ensure error is visible if no result event
+                }
                 phase = .idle
                 return
             }
@@ -244,7 +359,6 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
     private func apply(_ event: JobEvent, job: JobSnapshot) {
         switch event {
         case .initEvent(_, _, let model):
-            // "interactive" is a literal placeholder in interactive-TUI mode, not a real model id.
             if model != "interactive" { self.model = model }
 
         case .text(_, let text):
@@ -274,18 +388,19 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                 )
             }
 
-        case .question, .questionResolved, .unknown:
-            // AskUserQuestion flows through `pendingQuestion`/interactive mode — not modeled in the
-            // v1 chat timeline; the structured shape isn't pinned down yet (see PROTOCOL_SPEC.md).
+        case .question(_, let requestId, let questions):
+            pendingQuestion = PendingQuestionUI(requestId: requestId, questions: questions)
+
+        case .questionResolved, .unknown:
             break
         }
     }
 
-    // MARK: - Display formatting
-
     static func prettyModel(_ raw: String) -> String {
         guard !raw.isEmpty, raw != "default" else { return "" }
-        return raw.replacingOccurrences(of: "claude-", with: "").replacingOccurrences(of: "-", with: " ").capitalized
+        return raw.replacingOccurrences(of: "claude-", with: "")
+            .replacingOccurrences(of: "-", with: " ")
+            .capitalized
     }
 
     static func prettyMode(_ raw: String) -> String {
@@ -298,4 +413,10 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         default: return raw.capitalized
         }
     }
+}
+
+struct PendingQuestionUI: Identifiable, Equatable {
+    let requestId: String
+    let questions: [QuestionItem]
+    var id: String { requestId }
 }

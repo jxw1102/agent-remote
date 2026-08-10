@@ -88,13 +88,24 @@ final class DaemonClient: ObservableObject {
     }
 
     static func describe(_ error: Error) -> String {
-        if case AgentRemoteError.daemon(let status, let message) = error {
-            if status == 401 { return "Invalid auth token." }
-            return "Server error (\(status)): \(message)"
+        if let ar = error as? AgentRemoteError {
+            return ar.errorDescription ?? String(describing: ar)
         }
-        if case AgentRemoteError.invalidURL = error {
-            return "Invalid server URL."
+        // Bridged NSError from AgentRemoteError (CustomNSError) — prefer its localized text.
+        let ns = error as NSError
+        if ns.domain == AgentRemoteError.errorDomain,
+           let msg = ns.userInfo[NSLocalizedDescriptionKey] as? String,
+           !msg.isEmpty {
+            return msg
         }
-        return error.localizedDescription
+        if let urlErr = error as? URLError {
+            return urlErr.localizedDescription
+        }
+        let msg = error.localizedDescription
+        // Avoid the useless "error 1" form if we can surface more.
+        if msg.contains("AgentRemoteError error") {
+            return "Daemon request failed: \(msg)"
+        }
+        return msg
     }
 }

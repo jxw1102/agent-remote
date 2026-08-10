@@ -238,4 +238,80 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(obj?["request_id"] as? String, "j1-q1")
         XCTAssertEqual((obj?["answers"] as? [[String]])?.first, ["Yes"])
     }
+
+    func testDecodeMultiProviderPing() throws {
+        let json = """
+        {
+          "ok": true, "app": "agentremoted", "version": "2.5.3", "host": "mac",
+          "provider": "claude",
+          "multi": true,
+          "providers": ["claude", "grok", "codex"],
+          "caps": {
+            "queue": true, "stop": true, "projects": true, "ws_status": true,
+            "permissions": true, "permission_modes": true, "requires_cwd": true,
+            "can_set_model": true, "can_set_effort": true, "can_show_usage": true,
+            "interactive": true, "live_tui": true, "rewind": true
+          },
+          "models": ["default", "claude-opus"],
+          "efforts": ["low", "high"],
+          "provider_details": {
+            "claude": {
+              "caps": {"can_set_effort": false, "requires_cwd": true},
+              "models": ["default", "claude-sonnet"],
+              "efforts": [],
+              "slash_commands": ["/compact"]
+            },
+            "grok": {
+              "caps": {"can_set_effort": true, "requires_cwd": false},
+              "models": ["grok-4"],
+              "efforts": ["low", "high"]
+            }
+          }
+        }
+        """
+        let ping = try decoder().decode(PingResponse.self, from: Data(json.utf8))
+        XCTAssertTrue(ping.isMulti)
+        XCTAssertEqual(ping.harnesses, ["claude", "grok", "codex"])
+        XCTAssertFalse(ping.caps(for: "claude").canSetEffort)
+        XCTAssertTrue(ping.caps(for: "grok").canSetEffort)
+        XCTAssertEqual(ping.models(for: "claude"), ["default", "claude-sonnet"])
+        XCTAssertEqual(ping.efforts(for: "claude"), [])
+        XCTAssertEqual(ping.efforts(for: "grok"), ["low", "high"])
+    }
+
+    func testDecodeSessionWithProvider() throws {
+        let json = """
+        {"sessions": [
+          {"id": "2b7f6b3b-aee6-4388-b307-acd9c9987d5c", "project_id": "-tmp",
+           "cwd": "/tmp", "git_branch": "", "title": "Hello",
+           "started": "2026-08-06T03:43:17.928Z", "last_active": "2026-08-06T03:43:21.128Z",
+           "last_role": "assistant", "last_text": "Hi", "model": "claude-sonnet",
+           "size_bytes": 100, "provider": "claude"}
+        ]}
+        """
+        let response = try decoder().decode(SessionsResponse.self, from: Data(json.utf8))
+        XCTAssertEqual(response.sessions.first?.provider, "claude")
+        XCTAssertEqual(response.sessions.first?.displayTitle, "Hello")
+    }
+
+    func testDecodePendingQuestion() throws {
+        let json = """
+        {"id": "j1", "session_id": "s1", "new_session_id": "", "status": "running", "error": "",
+         "result_text": "", "pending_permission": null,
+         "pending_question": {
+           "request_id": "j1-q1",
+           "questions": [
+             {"question": "Ship it?", "header": "Confirm", "options": [
+               {"label": "Yes", "description": "Deploy"},
+               {"label": "No", "description": ""}
+             ], "multi_select": false}
+           ]
+         },
+         "queued": [], "next_job_id": "", "dropped_queued": 0, "next_seq": 1, "events": []}
+        """
+        let job = try decoder().decode(JobSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(job.pendingQuestion?.requestId, "j1-q1")
+        XCTAssertEqual(job.pendingQuestion?.questions.first?.question, "Ship it?")
+        XCTAssertEqual(job.pendingQuestion?.questions.first?.options.count, 2)
+    }
 }

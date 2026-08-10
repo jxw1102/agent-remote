@@ -3,9 +3,11 @@ import SwiftUI
 struct ChatView: View {
     @ObservedObject var viewModel: ChatViewModel
     @FocusState private var inputFocused: Bool
-    /// The first population (a resumed session's batched history) jumps to the bottom instantly;
-    /// only later updates animate, so opening a long session doesn't play a long scroll animation.
     @State private var didInitialScroll = false
+    @State private var showLiveTui = false
+    @State private var showSessionOptions = false
+
+    private var accent: ProviderAccent { viewModel.accent }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -13,7 +15,7 @@ struct ChatView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: Theme.Space.row) {
                         ForEach(viewModel.items) { item in
-                            TimelineItemView(item: item)
+                            TimelineItemView(item: item, accent: accent)
                                 .id(item.id)
                         }
                         if viewModel.isBusy {
@@ -29,8 +31,6 @@ struct ChatView: View {
                     .padding(.horizontal, Theme.Space.gutter)
                     .padding(.vertical, 10)
                 }
-                // Start pinned to the bottom (newest messages) so opening a session — or reopening a
-                // cached one — lands at the latest turn without a visible jump.
                 .defaultScrollAnchor(.bottom)
                 .onChange(of: viewModel.items) { _, _ in scrollToEnd(proxy) }
                 .onChange(of: viewModel.isBusy) { _, _ in scrollToEnd(proxy) }
@@ -40,13 +40,14 @@ struct ChatView: View {
             if !viewModel.commandSuggestions.isEmpty {
                 commandSuggestions
             }
-            if !viewModel.isBusy, !viewModel.availableModels.isEmpty {
-                modelBar
+            if !viewModel.isBusy {
+                optionsBar
             }
             inputBar
         }
         .background(Color(.systemGroupedBackground))
         .navigationBarTitleDisplayMode(.inline)
+        .tint(accent.tint)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
@@ -59,6 +60,15 @@ struct ChatView: View {
                         .lineLimit(1)
                 }
             }
+            ToolbarItem(placement: .primaryAction) {
+                if viewModel.liveTuiEnabled && !viewModel.sessionId.isEmpty {
+                    Button {
+                        showLiveTui = true
+                    } label: {
+                        Image(systemName: "terminal")
+                    }
+                }
+            }
         }
         .sheet(item: Binding(
             get: { viewModel.pendingPermission },
@@ -69,9 +79,32 @@ struct ChatView: View {
             }
             .presentationDetents([.medium])
         }
+        .sheet(item: Binding(
+            get: { viewModel.pendingQuestion },
+            set: { _ in }
+        )) { question in
+            QuestionSheetView(prompt: question) { answers, notes, cancel in
+                viewModel.respondToQuestion(answers: answers, notes: notes, cancel: cancel)
+            }
+            .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showLiveTui) {
+            if let client = liveClient {
+                // Detents / page sizing live on LiveTuiView so the sheet is near full-screen
+                // (especially on iPad, which otherwise uses a small form card).
+                LiveTuiView(client: client, sessionId: viewModel.sessionId, title: viewModel.displayTitle)
+            }
+        }
     }
 
-    /// Shown over an empty transcript if the session failed to start/continue.
+    /// Access DaemonClient through the chat's connection — Live TUI needs the same agent client.
+    private var liveClient: DaemonClient? {
+        // ChatViewModel holds the client privately; use a thin wrapper via environment would be
+        // cleaner, but LiveTuiView can take AgentRemoteClient from a callback. For now pass via
+        // the viewModel-exposed helper.
+        viewModel.liveDaemonClient
+    }
+
     @ViewBuilder
     private var statusOverlay: some View {
         if case .failed(let message) = viewModel.phase, viewModel.items.isEmpty {
@@ -82,35 +115,46 @@ struct ChatView: View {
         }
     }
 
-    /// A compact model picker just above the input — the exact model ids this daemon reports.
-    /// Selecting one only takes effect on the *next* message (the daemon has no "change the
-    /// running session's model" call — `model` is just a field on the next new/continue request).
-    private var modelBar: some View {
-        HStack(spacing: 0) {
-            Menu {
-                ForEach(viewModel.availableModels, id: \.self) { option in
-                    Button {
-                        viewModel.selectModel(option)
-                    } label: {
-                        if viewModel.isCurrentModel(option) {
-                            Label(ChatViewModel.modelLabel(option), systemImage: "checkmark")
-                        } else {
-                            Text(ChatViewModel.modelLabel(option))
+    private var optionsBar: some View {
+        HStack(spacing: 8) {
+            if viewModel.canSetModel && !viewModel.availableModels.isEmpty {
+                Menu {
+                    ForEach(viewModel.availableModels, id: \.self) { option in
+                        Button {
+                            viewModel.selectModel(option)
+                        } label: {
+                            if viewModel.isCurrentModel(option) {
+                                Label(ChatViewModel.modelLabel(option), systemImage: "checkmark")
+                            } else {
+                                Text(ChatViewModel.modelLabel(option))
+                            }
                         }
                     }
+                } label: {
+                    chipLabel(icon: "cpu", text: currentModelName)
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "cpu")
-                    Text(currentModelName)
-                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold))
-                }
-                .font(.caption.weight(.medium))
-                .foregroundStyle(Color.brand)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.brandSoft, in: Capsule())
             }
+
+            if viewModel.canSetEffort && !viewModel.availableEfforts.isEmpty {
+                Menu {
+                    ForEach(viewModel.availableEfforts, id: \.self) { option in
+                        Button {
+                            viewModel.selectEffort(option)
+                        } label: {
+                            if viewModel.isCurrentEffort(option) {
+                                Label(option == "default" || option.isEmpty ? "Default" : option.capitalized,
+                                      systemImage: "checkmark")
+                            } else {
+                                Text(option == "default" || option.isEmpty ? "Default" : option.capitalized)
+                            }
+                        }
+                    }
+                } label: {
+                    chipLabel(icon: "gauge.with.dots.needle.33percent",
+                              text: viewModel.selectedEffort.isEmpty ? "Effort" : viewModel.selectedEffort.capitalized)
+                }
+            }
+
             Spacer()
         }
         .readableColumn()
@@ -119,12 +163,23 @@ struct ChatView: View {
         .background(.bar)
     }
 
+    private func chipLabel(icon: String, text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+            Text(text)
+            Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold))
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(accent.tint)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(accent.soft, in: Capsule())
+    }
+
     private var currentModelName: String {
         ChatViewModel.modelLabel(viewModel.selectedModel.isEmpty ? "default" : viewModel.selectedModel)
     }
 
-    /// Slash-command autocomplete shown above the input while typing "/…". This daemon only
-    /// reports bare command names (no per-command description/argument hint).
     private var commandSuggestions: some View {
         ScrollView {
             VStack(spacing: 0) {
@@ -135,7 +190,7 @@ struct ChatView: View {
                         HStack(spacing: 8) {
                             Text("/\(name)")
                                 .font(.system(.subheadline, design: .monospaced).weight(.medium))
-                                .foregroundStyle(Color.brand)
+                                .foregroundStyle(accent.tint)
                             Spacer(minLength: 8)
                         }
                         .padding(.horizontal, Theme.Space.gutter)
@@ -154,7 +209,7 @@ struct ChatView: View {
 
     private var inputBar: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            TextField("Message Claude…", text: $viewModel.draftText, axis: .vertical)
+            TextField("Message \(accent.label)…", text: $viewModel.draftText, axis: .vertical)
                 .lineLimit(1...6)
                 .focused($inputFocused)
                 .padding(.horizontal, 14)
@@ -168,7 +223,7 @@ struct ChatView: View {
             } label: {
                 Image(systemName: viewModel.isBusy ? "stop.circle.fill" : "arrow.up.circle.fill")
                     .font(.system(size: 30))
-                    .foregroundStyle(viewModel.isBusy ? Color.red : (canSend ? Color.brand : Color.secondary.opacity(0.5)))
+                    .foregroundStyle(viewModel.isBusy ? Color.red : (canSend ? accent.tint : Color.secondary.opacity(0.5)))
             }
             .disabled(!viewModel.isBusy && !canSend)
             .animation(.easeInOut(duration: 0.15), value: viewModel.isBusy)
@@ -186,7 +241,6 @@ struct ChatView: View {
         if didInitialScroll {
             withAnimation { proxy.scrollTo(target, anchor: .bottom) }
         } else {
-            // Jump (no animation) the first time so a big resumed transcript lands instantly.
             didInitialScroll = true
             proxy.scrollTo(target, anchor: .bottom)
         }

@@ -2,9 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>keychain-access-groups</key>
-	<array>
-		<string>$(AppIdentifierPrefix)com.agentremote.app</string>
-	</array>
+	<!-- No keychain-access-groups: that entitlement needs a real Team ID /
+	     App Identifier Prefix. Ad-hoc / simulator builds then fail every
+	     SecItemAdd with -34018 (errSecMissingEntitlement). Generic passwords
+	     for this app alone work without an access group. -->
 </dict>
 </plist>

@@ -17,12 +17,20 @@ public struct FlexibleDate: Codable, Sendable, Equatable {
             date = Date(timeIntervalSince1970: seconds)
             return
         }
-        let string = try container.decode(String.self)
-        if let parsed = Self.parseISO8601(string) {
-            date = parsed
-        } else {
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unrecognized date format: \(string)")
+        if let intSec = try? container.decode(Int.self) {
+            date = Date(timeIntervalSince1970: TimeInterval(intSec))
+            return
         }
+        if let string = try? container.decode(String.self) {
+            if let parsed = Self.parseISO8601(string) {
+                date = parsed
+                return
+            }
+            // Never fail the whole session list for one odd timestamp.
+            date = .distantPast
+            return
+        }
+        date = .distantPast
     }
 
     public func encode(to encoder: Encoder) throws {

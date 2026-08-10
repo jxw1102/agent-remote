@@ -20,12 +20,60 @@ public struct PendingPermission: Codable, Sendable, Equatable {
     public let detail: String
 }
 
-/// Mirrors the job's `pending_question` field (AskUserQuestion, interactive mode only).
+public struct QuestionOption: Codable, Sendable, Equatable {
+    public let label: String
+    public let description: String
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
+        description = try c.decodeIfPresent(String.self, forKey: .description) ?? ""
+    }
+
+    private enum CodingKeys: String, CodingKey { case label, description }
+}
+
+public struct QuestionItem: Codable, Sendable, Equatable {
+    public let question: String
+    public let header: String
+    public let options: [QuestionOption]
+    public let multiSelect: Bool
+    /// Option label that opens a free-text field (e.g. Grok "Request changes").
+    public let noteFor: String
+    public let noteHint: String
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        question = try c.decodeIfPresent(String.self, forKey: .question) ?? ""
+        header = try c.decodeIfPresent(String.self, forKey: .header) ?? ""
+        options = try c.decodeIfPresent([QuestionOption].self, forKey: .options) ?? []
+        multiSelect = try c.decodeIfPresent(Bool.self, forKey: .multiSelect) ?? false
+        noteFor = try c.decodeIfPresent(String.self, forKey: .noteFor) ?? ""
+        noteHint = try c.decodeIfPresent(String.self, forKey: .noteHint) ?? ""
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case question, header, options, multiSelect, noteFor, noteHint
+    }
+}
+
+/// Mirrors the job's `pending_question` field (AskUserQuestion).
 public struct PendingQuestion: Codable, Sendable, Equatable {
     public let requestId: String
-    /// Opaque pass-through — shape not pinned down in the spec (no live AskUserQuestion trigger
-    /// during protocol research); render defensively rather than assuming a fixed structure.
-    public let questions: JSONValue
+    public let questions: [QuestionItem]
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        requestId = try c.decodeIfPresent(String.self, forKey: .requestId) ?? ""
+        // Prefer structured list; fall back to empty if an old shape arrives.
+        if let list = try? c.decode([QuestionItem].self, forKey: .questions) {
+            questions = list
+        } else {
+            questions = []
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey { case requestId, questions }
 }
 
 /// `GET /api/jobs/<id>?since=<seq>` — polling, not a real long-poll: returns whatever is buffered
@@ -74,7 +122,7 @@ public enum JobEvent: Sendable, Equatable {
     /// `allow == false` with `reason == "timeout"` when the phone never answered within the
     /// daemon's `permission_timeout` (default 300s).
     case permissionResolved(seq: Int, requestId: String, allow: Bool, reason: String?)
-    case question(seq: Int, requestId: String, questions: JSONValue)
+    case question(seq: Int, requestId: String, questions: [QuestionItem])
     case questionResolved(seq: Int, requestId: String, cancelled: Bool, answers: JSONValue?)
     /// Forward-compat catch-all for an event kind this client doesn't know about yet.
     case unknown(seq: Int, kind: String, payload: JSONValue)
@@ -137,11 +185,9 @@ extension JobEvent: Codable {
                 reason: try c.decodeIfPresent(String.self, forKey: .reason)
             )
         case "question":
-            self = .question(
-                seq: seq,
-                requestId: try c.decode(String.self, forKey: .requestId),
-                questions: try c.decode(JSONValue.self, forKey: .questions)
-            )
+            let requestId = try c.decodeIfPresent(String.self, forKey: .requestId) ?? ""
+            let questions = (try? c.decode([QuestionItem].self, forKey: .questions)) ?? []
+            self = .question(seq: seq, requestId: requestId, questions: questions)
         case "question_resolved":
             self = .questionResolved(
                 seq: seq,
@@ -187,6 +233,7 @@ extension JobEvent: Codable {
         case .question(_, let requestId, let questions):
             try c.encode("question", forKey: .kind)
             try c.encode(requestId, forKey: .requestId)
+            // questions is [QuestionItem]; encode as JSON array of objects via JSONEncoder cascade
             try c.encode(questions, forKey: .questions)
         case .questionResolved(_, let requestId, let cancelled, let answers):
             try c.encode("question_resolved", forKey: .kind)

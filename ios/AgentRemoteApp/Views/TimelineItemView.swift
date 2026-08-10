@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TimelineItemView: View {
     let item: TimelineItem
+    var accent: ProviderAccent = .claude
 
     /// Render inline markdown (bold, italic, `code`, links) while preserving the message's own line
     /// breaks. Parsing is done one line at a time so an inline span — especially an unbalanced or
@@ -21,7 +22,7 @@ struct TimelineItemView: View {
         switch item {
         case .userText(_, let text):
             if let command = SlashCommand.parse(text) {
-                SlashCommandView(command: command)
+                SlashCommandView(command: command, accent: accent)
             } else {
                 HStack {
                     Spacer(minLength: 44)
@@ -30,7 +31,7 @@ struct TimelineItemView: View {
                         .textSelection(.enabled)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(Color.brandSoft, in: RoundedRectangle(cornerRadius: Theme.Radius.bubble, style: .continuous))
+                        .background(accent.soft, in: RoundedRectangle(cornerRadius: Theme.Radius.bubble, style: .continuous))
                 }
                 .padding(.top, 4)
             }
@@ -42,7 +43,7 @@ struct TimelineItemView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
         case .toolCall(_, let name, let detail):
-            ToolCallRow(name: name, detail: detail)
+            ToolCallRow(name: name, detail: detail, accent: accent)
 
         case .permissionRequest(_, let toolName, let detail, let resolution):
             PermissionRequestRow(toolName: toolName, detail: detail, resolution: resolution)
@@ -70,12 +71,13 @@ struct TimelineItemView: View {
 struct ToolCallRow: View {
     let name: String
     let detail: String
+    var accent: ProviderAccent = .claude
 
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: ToolGlyph.symbol(for: name))
                 .font(.caption2)
-                .foregroundStyle(Color.brand)
+                .foregroundStyle(accent.tint)
                 .frame(width: 15)
             Text(name)
                 .font(.caption.weight(.semibold))
@@ -197,6 +199,7 @@ enum SlashCommand: Equatable {
 
 private struct SlashCommandView: View {
     let command: SlashCommand
+    var accent: ProviderAccent = .claude
 
     var body: some View {
         switch command {
@@ -204,7 +207,7 @@ private struct SlashCommandView: View {
             HStack {
                 Spacer(minLength: 44)
                 (
-                    Text("› ").foregroundColor(Color.brand).fontWeight(.bold)
+                    Text("› ").foregroundColor(accent.tint).fontWeight(.bold)
                     + Text(name).fontWeight(.semibold)
                     + Text(args.isEmpty ? "" : " \(args)").foregroundColor(.secondary)
                 )
@@ -213,7 +216,7 @@ private struct SlashCommandView: View {
                 .textSelection(.enabled)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(Color.brandSoft, in: RoundedRectangle(cornerRadius: Theme.Radius.bubble, style: .continuous))
+                .background(accent.soft, in: RoundedRectangle(cornerRadius: Theme.Radius.bubble, style: .continuous))
             }
             .padding(.top, 4)
 

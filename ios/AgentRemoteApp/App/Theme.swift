@@ -1,11 +1,10 @@
 import SwiftUI
 
-/// The app's visual system. One warm accent (Claude coral) over neutral system surfaces, a small set
-/// of spacing/radius constants, and tool iconography — kept in one place so every screen stays coherent.
+/// Visual system aligned with Android/web: per-harness accents over neutral chrome.
 enum Theme {
     enum Space {
-        static let row: CGFloat = 6      // between timeline items
-        static let gutter: CGFloat = 14  // screen horizontal inset
+        static let row: CGFloat = 6
+        static let gutter: CGFloat = 14
     }
     enum Radius {
         static let bubble: CGFloat = 17
@@ -14,21 +13,55 @@ enum Theme {
     }
 }
 
-extension Color {
-    /// Warm terracotta accent — adapts a touch lighter in dark mode so it stays legible on black.
-    static let brand = Color(
-        light: Color(red: 0.76, green: 0.38, blue: 0.26),
-        dark: Color(red: 0.88, green: 0.52, blue: 0.40)
-    )
-    /// Low-tint fills for user bubbles, selected chips, meters.
-    static let brandSoft = Color(
-        light: Color(red: 0.76, green: 0.38, blue: 0.26).opacity(0.13),
-        dark: Color(red: 0.88, green: 0.52, blue: 0.40).opacity(0.20)
-    )
+/// Harness accent — Claude coral, Grok cyan, Codex green (matches Android Accent).
+enum ProviderAccent: String, CaseIterable {
+    case claude, grok, codex, neutral
+
+    static func forProvider(_ raw: String?) -> ProviderAccent {
+        switch (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "claude": return .claude
+        case "grok": return .grok
+        case "codex": return .codex
+        default: return .neutral
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .claude: return "Claude"
+        case .grok: return "Grok"
+        case .codex: return "Codex"
+        case .neutral: return "Agent"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .claude:
+            return Color(light: Color(red: 0.85, green: 0.47, blue: 0.34),
+                         dark: Color(red: 0.90, green: 0.55, blue: 0.40))
+        case .grok:
+            return Color(light: Color(red: 0.0, green: 0.70, blue: 0.85),
+                         dark: Color(red: 0.0, green: 0.83, blue: 1.0))
+        case .codex:
+            return Color(light: Color(red: 0.06, green: 0.64, blue: 0.50),
+                         dark: Color(red: 0.19, green: 0.84, blue: 0.55))
+        case .neutral:
+            return Color(light: Color(red: 0.45, green: 0.50, blue: 0.58),
+                         dark: Color(red: 0.60, green: 0.64, blue: 0.70))
+        }
+    }
+
+    var soft: Color { tint.opacity(0.15) }
 }
 
 extension Color {
-    /// Builds a color that resolves differently in light vs dark mode.
+    /// Default app accent (neutral list chrome). Session UI recolors via ProviderAccent.
+    static let brand = ProviderAccent.claude.tint
+    static let brandSoft = ProviderAccent.claude.soft
+}
+
+extension Color {
     init(light: Color, dark: Color) {
         #if canImport(UIKit)
         self = Color(uiColor: UIColor { traits in
@@ -41,10 +74,7 @@ extension Color {
 }
 
 extension View {
-    /// Constrain content to a comfortable reading column and center it. A no-op on a phone (the
-    /// screen is already narrower than `max`); on iPad it stops text and bubbles from stretching
-    /// across the full width of the detail pane. Uses flanking spacers rather than chained frames,
-    /// which reliably caps a `LazyVStack` inside a `ScrollView` (chained `maxWidth` frames don't).
+    /// Comfortable reading column; caps width on iPad detail panes.
     func readableColumn(_ max: CGFloat = 680) -> some View {
         HStack(spacing: 0) {
             Spacer(minLength: 0)
@@ -55,7 +85,6 @@ extension View {
 }
 
 enum ToolGlyph {
-    /// Maps a Claude Code tool name to an SF Symbol so a collapsed tool row reads at a glance.
     static func symbol(for tool: String) -> String {
         switch tool {
         case "Bash", "BashOutput", "KillShell": return "terminal"
