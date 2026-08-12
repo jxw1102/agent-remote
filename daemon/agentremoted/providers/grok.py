@@ -28,12 +28,15 @@ import json
 import math
 import os
 import re
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import providers
+from .. import steps as steps_mod
+from .. import titles
 from ..render_blocks import (
     COLOR_META,
     COLOR_META_THOUGHT,
@@ -62,9 +65,11 @@ _BLANK_TITLES = ("", "(no title)", "untitled", "new session")
 # tool_call_update. Map those (and any stream tool events we do get) to the
 # same live-status phases the claude provider uses, so the phone banner shows
 # "Running: ls -la" instead of a bare "Grok is working...".
+# Prefer human `description` (run_terminal_command etc.) over raw command —
+# same contract as claude.tool_detail / live-status banner.
 _DETAIL_KEYS = (
-    "command", "target_file", "file_path", "path", "pattern", "url",
-    "query", "prompt", "description", "old_string", "glob",
+    "description", "command", "target_file", "file_path", "path", "pattern",
+    "url", "query", "prompt", "old_string", "glob",
 )
 _PHASE_BY_TOOL = {
     # Claude-style names (stream fake / aliases)
@@ -107,9 +112,16 @@ _NON_USER_KINDS = frozenset({"subagent"})
 
 
 def _is_user_session(summary: dict) -> bool:
-    """False for agent-spawned sessions (grok's Task/Explore subagents)."""
+    """False for agent-spawned sessions (grok's Task/Explore subagents) and for
+    the throwaway turns the title generator runs (identified by their cwd)."""
     kind = str((summary or {}).get("session_kind") or "").strip().lower()
-    return kind not in _NON_USER_KINDS
+    if kind in _NON_USER_KINDS:
+        return False
+    # Same lookup _session_summary uses: grok keeps cwd under `info`, not at
+    # the top level, so a top-level get() silently matched nothing.
+    info = (summary or {}).get("info") or {}
+    cwd = info.get("cwd") or (summary or {}).get("git_root_dir") or ""
+    return not titles.is_titler_cwd(cwd)
 
 
 def _tool_detail(tool_input, max_len: int = 200) -> str:
@@ -283,9 +295,14 @@ def _status_blocks(text: str, meta_kind: str) -> list:
 class GrokStore:
     """Read-only view over grok's session tree."""
 
-    def __init__(self, grok_home: Path):
+    def __init__(self, grok_home: Path, config=None):
         self.grok_home = grok_home
         self.sessions_root = grok_home / "sessions"
+        # Only needed to derive titles (see _display_title); a store built
+        # without it simply keeps the CLI's own naming.
+        self.config = config
+        # Set by providers.build_one to this harness's own generator.
+        self.titler = None
 
     # -- discovery -----------------------------------------------------
 
@@ -378,6 +395,7 @@ class GrokStore:
     def list_sessions(self, project_id: str = None, limit: int = 25,
                       user_only: bool = True) -> list:
         rows = []
+        seen_ids = set()
         for sdir in self._iter_session_dirs():
             summary = self._load_summary(sdir)
             if not summary:
@@ -386,10 +404,15 @@ class GrokStore:
                 continue
             if user_only and not _is_user_session(summary):
                 continue
+            # Same uuid under two cwd groups (relocation) must not double-list.
+            sid = sdir.name
+            if sid in seen_ids:
+                continue
             cwd = self._project_cwd(summary)
             pid = _munge_cwd(cwd) if cwd else "no-project"
             if project_id and pid != project_id:
                 continue
+            seen_ids.add(sid)
             rows.append(self._session_summary(sdir, summary, pid))
         rows.sort(key=lambda r: r["last_active"] or r["started"], reverse=True)
         return rows[:limit]
@@ -540,7 +563,63 @@ class GrokStore:
 
     # -- transcripts ---------------------------------------------------
 
-    def get_messages(self, session_id: str, offset: int = None, limit: int = 50) -> dict:
+    supports_steps = True     # `?detail=steps` (see agentremoted.steps)
+
+    def get_step(self, session_id: str, ref: str):
+        """Full text behind one truncated step.
+
+        `ref` is "<kind><journal line>" — re-read that line and re-extract,
+        which keeps the window response small without holding anything in
+        memory between requests.
+        """
+        sdir = self.find_session_dir(session_id)
+        if sdir is None or not ref or len(ref) < 3:
+            return None
+        kind, num = ref[:2], ref[2:]
+        try:
+            want = int(num)
+        except ValueError:
+            return None
+        text = None
+        parts = []
+        try:
+            with open(sdir / "updates.jsonl", "r", encoding="utf-8",
+                      errors="replace") as f:
+                for ln, line in enumerate(f):
+                    if kind == "gt":
+                        # A thought spans every consecutive chunk from `want`.
+                        if ln < want:
+                            continue
+                        ev = _safe_json(line) or {}
+                        u = (ev.get("params") or {}).get("update") or {}
+                        if u.get("sessionUpdate") != "agent_thought_chunk":
+                            if parts:
+                                break
+                            continue
+                        parts.append(_content_text(u.get("content")) or "")
+                        continue
+                    if ln != want:
+                        continue
+                    ev = _safe_json(line) or {}
+                    u = (ev.get("params") or {}).get("update") or {}
+                    if kind == "gu":
+                        raw = u.get("rawInput")
+                        title = u.get("title") or "tool"
+                        text = steps_mod.format_tool_use(title, raw)
+                    elif kind == "gr":
+                        text = steps_mod.format_tool_result(
+                            _grok_tool_output(u))
+                    break
+        except OSError:
+            return None
+        if parts:
+            text = "".join(parts)
+        if text is None:
+            return None
+        return {"ref": ref, "text": text, "bytes": len(text)}
+
+    def get_messages(self, session_id: str, offset: int = None, limit: int = 50,
+                     steps: bool = False) -> dict:
         sdir = self.find_session_dir(session_id)
         if sdir is None:
             return None
@@ -554,7 +633,11 @@ class GrokStore:
         # rendering runs only over the returned window. Both timed for the
         # client (see the claude provider for the rationale).
         t0 = time.perf_counter()
-        messages = _build_transcript(updates)
+        step_rows = []
+        if steps:
+            messages, step_rows = _build_transcript(updates, want_steps=True)
+        else:
+            messages = _build_transcript(updates)
         t1 = time.perf_counter()
 
         total = len(messages)
@@ -564,6 +647,10 @@ class GrokStore:
         window = messages[offset: offset + limit]
         for msg in window:
             _render_grok_message(msg)
+        if steps:
+            steps_mod.attach(window, step_rows)
+            for msg in messages:
+                msg.pop("_pos", None)
         t2 = time.perf_counter()
 
         return {
@@ -608,17 +695,26 @@ class GrokStore:
             "size_bytes": size,
         }
 
-    @staticmethod
-    def _display_title(summary: dict, sdir: Path) -> str:
+    def _display_title(self, summary: dict, sdir: Path) -> str:
+        # Grok's own generated_title is already a real title — never override it.
         for key in ("generated_title", "session_summary"):
             title = " ".join(str(summary.get(key) or "").split())
             if title and title.lower() not in _BLANK_TITLES:
                 return _preview(title, _MAX_TITLE)
-        title = _first_user_preview(sdir / "updates.jsonl")
-        if title:
-            return _preview(title, _MAX_TITLE)
         sid = (summary.get("info") or {}).get("id") or sdir.name
-        return "Session %s" % sid[:8]
+        first = _first_user_preview(sdir / "updates.jsonl")
+        if not first:
+            return "Session %s" % sid[:8]
+        # Without one, the fallback is a raw opening message. Derive a title
+        # instead; the raw text shows once while the first call is in flight.
+        if self.config is not None:
+            cache = titles.shared_cache(self.config)
+            sig = titles.sig_for(first)
+            got = cache.get(sid, sig)
+            if got:
+                return got
+            cache.request(sid, sig, first, self.titler)
+        return _preview(first, _MAX_TITLE)
 
 
 def _first_user_preview(updates_path: Path) -> str:
@@ -719,7 +815,7 @@ def _tail_preview(updates_path: Path):
     return last_role, "".join(parts), last_ts
 
 
-def _build_transcript(updates_path: Path) -> list:
+def _build_transcript(updates_path: Path, want_steps: bool = False):
     """updates.jsonl -> messages shaped like the claude provider's:
     {uuid, role, ts, text, blocks}, roles user/assistant/status.
 
@@ -729,9 +825,17 @@ def _build_transcript(updates_path: Path) -> list:
     Tool calls and raw thought text are transient job state — dropped here,
     exactly like the claude provider drops tool_use lines.
     """
-    rows = []          # {role, ts, text, metaKind?}
+    rows = []          # {role, ts, text, metaKind?, pos}
     prompt_starts = [] # rows index where each human prompt begins (/rewind)
-    cur = None         # {"role", "ts", "parts"}
+    cur = None         # {"role", "ts", "parts", "pos"}
+    # Process view (want_steps): tool_call / tool_call_update / thought text,
+    # each tagged with the journal line it came from so steps can be attached
+    # to the message they followed. Off by default — the default transcript
+    # must stay exactly as cheap as it was.
+    step_rows = []     # (line index, step dict)
+    calls = {}         # toolCallId -> title, for naming the result row
+    th_parts = []      # consecutive agent_thought_chunk text, coalesced
+    th_pos = [0]
     th_start = th_end = None
     th_secs = 0.0
     turn_start = None
@@ -741,7 +845,8 @@ def _build_transcript(updates_path: Path) -> list:
         if cur:
             text = "".join(cur["parts"]).strip()
             if text:
-                rows.append({"role": cur["role"], "ts": cur["ts"], "text": text})
+                rows.append({"role": cur["role"], "ts": cur["ts"],
+                             "text": text, "pos": cur["pos"]})
         cur = None
 
     def close_thought():
@@ -753,7 +858,7 @@ def _build_transcript(updates_path: Path) -> list:
         th_secs += dur if dur > 0 else 0.3
         th_start = th_end = None
 
-    def append(role, text, ts):
+    def append(role, text, ts, ln=0):
         nonlocal cur
         if not text:
             return
@@ -761,7 +866,18 @@ def _build_transcript(updates_path: Path) -> list:
             cur["parts"].append(text)
         else:
             flush()
-            cur = {"role": role, "ts": ts, "parts": [text]}
+            cur = {"role": role, "ts": ts, "parts": [text], "pos": ln}
+
+    def close_thought_step(ln):
+        """One thinking step per run of agent_thought_chunk, not per chunk —
+        grok emits hundreds of chunks for a single thought."""
+        if not want_steps or not th_parts:
+            return
+        text = "".join(th_parts).strip()
+        del th_parts[:]
+        if text:
+            step_rows.append((th_pos[0],
+                              steps_mod.thinking("gt%d" % th_pos[0], "", text)))
 
     def insert_thought_status(ts):
         """Place "Thought for X" directly under the last user prompt."""
@@ -771,7 +887,14 @@ def _build_transcript(updates_path: Path) -> list:
             if rows[i]["role"] == "user":
                 idx = i + 1
                 break
-        row = {"role": "status", "ts": ts, "text": text, "metaKind": "thought"}
+        # Position it with the user prompt it sits under, not at 0: attach()
+        # gives a message everything from its own position to the next one's,
+        # so a status row without a position would swallow the whole session.
+        # Sharing the prompt's position makes "Thought for X" own the turn's
+        # steps and leaves the prompt bubble itself empty, which reads right.
+        pos = rows[idx - 1].get("pos", 0) if idx else 0
+        row = {"role": "status", "ts": ts, "text": text,
+               "metaKind": "thought", "pos": pos}
         if idx is None:
             rows.append(row)
         elif idx < len(rows) and rows[idx].get("metaKind") == "thought":
@@ -784,7 +907,7 @@ def _build_transcript(updates_path: Path) -> list:
     except OSError:
         return []
     with f:
-        for line in f:
+        for ln, line in enumerate(f):
             ev = _safe_json(line)
             if not ev:
                 continue
@@ -804,7 +927,7 @@ def _build_transcript(updates_path: Path) -> list:
                     # First chunk of a new human prompt: it will flush to
                     # exactly this row index (the group is contiguous).
                     prompt_starts.append(len(rows))
-                append("user", text, ts)
+                append("user", text, ts, ln)
             elif kind == "rewind_marker":
                 # /rewind truncated grok's history, but updates.jsonl is
                 # append-only so the rewound turns are still in it. Drop them
@@ -818,22 +941,54 @@ def _build_transcript(updates_path: Path) -> list:
                 except (TypeError, ValueError):
                     idx = -1
                 if 0 <= idx < len(prompt_starts):
+                    cut_pos = rows[prompt_starts[idx]].get("pos", 0)
                     del rows[prompt_starts[idx]:]
                     del prompt_starts[idx:]
+                    # updates.jsonl is append-only, so the rewound turns' tool
+                    # calls are still in it — drop them with their messages.
+                    step_rows[:] = [(q, st) for q, st in step_rows
+                                    if q < cut_pos]
                 th_secs = 0.0
                 turn_start = 0.0
             elif kind == "agent_message_chunk":
                 close_thought()
-                append("assistant", _content_text(update.get("content")), ts)
+                close_thought_step(ln)
+                append("assistant", _content_text(update.get("content")), ts, ln)
             elif kind == "agent_thought_chunk":
                 if th_start is None:
                     th_start = ts
                 th_end = ts
+                if want_steps:
+                    if not th_parts:
+                        th_pos[0] = ln
+                    th_parts.append(_content_text(update.get("content")) or "")
+            elif kind == "tool_call_update":
+                # The result half: grok streams in_progress updates and one
+                # final completed one carrying the output.
+                if want_steps and update.get("status") == "completed":
+                    cid = update.get("toolCallId") or ""
+                    raw_out = _grok_tool_output(update)
+                    step_rows.append((ln, steps_mod.tool_result(
+                        "gr%d" % ln, _iso(ts), True,
+                        steps_mod.format_tool_result(
+                            raw_out, name=calls.get(cid, "")))))
+                    calls.pop(cid, None)
             elif kind in ("tool_call", "plan"):
                 close_thought()
+                close_thought_step(ln)
                 flush()
+                if want_steps and kind == "tool_call":
+                    cid = update.get("toolCallId") or ""
+                    title = update.get("title") or "tool"
+                    calls[cid] = title
+                    raw = update.get("rawInput")
+                    full = steps_mod.format_tool_use(title, raw)
+                    step_rows.append((ln, steps_mod.tool_use(
+                        "gu%d" % ln, _iso(ts), title,
+                        _grok_tool_detail(raw), full)))
             elif kind == "turn_completed":
                 close_thought()
+                close_thought_step(ln)
                 flush()
                 if th_secs > 0:
                     insert_thought_status(ts)
@@ -852,7 +1007,7 @@ def _build_transcript(updates_path: Path) -> list:
                 if worked > 0:
                     rows.append({"role": "status", "ts": ts,
                                  "text": "Worked for %s" % _fmt_duration(worked),
-                                 "metaKind": "worked"})
+                                 "metaKind": "worked", "pos": ln})
                 th_secs = 0.0
                 turn_start = None
             # everything else (session_info, current_mode_update, ...) ignored
@@ -871,8 +1026,48 @@ def _build_transcript(updates_path: Path) -> list:
         }
         if row.get("metaKind"):
             msg["metaKind"] = row["metaKind"]
+        if want_steps:
+            msg["_pos"] = row.get("pos", 0)
         messages.append(msg)
-    return messages
+    return (messages, step_rows) if want_steps else messages
+
+
+def _grok_tool_detail(raw) -> str:
+    """One short line naming what the call is about (description, path, cmd)."""
+    if not isinstance(raw, dict):
+        return ""
+    for key in ("description", "command", "target_directory", "target_file",
+                "path", "file", "query", "pattern", "url"):
+        val = raw.get(key)
+        if isinstance(val, str) and val.strip():
+            return " ".join(val.split())[:200]
+    return ""
+
+
+def _grok_tool_output(update: dict) -> str:
+    """Text out of a completed tool_call_update.
+
+    grok nests it as content:[{type:content, content:{type:text,text:…}}];
+    rawOutput is the fallback when the content array is absent.
+    """
+    parts = []
+    for item in update.get("content") or []:
+        if not isinstance(item, dict):
+            continue
+        inner = item.get("content")
+        if isinstance(inner, dict) and inner.get("type") == "text":
+            parts.append(inner.get("text") or "")
+        elif isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    if parts:
+        return "\n".join(p for p in parts if p)
+    raw = update.get("rawOutput")
+    if isinstance(raw, str):
+        return raw
+    try:
+        return json.dumps(raw, indent=1, ensure_ascii=False) if raw else ""
+    except (TypeError, ValueError):
+        return ""
 
 
 def _render_grok_message(msg: dict) -> None:
@@ -917,6 +1112,8 @@ class GrokRunner:
         # Lazily created tmux-TUI manager for "interactive" jobs.
         self._interactive = None
         self._interactive_lock = threading.Lock()
+        # isolate_root → GrokStore for guest homes (sessions under sandbox).
+        self._guest_stores = {}
 
     def _interactive_mgr(self):
         with self._interactive_lock:
@@ -924,6 +1121,37 @@ class GrokRunner:
                 from .grok_interactive import GrokInteractiveManager
                 self._interactive = GrokInteractiveManager(self.config, self)
             return self._interactive
+
+    def _store_for(self, job=None, isolate_root: str = ""):
+        """Host store, or guest ``<isolate_root>/.grok`` when confined.
+
+        Sandboxed guest TUIs set GROK_HOME to the guest tree, so journals and
+        turn_completed land there — not under the main ``~/.grok``.
+        """
+        root = (isolate_root or "").strip() or str(
+            getattr(job, "isolate_root", "") or "").strip()
+        if not root:
+            return self.store
+        key = os.path.realpath(os.path.expanduser(root))
+        store = self._guest_stores.get(key)
+        if store is None:
+            store = GrokStore(Path(key) / ".grok")
+            self._guest_stores[key] = store
+        return store
+
+    def _session_dir(self, session_id: str, job=None, isolate_root: str = ""):
+        """Resolve session dir, preferring the guest store when isolated."""
+        sid = (session_id or "").strip()
+        if not sid:
+            return None
+        store = self._store_for(job=job, isolate_root=isolate_root)
+        sdir = store.find_session_dir(sid)
+        if sdir is not None:
+            return sdir
+        # Legacy / host fallback if the session was written before isolation.
+        if store is not self.store:
+            return self.store.find_session_dir(sid)
+        return None
 
     def run_alternate(self, job, mode) -> bool:
         """Fully handle a job outside the subprocess pipeline. "interactive"
@@ -949,9 +1177,25 @@ class GrokRunner:
         dropped turns). updates.jsonl is only the UI journal: a matching
         rewind_marker is appended there so the phone's transcript drops the
         same turns, exactly like grok's own TUI /rewind does. Returns
-        (steps_done, preview_of_first_dropped_prompt)."""
+        (steps_done, preview_of_first_dropped_prompt).
+
+        Precision notes (fixed 2026-08):
+        * Only real human prompts count — not ``<user_info>``, session-resume
+          boilerplate, or pure ``<system-reminder>`` injections.
+        * ``target_prompt_index`` is the sequential index among user messages
+          the client currently sees (from ``_build_transcript``), NOT grok's
+          global ``prompt_index`` field (which can be 89 while the UI only
+          has 10 effective prompts — that used to leave the phone uncut).
+        """
         sid = (session_id or "").strip()
-        sdir = self.store.find_session_dir(sid) if sid else None
+        # Prefer guest store when this session only exists under a guest root.
+        sdir = self._session_dir(sid)
+        if sdir is None:
+            # Walk known guest stores (isolate roots) if not on host.
+            for store in list(self._guest_stores.values()):
+                sdir = store.find_session_dir(sid)
+                if sdir is not None:
+                    break
         history = (sdir / "chat_history.jsonl") if sdir is not None else None
         if history is None or not history.is_file():
             raise providers.RunnerError("session history not found")
@@ -961,31 +1205,77 @@ class GrokRunner:
         raw = history.read_text(encoding="utf-8", errors="replace")
         lines = raw.splitlines()
 
-        def entry_text(content):
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                return " ".join(b.get("text", "") for b in content
-                                if isinstance(b, dict))
-            return ""
+        def _norm(s: str) -> str:
+            return " ".join((s or "").split())
 
-        queries = []  # (line_idx, prompt_index, human_text)
+        def _countable_prompt(content) -> str:
+            """Return human prompt body or "" if this user row is not a
+            phone-visible turn (injections / resume scaffolding)."""
+            raw_text = _content_text(content)
+            # Prefer <user_query> body when present.
+            m = re.search(r"<user_query>\s*(.*?)\s*</user_query>",
+                          raw_text or "", re.S)
+            body = (m.group(1) if m else _human_text(raw_text)).strip()
+            if not body:
+                return ""
+            low = body.lower()
+            if low.startswith("<user_info") or body.lstrip().startswith("<user_info"):
+                return ""
+            if "session is being continued from a previous" in low:
+                return ""
+            if low.startswith("<system-") or low.startswith("<monitor-"):
+                return ""
+            if low.startswith("[silent]"):
+                return ""
+            if low.startswith("[shell]") and "[silent]" in low:
+                return ""
+            return body
+
+        queries = []  # (line_idx, human_text)
         for i, line in enumerate(lines):
             ev = _safe_json(line)
             if not isinstance(ev, dict) or ev.get("type") != "user":
                 continue
-            text = entry_text(ev.get("content"))
-            m = re.search(r"<user_query>\s*(.*?)\s*</user_query>", text, re.S)
-            if m:
-                queries.append((i, ev.get("prompt_index"), m.group(1)))
-            elif _human_text(text):
-                # Unwrapped human prompt (older grok) — same treatment.
-                queries.append((i, ev.get("prompt_index"), _human_text(text)))
+            body = _countable_prompt(ev.get("content"))
+            if body:
+                queries.append((i, body))
         if not queries:
             raise providers.RunnerError(
                 "nothing to rewind — no user messages yet")
-        steps = max(1, min(int(steps), len(queries)))
-        cut_idx, target_prompt, preview_text = queries[-steps]
+
+        updates = sdir / "updates.jsonl"
+        # How many user messages the phone currently shows (prior markers applied).
+        shown = []
+        try:
+            if updates.is_file():
+                shown = [m.get("text") or ""
+                         for m in _build_transcript(updates)
+                         if m.get("role") == "user"]
+        except Exception:
+            log.exception("rewind: could not build transcript for index")
+            shown = []
+
+        steps = max(1, int(steps))
+        # Prefer aligning the history cut to the Nth-last *shown* user
+        # message (what "Rewind to here" counted), not a raw queries[-N]
+        # that may include older scaffolding still sitting in chat_history.
+        cut_q = None  # index into queries
+        if shown:
+            steps = min(steps, len(shown), len(queries))
+            target_shown = _norm(shown[-steps])[:240]
+            for qi in range(len(queries) - 1, -1, -1):
+                qn = _norm(queries[qi][1])[:240]
+                if not qn or not target_shown:
+                    continue
+                if qn == target_shown or qn in target_shown or target_shown in qn:
+                    cut_q = qi
+                    break
+        if cut_q is None:
+            steps = min(steps, len(queries))
+            cut_q = len(queries) - steps
+        steps_done = len(queries) - cut_q
+        cut_idx, preview_text = queries[cut_q]
+
         backup = history.parent / (history.name + ".rewind-bak")
         try:
             backup.write_text(raw, encoding="utf-8")
@@ -994,10 +1284,13 @@ class GrokRunner:
         with open(history, "w", encoding="utf-8") as f:
             if cut_idx:
                 f.write("\n".join(lines[:cut_idx]) + "\n")
-        # Tell the transcript the same story. grok numbers prompts with the
-        # post-rewind counter, which is exactly the phone parser's effective
-        # index, so the entry's own prompt_index is the right target.
-        updates = sdir / "updates.jsonl"
+
+        # Marker index = first *shown* user message to drop (0-based over the
+        # phone transcript after prior rewind_markers). NEVER use grok's
+        # prompt_index field (global counter, often >> shown length).
+        n_shown = len(shown) if shown else len(queries)
+        idx = max(0, n_shown - steps)
+
         last_seq = -1
         try:
             with open(updates, "r", encoding="utf-8", errors="replace") as f:
@@ -1015,10 +1308,6 @@ class GrokRunner:
                             pass
         except OSError:
             pass
-        try:
-            idx = int(target_prompt)
-        except (TypeError, ValueError):
-            idx = max(0, len(queries) - steps)
         now = time.time()
         marker = {
             "timestamp": int(now),
@@ -1042,7 +1331,7 @@ class GrokRunner:
         except OSError as e:
             log.warning("could not append rewind_marker: %s", e)
         preview = " ".join(preview_text.split())[:120]
-        return steps, preview
+        return steps_done, preview
 
     def type_into_tui(self, session_id: str, text: str) -> str:
         """Type a message into a session's live interactive TUI ("" or err)."""
@@ -1152,7 +1441,8 @@ class GrokRunner:
     # Interactive built-ins verified in grok's own TUI: /compact exists,
     # /exit closes it. /rewind is served by the DAEMON (marker append in
     # jobs.py), so unlike the others it also works on headless turns.
-    _BUILTIN_SLASH = ["/compact", "/exit", "/rewind"]
+    # /goal is always advertised so phone/web clients do not refuse it.
+    _BUILTIN_SLASH = ["/compact", "/exit", "/goal", "/rewind"]
 
     def slash_commands(self) -> list:
         """The interactive built-ins plus whatever config adds — grok's CLI
@@ -1162,6 +1452,28 @@ class GrokRunner:
             if isinstance(extra, str) and extra.strip():
                 out.append(extra.strip())
         return sorted(set(out))
+
+    def title_for(self, text: str) -> str:
+        """Name a Grok session using Grok itself.
+
+        A one-shot `grok -p` in the titler's scratch directory: no API key
+        needed (the CLI's own login answers), and the throwaway session it
+        creates is filtered out of listings by that cwd. Roughly ten seconds,
+        so only ever called from the background titler.
+        """
+        cwd = str(titles.titler_cwd())
+        cmd = [self.config.grok_bin, "-p", titles.prompt_for(text),
+               "--cwd", cwd]
+        env = dict(os.environ)
+        env.update({str(k): str(v)
+                    for k, v in (getattr(self.config, "grok_env", None) or {}).items()})
+        env.setdefault("GROK_DISABLE_AUTOUPDATER", "1")
+        try:
+            out = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True,
+                                 text=True, timeout=120).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return titles.title_from_output(out)
 
     def prepare(self, job, mode):
         # `mode` is claude vocabulary; grok's permission model is the static
@@ -1373,7 +1685,7 @@ class GrokRunner:
         sid = job.new_session_id or job.session_id
         if not sid:
             return
-        sdir = self.store.find_session_dir(sid)
+        sdir = self._session_dir(sid, job=job)
         if sdir is None:
             return
         path = sdir / "updates.jsonl"
@@ -1559,7 +1871,7 @@ class GrokRunner:
                 and str(upd.get("status") or "").lower() in self._TOOL_DONE:
             state["ask_questions"] = None
 
-    def ask_pending(self, session_id: str):
+    def ask_pending(self, session_id: str, job=None, isolate_root: str = ""):
         """(call_id, questions) if this session's last ask panel is still
         blocking — read from the journal, so it survives a daemon restart and
         is visible before a turn starts.
@@ -1571,7 +1883,7 @@ class GrokRunner:
         anything that can only happen once the panel is gone — the turn
         finishing, or another message being submitted — since the panel holds
         the turn and swallows the keyboard while it is up."""
-        sdir = self.store.find_session_dir(session_id) if session_id else None
+        sdir = self._session_dir(session_id, job=job, isolate_root=isolate_root)
         if sdir is None:
             return None
         pending = None
@@ -1603,6 +1915,49 @@ class GrokRunner:
             return None
         return pending
 
+    def turn_idle_on_disk(self, session_id: str, job=None,
+                         isolate_root: str = "") -> bool:
+        """True when the journal's latest turn already ended (turn_completed
+        after the last user_message), so a resume watcher will never see a
+        new end event if it only tails from EOF.
+
+        Used after guest-store misses or daemon restarts leave a job "running"
+        while the TUI already finished. Modal panels (ask/plan) are not idle.
+        """
+        sdir = self._session_dir(session_id, job=job, isolate_root=isolate_root)
+        if sdir is None:
+            return False
+        # Reuse the full-file scan so a stuck open ask does not look idle.
+        if self.ask_pending(session_id, job=job, isolate_root=isolate_root):
+            return False
+        if self.plan_awaiting(session_id, job=job, isolate_root=isolate_root):
+            return False
+        last = None  # "user" | "done" | "work"
+        try:
+            with open(sdir / "updates.jsonl", "r", encoding="utf-8",
+                      errors="replace") as f:
+                for line in f:
+                    if "sessionUpdate" not in line:
+                        continue
+                    ev = _safe_json(line)
+                    if not isinstance(ev, dict):
+                        continue
+                    upd = (ev.get("params") or {}).get("update") or {}
+                    if not isinstance(upd, dict):
+                        continue
+                    kind = upd.get("sessionUpdate") or ""
+                    if kind == "user_message_chunk":
+                        last = "user"
+                    elif kind == "turn_completed":
+                        last = "done"
+                    elif kind in ("agent_message_chunk", "agent_thought_chunk",
+                                  "tool_call", "tool_call_update", "plan"):
+                        if last != "done":
+                            last = "work"
+        except OSError:
+            return False
+        return last == "done"
+
     def _note_plan_approval(self, job, upd: dict, kind: str):
         """Track grok's plan-approval panel from the journal alone.
 
@@ -1630,10 +1985,11 @@ class GrokRunner:
                                                 "cancelled", "canceled"):
                 state["plan_pending"] = False
 
-    def plan_awaiting(self, session_id: str) -> bool:
+    def plan_awaiting(self, session_id: str, job=None,
+                      isolate_root: str = "") -> bool:
         """Does this session sit on an unanswered plan approval? Read from
         the session's own plan_mode.json (written by grok, not scraped)."""
-        sdir = self.store.find_session_dir(session_id) if session_id else None
+        sdir = self._session_dir(session_id, job=job, isolate_root=isolate_root)
         if sdir is None:
             return False
         try:
@@ -1643,10 +1999,10 @@ class GrokRunner:
         except (OSError, ValueError):
             return False
 
-    def plan_text(self, session_id: str) -> str:
+    def plan_text(self, session_id: str, job=None, isolate_root: str = "") -> str:
         """The plan under review — grok writes it to plan.md in the session
         dir, so the phone gets real markdown instead of a boxed pane render."""
-        sdir = self.store.find_session_dir(session_id) if session_id else None
+        sdir = self._session_dir(session_id, job=job, isolate_root=isolate_root)
         if sdir is None:
             return ""
         try:

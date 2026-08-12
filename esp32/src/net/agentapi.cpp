@@ -154,6 +154,50 @@ bool ping(int daemon, String *versionOut, String *errOut) {
   return doc["ok"] | false;
 }
 
+const char *focusStateLabel(const String &state) {
+  if (state == "needs_answer") return "needs answer";
+  if (state == "failed") return "failed";
+  if (state == "working") return "working";
+  if (state == "turn_finished") return "finished";
+  return "";
+}
+
+// Focus arrives membership-filtered and urgency-sorted from the daemon, so
+// the pager takes the first rows verbatim — no local ranking to drift out of
+// step with the phone and the web app.
+bool fetchFocus(int daemon, std::vector<SessionRow> *out, String *errOut) {
+  if (!out) return false;
+  out->clear();
+  String body;
+  if (!httpGet(daemon, "/api/focus", &body, nullptr, errOut)) return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, body)) {
+    if (errOut) *errOut = "bad json";
+    String head = body.substring(0, 120);
+    head.replace("\n", " ");
+    dlog::logf("[api] d%d focus bad json (%u bytes): %s", daemon,
+               (unsigned)body.length(), head.c_str());
+    return false;
+  }
+  JsonArray arr = doc["sessions"].as<JsonArray>();
+  if (arr.isNull()) return true;  // nothing in focus
+  for (JsonObject s : arr) {
+    SessionRow r;
+    r.id = s["id"] | s["session_id"] | "";
+    r.title = s["title"] | s["name"] | r.id.substring(0, 8);
+    r.cwd = s["cwd"] | s["project"] | "";
+    r.provider = s["provider"] | "";
+    r.working = s["working"] | false;
+    r.lastActive = (const char *)(s["last_active"] | "");
+    r.daemon = (uint8_t)daemon;
+    r.focus = true;
+    r.focusState = (const char *)(s["focus_state"] | "");
+    r.focusUnread = s["focus_unread"] | false;
+    if (r.id.length()) out->push_back(r);
+  }
+  return true;
+}
+
 bool fetchSessions(int daemon, std::vector<SessionRow> *out, String *errOut) {
   if (!out) return false;
   out->clear();

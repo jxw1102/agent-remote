@@ -71,6 +71,21 @@ static QString normalizeExecMode(const QString &mode)
     return QLatin1String("headless");
 }
 
+// Kanban state tag as shown on a list row. Kept short: it shares the third
+// line with the branch, the daemon name and the relative time.
+static QString focusStateLabel(const QString &state)
+{
+    if (state == QLatin1String("needs_answer"))
+        return QObject::tr("needs answer");
+    if (state == QLatin1String("failed"))
+        return QObject::tr("failed");
+    if (state == QLatin1String("working"))
+        return QObject::tr("working");
+    if (state == QLatin1String("turn_finished"))
+        return QObject::tr("turn finished");
+    return QString();
+}
+
 // Daemon still expects "bypassPermissions" for non-interactive turns.
 static QString wireExecMode(const QString &mode)
 {
@@ -361,6 +376,9 @@ ApiClient::ApiClient(QObject *parent)
     m_effortOverride = settings.value("effortOverride", "default").toString();
     // Progress cues are on by default; the Session sheet silences either one.
     m_soundCues = settings.value("soundCues", true).toBool();
+    // Focus mode is a view preference; capFocus comes from /api/ping.
+    m_focusMode = settings.value("focusMode", false).toBool();
+    m_capFocus = false;
     m_ledCues = settings.value("ledCues", true).toBool();
     m_chime->setSoundEnabled(m_soundCues);
     m_chime->setLedEnabled(m_ledCues);
@@ -543,20 +561,26 @@ bool ApiClient::harnessCap(const QString &harness, const QString &cap,
 // so validate against the OPEN session's own list.
 QStringList ApiClient::sessionSlashCommands() const
 {
+    QStringList out;
     const QString h = m_sessionProvider.trimmed().toLower();
     if (!h.isEmpty() && m_activeProfile >= 0
             && m_activeProfile < m_profiles.size()) {
         QVariantMap prof = m_profiles.at(m_activeProfile).toMap();
         QVariantMap d = prof.value("provider_details").toMap().value(h).toMap();
         if (d.contains(QLatin1String("slash_commands"))) {
-            QStringList out;
             QVariantList raw = d.value("slash_commands").toList();
             for (int i = 0; i < raw.size(); ++i)
                 out.append(raw.at(i).toString());
-            return out;
         }
     }
-    return m_slashCommands;
+    if (out.isEmpty())
+        out = m_slashCommands;
+    // Always allow even if an older daemon omits them from /api/ping.
+    if (!out.contains(QLatin1String("/rewind")))
+        out.append(QLatin1String("/rewind"));
+    if (!out.contains(QLatin1String("/goal")))
+        out.append(QLatin1String("/goal"));
+    return out;
 }
 
 // Can the harness of the OPEN session rewind? The daemon (>= 2.5) rewinds
@@ -568,6 +592,69 @@ bool ApiClient::sessionCanRewind() const
     if (m_sessionProvider.isEmpty())
         return m_capRewind;
     return harnessCap(m_sessionProvider, QLatin1String("rewind"), m_capRewind);
+}
+
+// Per-harness model / effort lists for the Session sheet. Multi-host /api/ping
+// puts a union on the root; using those for every open session made Claude
+// sessions show Grok effort pickers (and vice versa).
+QStringList ApiClient::sessionModels() const
+{
+    const QString h = m_sessionProvider.trimmed().toLower();
+    if (!h.isEmpty() && m_activeProfile >= 0
+            && m_activeProfile < m_profiles.size()) {
+        QVariantMap prof = m_profiles.at(m_activeProfile).toMap();
+        QVariantMap d = prof.value("provider_details").toMap().value(h).toMap();
+        if (d.contains(QLatin1String("models"))) {
+            QStringList out;
+            QVariantList raw = d.value("models").toList();
+            for (int i = 0; i < raw.size(); ++i)
+                out.append(raw.at(i).toString());
+            if (!out.isEmpty())
+                return out;
+        }
+    }
+    return m_models;
+}
+
+QStringList ApiClient::sessionEfforts() const
+{
+    const QString h = m_sessionProvider.trimmed().toLower();
+    if (h.isEmpty())
+        return m_efforts;
+    if (m_activeProfile >= 0 && m_activeProfile < m_profiles.size()) {
+        QVariantMap prof = m_profiles.at(m_activeProfile).toMap();
+        QVariantMap d = prof.value("provider_details").toMap().value(h).toMap();
+        if (d.contains(QLatin1String("efforts"))) {
+            QStringList out;
+            QVariantList raw = d.value("efforts").toList();
+            for (int i = 0; i < raw.size(); ++i)
+                out.append(raw.at(i).toString());
+            return out; // may be empty (Claude has no effort picker)
+        }
+    }
+    // Unknown detail: only Grok/Codex-like hosts use effort at the root.
+    if (h == QLatin1String("claude"))
+        return QStringList();
+    return m_efforts;
+}
+
+bool ApiClient::sessionCapSetModel() const
+{
+    if (m_sessionProvider.isEmpty())
+        return m_capSetModel;
+    return harnessCap(m_sessionProvider, QLatin1String("can_set_model"),
+                      m_capSetModel);
+}
+
+bool ApiClient::sessionCapSetEffort() const
+{
+    if (m_sessionProvider.isEmpty())
+        return m_capSetEffort;
+    // Claude never has effort; do not inherit multi-union true.
+    if (m_sessionProvider == QLatin1String("claude"))
+        return false;
+    return harnessCap(m_sessionProvider, QLatin1String("can_set_effort"),
+                      m_capSetEffort);
 }
 
 bool ApiClient::harnessRequiresCwd(const QString &harness) const
@@ -960,9 +1047,33 @@ void ApiClient::switchProfile(int index)
 
 void ApiClient::openSessionRow(int profileIndex, const QString &sessionId)
 {
+    // Capture harness identity from the list row BEFORE switchProfile —
+    // switching reloads m_sessions and can wipe the row we came from,
+    // leaving m_sessionProvider empty so Session sheet falls back to the
+    // multi-host union (effort picker etc. looks like Grok).
+    QString rowProvider, rowModel, rowCwd;
+    for (int i = 0; i < m_sessions.size(); ++i) {
+        QVariantMap s = m_sessions.at(i).toMap();
+        if (s.value("id").toString() == sessionId) {
+            rowProvider = s.value("provider").toString().trimmed().toLower();
+            rowModel = s.value("model").toString();
+            rowCwd = s.value("cwd").toString();
+            break;
+        }
+    }
     if (profileIndex >= 0 && profileIndex != m_activeProfile)
         switchProfile(profileIndex);
     openTranscript(sessionId);
+    if (!rowProvider.isEmpty() && m_sessionProvider != rowProvider) {
+        m_sessionProvider = rowProvider;
+        if (!rowModel.isEmpty())
+            m_sessionModel = rowModel;
+        if (!rowCwd.isEmpty())
+            m_sessionCwd = rowCwd;
+        applyProviderTheme();
+        emit capsChanged();
+        emit currentSessionChanged();
+    }
 }
 
 void ApiClient::applyCachedCaps(int index)
@@ -1058,6 +1169,29 @@ void ApiClient::onExtraStatusFrame(const QByteArray &payload)
 #else
     Q_UNUSED(payload);
 #endif
+}
+
+// Does this profile's daemon support Focus (cached from its ping)?
+// The active profile also has the live m_capFocus, which is fresher.
+// Rows currently in Focus. In Focus mode every listed row qualifies; in All
+// mode only the flagged ones do, which is exactly the number worth advertising.
+int ApiClient::focusCount() const
+{
+    int n = 0;
+    for (int i = 0; i < m_sessions.size(); ++i) {
+        if (m_sessions.at(i).toMap().value("focus").toBool())
+            ++n;
+    }
+    return n;
+}
+
+bool ApiClient::profileSupportsFocus(int profileIndex) const
+{
+    if (profileIndex == m_activeProfile && m_capFocus)
+        return true;
+    if (profileIndex < 0 || profileIndex >= m_profiles.size())
+        return false;
+    return m_profiles.at(profileIndex).toMap().value("focus").toBool();
 }
 
 void ApiClient::pingProfiles()
@@ -1315,6 +1449,19 @@ void ApiClient::setSoundCues(bool on)
     emit settingsChanged();
 }
 
+void ApiClient::setFocusMode(bool on)
+{
+    if (on == m_focusMode)
+        return;
+    m_focusMode = on;
+    QSettings settings(BRAND_SETTINGS_ORG, BRAND_SETTINGS_APP);
+    settings.setValue("focusMode", m_focusMode);
+    settings.sync();
+    emit settingsChanged();
+    // Focus and All come from different endpoints, so the list must refetch.
+    refreshSessions();
+}
+
 void ApiClient::setLedCues(bool on)
 {
     if (on == m_ledCues)
@@ -1491,9 +1638,11 @@ QVariantMap ApiClient::renderRichBlock(const QString &rich, int widthPx,
                                        bool code, bool heading)
 {
     if (!m_richPaint) {
+        // No font inventory on the happy path: it was logged on every launch
+        // (and mirrored to stderr/slog2), burying the errors the log exists
+        // for. It is attached to the failure below instead, where it is the
+        // thing you actually want to read.
         m_richPaint = new RichPaint(this);
-        appendLog(QString("RichPaint init: %1")
-                      .arg(m_richPaint->fontDebugInfo()));
     }
     const int w = widthPx > 0 ? widthPx : m_paintWidthBody;
     const int px = code ? m_fontCodePx
@@ -1505,8 +1654,9 @@ QVariantMap ApiClient::renderRichBlock(const QString &rich, int widthPx,
     QVariantMap r = m_richPaint->render(rich, w, px, code, color);
     if (!r.value("ok").toBool() && !m_richPaintWarned) {
         m_richPaintWarned = true;
-        appendLog(QString("RichPaint fail (falls back to Labels): %1")
-                      .arg(r.value("err").toString()));
+        appendLog(QString("RichPaint fail (falls back to Labels): %1 [fonts: %2]")
+                      .arg(r.value("err").toString())
+                      .arg(m_richPaint->fontDebugInfo()));
     }
     return r;
 }
@@ -1785,6 +1935,13 @@ void ApiClient::refreshSessions()
 #endif
     m_sessionsStatus = tr("Loading...");
     emit sessionsChanged();
+    // Focus mode asks the daemon for the rows instead of filtering the
+    // session list here: a project untouched for weeks falls outside the
+    // recency window, and that is exactly the row that must not be lost.
+    if (m_focusMode && m_capFocus) {
+        get(QLatin1String("/api/focus"), "sessions");
+        return;
+    }
     QString path = QString("/api/sessions?limit=%1").arg(PAGE_SIZE);
     if (!m_projectFilter.isEmpty())
         path += "&project=" + QString::fromUtf8(QUrl::toPercentEncoding(m_projectFilter));
@@ -1980,12 +2137,21 @@ void ApiClient::startUnifiedFetch(const QString &query)
         // (the profile that was active when it was picked) can answer it.
         if (!m_projectFilter.isEmpty() && i != m_activeProfile)
             continue;
-        QString path = query.isEmpty()
-                ? QString("/api/sessions?limit=%1").arg(PAGE_SIZE)
-                : QString("/api/sessions/search?q=%1&limit=%2")
-                      .arg(QString::fromUtf8(QUrl::toPercentEncoding(query)))
-                      .arg(PAGE_SIZE);
-        if (!m_projectFilter.isEmpty())
+        const bool focusHere = m_focusMode && query.isEmpty()
+                && profileSupportsFocus(i);
+        // A daemon too old for Focus contributes nothing in Focus mode:
+        // sending its whole session list would silently fill Focus with
+        // sessions the human never enrolled.
+        if (m_focusMode && query.isEmpty() && !focusHere)
+            continue;
+        QString path = focusHere
+                ? QString("/api/focus")
+                : (query.isEmpty()
+                   ? QString("/api/sessions?limit=%1").arg(PAGE_SIZE)
+                   : QString("/api/sessions/search?q=%1&limit=%2")
+                         .arg(QString::fromUtf8(QUrl::toPercentEncoding(query)))
+                         .arg(PAGE_SIZE));
+        if (!m_projectFilter.isEmpty() && !focusHere)
             path += "&project="
                     + QString::fromUtf8(QUrl::toPercentEncoding(m_projectFilter));
         QNetworkReply *reply = getFrom(base, token, path, "usessions");
@@ -2074,8 +2240,10 @@ void ApiClient::openTranscript(const QString &sessionId)
     }
 
     m_currentSessionId = sessionId;
-    // Model + cwd from the list row we came from. cwd is where "!cmd"
-    // shell escapes run on the daemon.
+    // Model + cwd + provider from the list row we came from. cwd is where
+    // "!cmd" shell escapes run on the daemon. Prefer preserving a provider
+    // already set by openSessionRow (before switchProfile wiped the list).
+    const QString keepProvider = m_sessionProvider;
     m_sessionModel.clear();
     m_sessionCwd.clear();
     m_sessionProvider.clear();
@@ -2087,10 +2255,12 @@ void ApiClient::openTranscript(const QString &sessionId)
             // The row's own provider, not the active profile's: the unified
             // list merges daemons, so the open session may belong to another
             // one — that is what made the banner read "Agent is ...".
-            m_sessionProvider = s.value("provider").toString();
+            m_sessionProvider = s.value("provider").toString().trimmed().toLower();
             break;
         }
     }
+    if (m_sessionProvider.isEmpty() && !keepProvider.isEmpty())
+        m_sessionProvider = keepProvider.trimmed().toLower();
     // Multi-host profiles keep a neutral chrome on the list; once a session
     // is open, recolor to that harness (Grok cyan banner, Claude orange, …).
     if (!m_sessionProvider.isEmpty()) {
@@ -2106,17 +2276,25 @@ void ApiClient::openTranscript(const QString &sessionId)
     // after an app restart / job started elsewhere - whatever the daemon's
     // status stream says is running for this session.
     QString jobId = m_sessionJobs.value(sessionId);
+    if (isSyntheticJobId(jobId)) {
+        m_sessionJobs.remove(sessionId);
+        jobId.clear();
+    }
     if (jobId.isEmpty()) {
         for (int i = 0; i < m_activeStatuses.size(); ++i) {
             QVariantMap s = m_activeStatuses.at(i).toMap();
             if (s.value("session_id").toString() == sessionId
                     || s.value("new_session_id").toString() == sessionId) {
-                jobId = s.value("job_id").toString();
-                break;
+                const QString candidate = s.value("job_id").toString();
+                // Prefer a real job; synthetic tui-* only paints "working".
+                if (!candidate.isEmpty() && !isSyntheticJobId(candidate)) {
+                    jobId = candidate;
+                    break;
+                }
             }
         }
     }
-    if (!jobId.isEmpty()) {
+    if (!jobId.isEmpty() && !isSyntheticJobId(jobId)) {
         m_sessionJobs[sessionId] = jobId;
         attachToJob(jobId);
     } else {
@@ -2139,8 +2317,16 @@ void ApiClient::resetWsJobState()
     m_wsPendingPerm = false;
 }
 
+bool ApiClient::isSyntheticJobId(const QString &jobId)
+{
+    // Matches daemon active_tui_status: "tui-%s" % sid_without_dashes[:12]
+    return jobId.startsWith(QLatin1String("tui-"));
+}
+
 void ApiClient::attachToJob(const QString &jobId)
 {
+    if (jobId.isEmpty() || isSyntheticJobId(jobId))
+        return;
     m_jobId = jobId;
     m_since = 0;
     m_pollFailures = 0;
@@ -2329,7 +2515,11 @@ void ApiClient::sendPrompt(const QString &prompt)
     // (attached to the job): the phone dying or losing Wi-Fi must not lose
     // them. The tiny window before the job id arrives buffers locally and
     // flushes when the "continue" response lands.
-    if (jobRunning()) {
+    //
+    // Synthetic tui-* ids (busy host TUI after a real job expired) are NOT
+    // jobs — treat them as idle and fall through to postPrompt/continue so
+    // the daemon actually receives the text.
+    if (jobRunning() && !isSyntheticJobId(m_jobId)) {
         // Interactive mode has no daemon queue: the hosted TUI owns one, so
         // the message is typed straight into its input and runs there when
         // the current turn ends (the job stays on watch, so the reply still
@@ -2360,6 +2550,15 @@ void ApiClient::sendPrompt(const QString &prompt)
             emit queueChanged();
         }
         return;
+    }
+    // Stale synthetic attachment (older builds / race): drop it so we do not
+    // keep looking "busy" with no real job to send into.
+    if (isSyntheticJobId(m_jobId)) {
+        m_jobId.clear();
+        m_pollTimer.stop();
+        m_awaitingJob = false;
+        setJobTicker(QString());
+        emit jobRunningChanged();
     }
 
     if (m_currentSessionId.isEmpty())
@@ -2752,6 +2951,72 @@ void ApiClient::deleteDropFile(const QString &name)
     deleteDropFrom(-1, name);
 }
 
+// --------------------------------------------------------------- focus list
+
+void ApiClient::setSessionTitle(int profileIndex, const QString &sessionId,
+                                const QString &title)
+{
+    QString base = m_baseUrl, token = m_token;
+    if (profileIndex >= 0 && !profileEndpoint(profileIndex, &base, &token))
+        return;
+    if (base.isEmpty() || token.isEmpty() || sessionId.isEmpty())
+        return;
+    QVariantMap body;
+    // An empty title clears the override: the daemon falls back to the name
+    // the agent derived. Trimmed here so "   " is treated as empty too.
+    body["title"] = title.trimmed();
+    postTo(base, token,
+           QString("/api/sessions/%1/title")
+               .arg(QString::fromUtf8(QUrl::toPercentEncoding(sessionId))),
+           body, QLatin1String("focusTitle"));
+}
+
+void ApiClient::regenerateSessionTitle(int profileIndex, const QString &sessionId)
+{
+    QString base = m_baseUrl, token = m_token;
+    if (profileIndex >= 0 && !profileEndpoint(profileIndex, &base, &token))
+        return;
+    if (base.isEmpty() || token.isEmpty() || sessionId.isEmpty())
+        return;
+    m_sessionsStatus = tr("Naming the session...");
+    emit sessionsChanged();
+    postTo(base, token,
+           QString("/api/sessions/%1/title/regenerate")
+               .arg(QString::fromUtf8(QUrl::toPercentEncoding(sessionId))),
+           QVariantMap(), QLatin1String("focusTitle"));
+}
+
+void ApiClient::markSessionSeen(int profileIndex, const QString &sessionId)
+{
+    QString base = m_baseUrl, token = m_token;
+    if (profileIndex >= 0 && !profileEndpoint(profileIndex, &base, &token))
+        return;
+    if (base.isEmpty() || token.isEmpty() || sessionId.isEmpty())
+        return;
+    if (!profileSupportsFocus(profileIndex < 0 ? m_activeProfile : profileIndex))
+        return;
+    // Fire and forget: cosmetic only, and an old daemon just 404s.
+    postTo(base, token,
+           QString("/api/focus/%1/seen")
+               .arg(QString::fromUtf8(QUrl::toPercentEncoding(sessionId))),
+           QVariantMap(), QLatin1String("focusSeen"));
+}
+
+void ApiClient::setFocusMember(int profileIndex, const QString &sessionId,
+                               bool member)
+{
+    QString base = m_baseUrl, token = m_token;
+    if (profileIndex >= 0 && !profileEndpoint(profileIndex, &base, &token))
+        return;
+    if (base.isEmpty() || token.isEmpty() || sessionId.isEmpty())
+        return;
+    postTo(base, token,
+           QString("/api/focus/%1/%2")
+               .arg(QString::fromUtf8(QUrl::toPercentEncoding(sessionId)))
+               .arg(member ? QLatin1String("restore") : QLatin1String("done")),
+           QVariantMap(), QLatin1String("focusAction"));
+}
+
 void ApiClient::deleteDropFrom(int profileIndex, const QString &name)
 {
     const QString clean = QFileInfo(name).fileName().trimmed();
@@ -2785,6 +3050,17 @@ void ApiClient::pollJob()
 {
     if (m_jobId.isEmpty())
         return;
+    // Synthetic status rows have no /api/jobs/<id> — polling them 404s and
+    // used to call handleJobEnd("done"), then the stream re-attached tui-*.
+    if (isSyntheticJobId(m_jobId)) {
+        m_jobId.clear();
+        m_pollTimer.stop();
+        m_pollInFlight = false;
+        setJobTicker(QString());
+        emit jobRunningChanged();
+        recomputeLiveStatus();
+        return;
+    }
     if (m_jobStartMs > 0) {
         qint64 secs = (QDateTime::currentMSecsSinceEpoch() - m_jobStartMs) / 1000;
         QString base = m_jobToolLine.isEmpty() ? workingLine() : m_jobToolLine;
@@ -3029,6 +3305,13 @@ void ApiClient::onFinished(QNetworkReply *reply)
         if (ok) {
             QVariantMap map = data.toMap();
             updateCaps(map["caps"].toMap());
+            // Focus support is a top-level ping flag, not one of the per-
+            // harness caps: Focus spans every harness on the daemon.
+            const bool focus = map.value("focus", QVariant(false)).toBool();
+            if (focus != m_capFocus) {
+                m_capFocus = focus;
+                emit capsChanged();
+            }
             QStringList commands;
             QVariantList rawCommands = map["slash_commands"].toList();
             for (int i = 0; i < rawCommands.size(); ++i)
@@ -3374,14 +3657,19 @@ void ApiClient::onFinished(QNetworkReply *reply)
         const bool multi = map.value("multi").toBool();
         QVariantMap prof = m_profiles.at(profileIndex).toMap();
         const QVariantList newProviders = map.value("providers").toList();
+        const bool focus = map.value("focus", QVariant(false)).toBool();
         if (prof.value("provider").toString() != provider
                 || prof.value("caps").toMap() != map.value("caps").toMap()
                 || prof.value("multi").toBool() != multi
+                || prof.value("focus").toBool() != focus
                 || prof.value("providers").toList() != newProviders
                 || prof.value("provider_details").toMap()
                    != map.value("provider_details").toMap()) {
             prof["provider"] = provider;
             prof["caps"] = map.value("caps").toMap();
+            // Focus support is per daemon, cached so Focus mode knows which
+            // profiles can answer /api/focus before it fans out.
+            prof["focus"] = focus;
             prof["multi"] = multi || newProviders.size() > 1;
             prof["providers"] = newProviders;
             prof["provider_details"] = map.value("provider_details").toMap();
@@ -3393,6 +3681,22 @@ void ApiClient::onFinished(QNetworkReply *reply)
         return;
     }
 
+    // Focus writes: refetch so the row (or its absence) reflects the truth on
+    // the daemon rather than a guess made here.
+    if (kind == "focusSeen")
+        return; // cosmetic; nothing to repaint until the next listing
+
+    if (kind == "focusTitle" || kind == "focusAction") {
+        if (!ok) {
+            m_sessionsStatus =
+                    httpErrorText(httpStatus, data, parseOk, networkError);
+            m_sessionsRev++;
+            emit sessionsChanged();
+            return;
+        }
+        refreshSessions();
+        return;
+    }
     if (kind == "sessions" || kind == "search") {
         // Drop stale search replies: the user typed further (or cleared)
         // while this request was in flight.
@@ -3488,12 +3792,25 @@ void ApiClient::onFinished(QNetworkReply *reply)
 
     if (kind == "input") {
         // Typed straight into the TUI: nothing to mirror on success. If the
-        // TUI is gone (409) fall back to a normal send when the job is over,
-        // otherwise drop the echo and say why.
+        // TUI is gone (409) or we hit a synthetic/expired job id (404), fall
+        // back to /continue so the prompt is not deleted from the UI as "lost".
         if (!ok) {
             const QString prompt = reply->property("prompt").toString();
-            if (!jobRunning() && !m_currentSessionId.isEmpty()) {
-                postPrompt(prompt);
+            if (httpStatus == 404 || isSyntheticJobId(m_jobId)
+                    || (!jobRunning() && !m_currentSessionId.isEmpty())) {
+                if (isSyntheticJobId(m_jobId) || httpStatus == 404) {
+                    m_jobId.clear();
+                    m_pollTimer.stop();
+                    emit jobRunningChanged();
+                }
+                if (!m_currentSessionId.isEmpty() && !prompt.isEmpty())
+                    postPrompt(prompt);
+                else {
+                    removeQueuedEcho(prompt);
+                    setTranscriptStatus(tr("Couldn't send message: ")
+                                        + httpErrorText(httpStatus, data, parseOk,
+                                                        networkError));
+                }
             } else {
                 removeQueuedEcho(prompt);
                 setTranscriptStatus(tr("Couldn't send message: ")
@@ -3559,9 +3876,10 @@ void ApiClient::onFinished(QNetworkReply *reply)
             if (exitCode != 0)
                 prompt += QString("\n(exit code %1)").arg(exitCode);
             prompt += QLatin1String(
+                    // No trailing "wait for the next user instruction": the model
+                    // echoed that clause straight back instead of staying quiet.
                     "\n```\n[silent] Shell result for context only. "
-                    "Do not reply or acknowledge this message - wait for "
-                    "the next user instruction.");
+                    "Do not reply or acknowledge this message.");
             setTranscriptStatus(QString());
             postPrompt(prompt);
         } else {
@@ -4015,13 +4333,18 @@ void ApiClient::onStatusFrame(const QByteArray &payload)
         QString fork = s.value("new_session_id").toString();
         if (jobId.isEmpty())
             continue;
-        if (!sid.isEmpty())
-            m_sessionJobs[sid] = jobId;
-        if (!fork.isEmpty())
-            m_sessionJobs[fork] = jobId;
+        // Never map synthetic tui-* ids into m_sessionJobs — that made
+        // openTranscript re-attach a fake job and POST /input into a 404.
+        if (!isSyntheticJobId(jobId)) {
+            if (!sid.isEmpty())
+                m_sessionJobs[sid] = jobId;
+            if (!fork.isEmpty())
+                m_sessionJobs[fork] = jobId;
+        }
         bool matchesOpen = !m_currentSessionId.isEmpty()
                 && (sid == m_currentSessionId || fork == m_currentSessionId);
-        if (matchesOpen && m_jobId.isEmpty() && !m_awaitingJob)
+        if (matchesOpen && m_jobId.isEmpty() && !m_awaitingJob
+                && !isSyntheticJobId(jobId))
             attachToJob(jobId);
         if (!m_jobId.isEmpty() && jobId == m_jobId) {
             tracked = s;
@@ -4142,6 +4465,27 @@ void ApiClient::decorateSessionRow(QVariantMap &s) const
         line = line.isEmpty()
                 ? profileName
                 : profileName + QString::fromUtf8(" \xC2\xB7 ") + line;
+    }
+    // Focus state tag, appended to the same status line rather than given a
+    // row of its own: the board is a filter over this list, not a new layout.
+    // Focus mode only — in the All list it is noise on rows the human never
+    // enrolled, and "working" already has the blinking dot.
+    QString bstate = m_focusMode ? s.value("focus_state").toString()
+                                 : QString();
+    // A finished turn is worth flagging only until you have opened it. The row
+    // is one Label in one colour, so "lit vs dim" becomes "shown vs omitted" —
+    // the same signal the other clients carry as brightness.
+    if (bstate == QLatin1String("turn_finished")
+            && !s.value("focus_unread").toBool()) {
+        bstate.clear();
+    }
+    if (!bstate.isEmpty()) {
+        const QString label = focusStateLabel(bstate);
+        if (!label.isEmpty()) {
+            line = line.isEmpty()
+                    ? label
+                    : line + QString::fromUtf8(" \xC2\xB7 ") + label;
+        }
     }
     s["status_line"] = line;
     s["working"] = false;

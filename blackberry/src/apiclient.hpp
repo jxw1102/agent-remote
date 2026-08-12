@@ -127,10 +127,18 @@ class ApiClient : public QObject
     // Slash commands the daemon offers (authed ping); "/" panel lists them.
     Q_PROPERTY(QStringList slashCommands READ slashCommands NOTIFY capsChanged)
     // Model / effort names the daemon offers for the pickers (authed ping).
+    // Root lists are a multi-host union; Session sheet uses session* instead.
     Q_PROPERTY(QStringList models READ models NOTIFY capsChanged)
     Q_PROPERTY(QStringList efforts READ efforts NOTIFY capsChanged)
+    // Open session's harness catalogues (from provider_details) — Session sheet.
+    Q_PROPERTY(QStringList sessionModels READ sessionModels NOTIFY currentSessionChanged)
+    Q_PROPERTY(QStringList sessionEfforts READ sessionEfforts NOTIFY currentSessionChanged)
+    Q_PROPERTY(bool sessionCapSetModel READ sessionCapSetModel NOTIFY currentSessionChanged)
+    Q_PROPERTY(bool sessionCapSetEffort READ sessionCapSetEffort NOTIFY currentSessionChanged)
     // Model the OPEN session last ran on (from its summary; "" if unknown).
     Q_PROPERTY(QString sessionModel READ sessionModel NOTIFY currentSessionChanged)
+    // Harness of the open session (claude|grok|codex); drives Session sheet + chrome.
+    Q_PROPERTY(QString sessionProvider READ sessionProvider NOTIFY currentSessionChanged)
     // Sent with the next prompt: "" / "default" = daemon default. Persisted;
     // the drag-down "Session" menu writes them.
     Q_PROPERTY(QString modelOverride READ modelOverride WRITE setModelOverride NOTIFY settingsChanged)
@@ -157,6 +165,13 @@ class ApiClient : public QObject
     Q_PROPERTY(QVariantList sessions READ sessions NOTIFY sessionsChanged)
     Q_PROPERTY(QString sessionsStatus READ sessionsStatus NOTIFY sessionsChanged)
     // Non-empty while a full-text search is active (results replace the list).
+    // Focus: show only the projects the human enrolled by acting on them
+    // through the daemon. A filter over the same list, not a second layout.
+    Q_PROPERTY(bool focusMode READ focusMode WRITE setFocusMode NOTIFY settingsChanged)
+    Q_PROPERTY(bool capFocus READ capFocus NOTIFY capsChanged)
+    // How many listed rows are in Focus. The drag-down menu shows it so you
+    // can tell whether switching is worth it without switching first.
+    Q_PROPERTY(int focusCount READ focusCount NOTIFY sessionsChanged)
     Q_PROPERTY(QString searchQuery READ searchQuery NOTIFY sessionsChanged)
     Q_PROPERTY(QString projectFilter READ projectFilter NOTIFY filterChanged)
     Q_PROPERTY(QString projectFilterName READ projectFilterName NOTIFY filterChanged)
@@ -266,10 +281,19 @@ public:
     QStringList slashCommands() const { return m_slashCommands; }
     QStringList models() const { return m_models; }
     QStringList efforts() const { return m_efforts; }
+    QStringList sessionModels() const;
+    QStringList sessionEfforts() const;
+    bool sessionCapSetModel() const;
+    bool sessionCapSetEffort() const;
     QString sessionModel() const { return m_sessionModel; }
+    QString sessionProvider() const { return m_sessionProvider; }
     QString modelOverride() const { return m_modelOverride; }
     QString effortOverride() const { return m_effortOverride; }
     bool soundCues() const { return m_soundCues; }
+    // Focus: mode is a local preference, capability comes from ping.
+    bool focusMode() const { return m_focusMode; }
+    bool capFocus() const { return m_capFocus; }
+    int focusCount() const;
     bool ledCues() const { return m_ledCues; }
 
     int pingState() const { return m_pingState; }
@@ -393,6 +417,7 @@ public:
     Q_INVOKABLE void setModelOverride(const QString &model);
     Q_INVOKABLE void setEffortOverride(const QString &effort);
     Q_INVOKABLE void setSoundCues(bool on);
+    Q_INVOKABLE void setFocusMode(bool on);
     Q_INVOKABLE void setLedCues(bool on);
     Q_INVOKABLE void resolvePermission(bool allow);
     // answers: one entry per question, each a list of chosen option labels
@@ -448,6 +473,20 @@ public:
     // profile (what the plain calls above do).
     Q_INVOKABLE void downloadDropFrom(int profileIndex, const QString &name);
     Q_INVOKABLE void deleteDropFrom(int profileIndex, const QString &name);
+
+    // ---- Focus list ----
+    // profileIndex names the daemon the row lives on; -1 = active profile.
+    // Rename a session, "" restores the name the agent derived.
+    Q_INVOKABLE void setSessionTitle(int profileIndex, const QString &sessionId,
+                                     const QString &title);
+    // Ask the daemon to derive a fresh title from the transcript.
+    Q_INVOKABLE void regenerateSessionTitle(int profileIndex,
+                                            const QString &sessionId);
+    // Mark done (member=false) or put a session back in Focus.
+    Q_INVOKABLE void setFocusMember(int profileIndex, const QString &sessionId,
+                                    bool member);
+    // Cosmetic: stops flagging a finished turn once you have opened it.
+    Q_INVOKABLE void markSessionSeen(int profileIndex, const QString &sessionId);
 
 public Q_SLOTS:
     // Slot so applicationui can wire Application::fullscreen() to it.
@@ -513,6 +552,13 @@ private:
     void postDirectInput(const QString &jobId, const QString &prompt);
     void attachToJob(const QString &jobId);
     void detachJob();
+    /// Daemon /ws/status may advertise busy host TUIs as synthetic
+    /// `tui-<sidprefix>` rows so the list can pulse "working" after a real
+    /// job timed out. Those ids are NOT JobManager jobs — GET/POST
+    /// /api/jobs/tui-… always 404, and treating them as m_jobId makes
+    /// mid-turn sends look like they left the phone when the daemon never
+    /// got them (see daemon.log POST …/tui-…/input 404).
+    static bool isSyntheticJobId(const QString &jobId);
     void updateQueueFromServer(const QVariantList &queued);
     void removeQueuedEcho(const QString &prompt);
     QString dropQueueNote(int droppedQueued);
@@ -562,6 +608,7 @@ private:
     void startUnifiedFetch(const QString &query);
     void finishUnifiedFetch();
     // Learn provider/caps of the NON-active profiles (cheap /api/ping each).
+    bool profileSupportsFocus(int profileIndex) const;
     void pingProfiles();
     // One StatusSse per non-active profile so working markers cover every
     // daemon, not just the one the open transcript talks to.
@@ -676,6 +723,8 @@ private:
     QString m_modelOverride;
     QString m_effortOverride;
     bool m_soundCues;
+    bool m_focusMode;
+    bool m_capFocus;
     bool m_ledCues;
 
     int m_pingState;

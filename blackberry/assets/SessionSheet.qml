@@ -39,17 +39,23 @@ Sheet {
             var pm = "" + sessionSheet.api.permissionMode;
             interToggle.checked = (pm == "interactive");
 
-            var models = sessionSheet.api.models;
+            // Prefer the OPEN session's harness catalogues (provider_details),
+            // not the multi-host root union — that made Claude sessions show
+            // Grok effort pickers.
+            var models = sessionSheet.api.sessionModels;
+            if (! models || models.length == 0)
+                models = sessionSheet.api.models;
             if (! models || models.length == 0)
                 models = [ "default" ];
             var mo = sessionSheet.api.modelOverride;
             fillDropdown(modelDrop, models, mo == "" ? "default" : mo);
 
-            var efforts = sessionSheet.api.efforts;
-            if (! efforts || efforts.length == 0)
-                efforts = [ "default" ];
+            var efforts = sessionSheet.api.sessionEfforts;
+            if (! efforts)
+                efforts = [];
             var eo = sessionSheet.api.effortOverride;
-            fillDropdown(effortDrop, efforts, eo == "" ? "default" : eo);
+            if (efforts.length > 0)
+                fillDropdown(effortDrop, efforts, eo == "" ? "default" : eo);
 
             soundToggle.checked = sessionSheet.api.soundCues;
             ledToggle.checked = sessionSheet.api.ledCues;
@@ -118,12 +124,12 @@ Sheet {
                 // ---- Model ---------------------------------------------
                 Label {
                     text: qsTr("Model")
-                    visible: sessionSheet.api ? sessionSheet.api.capSetModel : false
+                    visible: sessionSheet.api ? sessionSheet.api.sessionCapSetModel : false
                     textStyle.fontSize: FontSize.XSmall
                     textStyle.color: Color.create("#888888")
                 }
                 Label {
-                    visible: (sessionSheet.api ? sessionSheet.api.capSetModel : false)
+                    visible: (sessionSheet.api ? sessionSheet.api.sessionCapSetModel : false)
                              && sessionSheet.api.currentSessionId != ""
                              && sessionSheet.api.sessionModel != ""
                     text: sessionSheet.api
@@ -136,7 +142,7 @@ Sheet {
                 }
                 DropDown {
                     id: modelDrop
-                    visible: sessionSheet.api ? sessionSheet.api.capSetModel : false
+                    visible: sessionSheet.api ? sessionSheet.api.sessionCapSetModel : false
                     bottomMargin: 20
                     onSelectedValueChanged: {
                         if (sessionSheet.ready && sessionSheet.api && selectedValue)
@@ -144,16 +150,16 @@ Sheet {
                     }
                 }
 
-                // ---- Reasoning effort (grok) ---------------------------
+                // ---- Reasoning effort (grok / codex only) --------------
                 Label {
                     text: qsTr("Reasoning effort")
-                    visible: sessionSheet.api ? sessionSheet.api.capSetEffort : false
+                    visible: sessionSheet.api ? sessionSheet.api.sessionCapSetEffort : false
                     textStyle.fontSize: FontSize.XSmall
                     textStyle.color: Color.create("#888888")
                 }
                 DropDown {
                     id: effortDrop
-                    visible: sessionSheet.api ? sessionSheet.api.capSetEffort : false
+                    visible: sessionSheet.api ? sessionSheet.api.sessionCapSetEffort : false
                     onSelectedValueChanged: {
                         if (sessionSheet.ready && sessionSheet.api && selectedValue)
                             sessionSheet.api.setEffortOverride("" + selectedValue);

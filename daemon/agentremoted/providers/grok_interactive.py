@@ -40,7 +40,7 @@ import time
 import uuid
 from pathlib import Path
 
-from ..config import CONFIG_DIR
+from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
 from ..render_blocks import markdown_to_blocks
 
 log = logging.getLogger(__name__)
@@ -174,9 +174,11 @@ def _new_rows(before: list, after: list) -> list:
 class _Tui:
     """One detached tmux session hosting one grok TUI."""
 
-    def __init__(self, name: str, cwd: str):
+    def __init__(self, name: str, cwd: str, isolate_root: str = ""):
         self.name = name
         self.cwd = cwd
+        # Guest sandbox root (seatbelt/chroot); empty = unrestricted main.
+        self.isolate_root = isolate_root or ""
         self.session_id = ""          # grok session id (we choose it)
         self.spawned = False          # tmux session created (prunable when dead)
         self.last_used = time.time()  # LRU stamp for the _MAX_TUIS cap
@@ -203,7 +205,8 @@ class GrokInteractiveManager:
         """Persist the name->session mapping (see _adopt_or_reap). Only
         launched TUIs: a registered-but-unlaunched one has no tmux session."""
         rows = [{"name": t.name, "cwd": t.cwd, "session_id": t.session_id,
-                 "last_used": t.last_used}
+                 "last_used": t.last_used,
+                 "isolate_root": getattr(t, "isolate_root", "") or ""}
                 for t in list(self._tuis.values()) if t.spawned]
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -236,20 +239,22 @@ class GrokInteractiveManager:
                     continue
                 entry = known.get(name)
                 if entry is None:
-                    log.info("reaping unknown grok TUI %s", name)
-                    self._tmux("kill-session", "-t", name)
+                    # Never kill — see claude_interactive._adopt_or_reap.
+                    log.info("ignoring unknown grok TUI %s", name)
                     continue
                 tui = _Tui(name, str(entry.get("cwd", ""))
-                           or os.path.expanduser("~"))
-                tui.session_id = str(entry.get("session_id", ""))
+                           or os.path.expanduser("~"),
+                           isolate_root=str(entry.get("isolate_root") or ""))
+                tui.session_id = str(entry.get("session_id") or "")
                 tui.spawned = True
                 try:
                     tui.last_used = float(entry.get("last_used") or 0) or time.time()
                 except (TypeError, ValueError):
                     tui.last_used = time.time()
                 self._tuis[name] = tui
-                log.info("adopted grok TUI %s (session %s)", name,
-                         tui.session_id[:8] or "unknown")
+                log.info("adopted grok TUI %s (session %s isolate=%s)", name,
+                         tui.session_id[:8] or "unknown",
+                         "yes" if tui.isolate_root else "no")
         except (OSError, subprocess.TimeoutExpired):
             pass
         self._save_state()
@@ -261,8 +266,10 @@ class GrokInteractiveManager:
         return shutil.which("tmux") or "/opt/homebrew/bin/tmux"
 
     def _tmux(self, *args, capture=False, input_bytes=None):
+        # -L: the fleet's own socket (see config.tmux_socket).
         return subprocess.run(
-            [self._tmux_bin] + list(args), input=input_bytes,
+            [self._tmux_bin, "-L", tmux_socket()] + list(args),
+            input=input_bytes,
             stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
             stderr=subprocess.PIPE, timeout=15)
 
@@ -341,6 +348,11 @@ class GrokInteractiveManager:
         """Start the TUI in a fresh tmux session. Returns "" or an error."""
         self._disable_project_picker()
         grok = str(getattr(self.config, "grok_bin", "grok") or "grok")
+        # Resolve to an absolute path so a confined PATH cannot lose the binary
+        # (host install lives under ~/.grok/bin, allowed read-only by seatbelt).
+        resolved = shutil.which(grok) if not os.path.isabs(grok) else grok
+        if resolved:
+            grok = resolved
         # --minimal: scrollback-native rendering. Nothing here reads the
         # transcript off the screen (turns come from updates.jsonl), and a
         # pane that isn't redrawing a fullscreen UI is cheaper and keeps the
@@ -360,15 +372,48 @@ class GrokInteractiveManager:
             parts += ["--model", model]
         if effort and effort != "default":
             parts += ["--reasoning-effort", effort]
-        env = dict(getattr(self.config, "grok_env", None) or {})
+        # Start from full environ; isolation_env merges + rewrites HOME.
+        env = dict(os.environ)
+        extra = dict(getattr(self.config, "grok_env", None) or {})
+        env.update({str(k): str(v) for k, v in extra.items()})
         env.setdefault("GROK_DISABLE_AUTOUPDATER", "1")
-        shell_cmd = "%s exec %s" % (
-            " ".join("%s=%s" % (k, shlex.quote(str(v))) for k, v in env.items()),
-            " ".join(shlex.quote(p) for p in parts))
         tui.session_id = ""
+        launch_cwd = tui.cwd
+        if tui.isolate_root:
+            # Guest: match the known-good CLI shape —
+            #   cd ROOT && sandbox-exec -f PROF env … grok …
+            # Do NOT pass TERM=dumb (launchd) or pre-baked "VAR=… exec grok"
+            # through isolate_shell_line — that killed the TUI before ready.
+            from .. import accounts as _accounts
+            env = _accounts.isolation_env(env, tui.isolate_root)
+            term = str(env.get("TERM") or "")
+            if not term or term in ("dumb", "unknown"):
+                env["TERM"] = "xterm-256color"
+            launch_cwd = tui.isolate_root
+            grok_cmd = " ".join(shlex.quote(p) for p in parts)
+            shell_cmd = _accounts.isolate_shell_line(grok_cmd, tui.isolate_root)
+        else:
+            # Only pass a compact env prefix into the shell line (not entire env).
+            pass_keys = (
+                "HOME", "PATH", "TMPDIR", "TMP", "TEMP", "USER", "LOGNAME",
+                "GROK_HOME", "GROK_DISABLE_AUTOUPDATER", "CLAUDE_CONFIG_DIR",
+                "CODEX_HOME", "AGENTREMOTE_ISOLATE_ROOT", "TERM", "LANG",
+                "LC_ALL", "COLORTERM",
+            )
+            env_prefix = " ".join(
+                "%s=%s" % (k, shlex.quote(str(env[k])))
+                for k in pass_keys if k in env and env[k] is not None
+            )
+            for k, v in extra.items():
+                if k not in pass_keys:
+                    env_prefix += " %s=%s" % (k, shlex.quote(str(v)))
+            shell_cmd = "%s exec %s" % (
+                env_prefix,
+                " ".join(shlex.quote(p) for p in parts))
+        ensure_tmux_server(self._tmux_bin)   # see config.ensure_tmux_server
         try:
             r = self._tmux("new-session", "-d", "-s", tui.name,
-                           "-x", "220", "-y", "50", "-c", tui.cwd, shell_cmd)
+                           "-x", "220", "-y", "50", "-c", launch_cwd, shell_cmd)
         except OSError as e:
             return "tmux not available: %s" % e
         except subprocess.TimeoutExpired:
@@ -396,11 +441,13 @@ class GrokInteractiveManager:
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-    def _ensure_tui(self, cwd: str, session_id: str, model: str, effort: str):
+    def _ensure_tui(self, cwd: str, session_id: str, model: str, effort: str,
+                    isolate_root: str = ""):
         """Return (tui, error). One TUI per grok session: a continued session
         is matched to its live TUI by session id; a new session (or one whose
         TUI died) gets a fresh TUI, --resume'ing when continuing. Parallel
         sessions in the same project never evict each other."""
+        iso = (isolate_root or "").strip()
         with self._lock:
             # Prune TUIs whose tmux died (/exit, crash, manual kill) — but
             # never one another turn just registered and hasn't launched yet.
@@ -413,6 +460,13 @@ class GrokInteractiveManager:
             if session_id:
                 for t in self._tuis.values():
                     if t.session_id == session_id:
+                        # Relaunch if isolation level changed (guest needs seatbelt).
+                        if (getattr(t, "isolate_root", "") or "") != iso:
+                            log.info("relaunching grok TUI %s under new isolation",
+                                     t.name)
+                            self._kill(t)
+                            del self._tuis[t.name]
+                            break
                         t.last_used = time.time()
                         return t, ""
             # Cap the fleet: evict the least-recently-used idle TUIs (never
@@ -426,7 +480,7 @@ class GrokInteractiveManager:
                 self._kill(victim)
                 del self._tuis[victim.name]
                 self._save_state()
-            tui = _Tui(self._tui_name(cwd), cwd)
+            tui = _Tui(self._tui_name(cwd), cwd, isolate_root=iso)
             self._tuis[tui.name] = tui
         err = self._launch(tui, session_id, model, effort)
         if err:
@@ -614,7 +668,9 @@ class GrokInteractiveManager:
             self._fail(job, "interactive mode needs tmux (brew install tmux)")
             return
         cwd = os.path.expanduser(job.cwd or "") or self.runner._default_cwd()
-        tui, err = self._ensure_tui(cwd, job.session_id, job.model, job.effort)
+        iso = str(getattr(job, "isolate_root", "") or "")
+        tui, err = self._ensure_tui(
+            cwd, job.session_id, job.model, job.effort, isolate_root=iso)
         if err:
             self._fail(job, err)
             return
@@ -632,6 +688,7 @@ class GrokInteractiveManager:
             self._fail(job, "interactive mode needs tmux (brew install tmux)")
             return
         sid = (job.new_session_id or job.session_id or "").strip()
+        iso = str(getattr(job, "isolate_root", "") or "")
         tui = None
         with self._lock:
             if job.tui_name and job.tui_name in self._tuis:
@@ -641,9 +698,14 @@ class GrokInteractiveManager:
                     if t.session_id == sid:
                         tui = t
                         break
+            # Adopted state may omit isolate_root; stamp from the job so
+            # journal bind uses the guest store without relaunching.
+            if tui is not None and iso and not (getattr(tui, "isolate_root", "") or ""):
+                tui.isolate_root = iso
         if tui is None or not self._tmux_alive(tui.name):
             cwd = os.path.expanduser(job.cwd or "") or self.runner._default_cwd()
-            tui, err = self._ensure_tui(cwd, sid, job.model, job.effort)
+            tui, err = self._ensure_tui(
+                cwd, sid, job.model, job.effort, isolate_root=iso)
             if err:
                 self._fail(job, "interrupted by daemon restart: %s" % err)
                 return
@@ -820,10 +882,16 @@ class GrokInteractiveManager:
 
     # -- plan approval -------------------------------------------------------
 
+    # Plan bodies used to be clipped at 6k for BB ListView paint cost; that
+    # made web/phone "Plan approval" show a stub ending mid-section while the
+    # full plan only lived in Live TUI. Clients can scroll markdown now — keep
+    # a high ceiling for pathological plans, not a hard UX cliff at 6k.
+    _PLAN_BODY_MAX = 200_000
+
     def _plan_questions(self, plan: str) -> list:
         body = plan or "_(grok wrote no plan.md)_"
-        if len(body) > 6000:
-            body = body[:6000] + "\n…"
+        if len(body) > self._PLAN_BODY_MAX:
+            body = body[: self._PLAN_BODY_MAX] + "\n\n… _(plan truncated for client payload)_"
         return [{
             "question": body,
             # The phone renders these through the transcript's own painter,
@@ -863,6 +931,21 @@ class GrokInteractiveManager:
         for) and only Approve ends the turn, since grok is then busy
         building and the prompt would collide with that."""
         state = job.runner_state
+        # Publish the full plan into the live job stream first so web/BB
+        # transcripts show it even if the user dismisses the modal or an
+        # older client only rendered option buttons.
+        body = (plan or "").strip()
+        if body and not state.get("plan_text_emitted"):
+            job.add_event(
+                "text",
+                text=body if len(body) <= self._PLAN_BODY_MAX
+                else body[: self._PLAN_BODY_MAX] + "\n\n…",
+                blocks=markdown_to_blocks(
+                    body if len(body) <= self._PLAN_BODY_MAX
+                    else body[: self._PLAN_BODY_MAX] + "\n\n…"),
+            )
+            state["plan_text_emitted"] = True
+            state.setdefault("full", []).append(body[:2000])
         # 0 / unset = no deadline (None blocks Event.wait forever): the
         # user answers when they get to their phone.
         secs = float(getattr(self.config, "question_timeout", 0) or 0)
@@ -966,16 +1049,44 @@ class GrokInteractiveManager:
         free-text row that takes a pasted answer plus Enter. Escape does NOT
         dismiss the panel, so there is no cancel: with no answer from the
         phone the panel is left alone and re-offered next turn rather than
-        auto-deciding something the user never saw."""
+        auto-deciding something the user never saw.
+
+        If the panel is cleared on disk first (answered in the host TUI or
+        Live TUI without POST /question), leave the keys alone and drop the
+        phone gate so clients do not stay on "waiting for you" forever.
+        """
         phone_qs = self._ask_questions_for_phone(questions)
         if not phone_qs:
             return
-        # 0 / unset = no deadline (None blocks Event.wait forever): the
-        # user answers when they get to their phone.
+        # 0 / unset = no wall-clock deadline: wait until the phone answers
+        # or the journal shows the panel already resolved.
         secs = float(getattr(self.config, "question_timeout", 0) or 0)
         timeout = secs if secs > 0 else None
-        answers = job.request_question(phone_qs, timeout)
+        sid = (tui.session_id or job.session_id or job.new_session_id or "").strip()
+        iso = str(getattr(tui, "isolate_root", "")
+                  or getattr(job, "isolate_root", "") or "")
+
+        def _resolved_on_disk():
+            if not sid:
+                return False
+            # Turn already finished (panel answered + model replied).
+            if self.runner.turn_idle_on_disk(sid, job=job, isolate_root=iso):
+                return True
+            # Panel gone but turn may still be writing the reply.
+            return not self.runner.ask_pending(sid, job=job, isolate_root=iso)
+
+        answers = job.request_question(
+            phone_qs, timeout, abort_when=_resolved_on_disk)
         if not answers:
+            if _resolved_on_disk():
+                log.info("TUI %s: ask panel resolved outside phone path", tui.name)
+                job.add_event("tool", name="questions",
+                              detail="answered in host TUI")
+                # If the turn already completed on disk, mark it so resume /
+                # preturn can finish without hanging on a quiet journal.
+                if self.runner.turn_idle_on_disk(sid, job=job, isolate_root=iso):
+                    job.runner_state["turn_done"] = True
+                return
             log.warning("TUI %s: ask panel unanswered, left open", tui.name)
             job.add_event("tool", name="questions",
                           detail="no answer from the phone — still waiting")
@@ -1033,20 +1144,29 @@ class GrokInteractiveManager:
             time.sleep(_POLL_S)
         return False
 
-    def _await_plan_clear(self, session_id: str, limit: float) -> bool:
+    def _await_plan_clear(self, session_id: str, limit: float,
+                          job=None, isolate_root: str = "") -> bool:
         """Wait for plan_mode.json to stop reporting awaiting_plan_approval."""
         end = time.time() + limit
         while time.time() < end:
-            if not self.runner.plan_awaiting(session_id):
+            if not self.runner.plan_awaiting(
+                    session_id, job=job, isolate_root=isolate_root):
                 return True
             time.sleep(_POLL_S)
         return False
 
     def _done(self, job, text: str):
+        # Never leave a phone gate up after the turn ends (e.g. ask answered
+        # only in the host TUI while request_question was still blocking).
+        try:
+            job.cancel_question()
+        except Exception:
+            pass
         with job.lock:
             if job.status != "stopped":
                 job.result_text = text
                 job.status = "done"
+            job.pending_question = None
         job.add_event("result", is_error=False,
                       duration_ms=int((time.time() - job.started_at) * 1000),
                       cost_usd=0)
@@ -1077,6 +1197,12 @@ class GrokInteractiveManager:
         if not resume:
             job.add_event("init", session_id=tui.session_id, model="interactive")
         # Tail from the journal's current end so earlier turns don't replay.
+        # isolate_root is required here: guest TUIs write under
+        # <root>/.grok, not the host ~/.grok — without it updates_path
+        # stays None and turn_completed is never seen (stuck "working").
+        iso = str(getattr(tui, "isolate_root", "") or getattr(job, "isolate_root", "") or "")
+        if iso and not getattr(job, "isolate_root", ""):
+            job.isolate_root = iso
         runner._bind_updates(job, from_start=False)
 
         # An ask_user_question panel left open by an earlier turn intercepts
@@ -1084,22 +1210,39 @@ class GrokInteractiveManager:
         # in the text picks an option). Answer it from the phone first, then
         # let grok's reply to it land before typing. The journal says whether
         # one is up, so this survives a daemon restart — no pane reads.
-        pend = runner.ask_pending(tui.session_id)
+        pend = runner.ask_pending(tui.session_id, job=job, isolate_root=iso)
         if pend:
             state["ask_asked"] = pend[0]
             job.set_phase("asking", "questions")
             self._answer_ask(job, tui, pend[1])
+            if state.get("turn_done"):
+                # Panel was already answered on disk (host/Live TUI); the
+                # phone gate is cleared — finish without re-submitting.
+                text = "".join(state.get("full") or [])
+                with job.lock:
+                    job.new_session_id = tui.session_id or job.new_session_id
+                self._done(job, text)
+                return
             self._drain_until_done(job, _PLAN_REPLY_S)
+            if state.get("turn_done") and resume:
+                text = "".join(state.get("full") or [])
+                with job.lock:
+                    job.new_session_id = tui.session_id or job.new_session_id
+                self._done(job, text)
+                return
             state["turn_done"] = False
 
         # A panel left open by an earlier turn owns the input box: the prompt
         # would land in its comment field and grok would never see it. Clear
         # it first (plan_mode.json says whether one is up — no pane reads).
-        if runner.plan_awaiting(tui.session_id):
+        if runner.plan_awaiting(tui.session_id, job=job, isolate_root=iso):
             job.set_phase("asking", "plan approval")
-            self._answer_plan(job, tui, runner.plan_text(tui.session_id),
-                              preturn=True)
-            self._await_plan_clear(tui.session_id, _PLAN_CLEAR_S)
+            self._answer_plan(
+                job, tui,
+                runner.plan_text(tui.session_id, job=job, isolate_root=iso),
+                preturn=True)
+            self._await_plan_clear(
+                tui.session_id, _PLAN_CLEAR_S, job=job, isolate_root=iso)
             if state.get("turn_done"):
                 # Approve: grok is building, so this turn is the approval.
                 text = "".join(state.get("full") or [])
@@ -1124,6 +1267,22 @@ class GrokInteractiveManager:
                 return
         else:
             log.info("grok TUI %s: resume watch for job %s", tui.name, job.id)
+            # Resume tails from EOF. If the turn already finished while the
+            # journal was unbound (guest store miss) or the daemon was down,
+            # no new turn_completed will arrive — complete from disk state.
+            # Also clear a stale phone ask gate if the journal is idle.
+            if job.pending_question and runner.turn_idle_on_disk(
+                    tui.session_id, job=job, isolate_root=iso):
+                job.cancel_question()
+            if (not state.get("turn_done")
+                    and runner.turn_idle_on_disk(
+                        tui.session_id, job=job, isolate_root=iso)):
+                log.info("grok TUI %s: resume found turn already complete on disk",
+                         tui.name)
+                with job.lock:
+                    job.new_session_id = tui.session_id or job.new_session_id
+                self._done(job, "".join(state.get("full") or []))
+                return
 
         prompt = (job.prompt or "").strip()
         local = prompt.startswith("/")
@@ -1151,7 +1310,8 @@ class GrokInteractiveManager:
                 job.set_phase("asking", "plan approval")
                 state["plan_thread"] = threading.Thread(
                     target=self._answer_plan,
-                    args=(job, tui, runner.plan_text(tui.session_id)),
+                    args=(job, tui, runner.plan_text(
+                        tui.session_id, job=job, isolate_root=iso)),
                     daemon=True)
                 state["plan_thread"].start()
             # ask_user_question is modal the same way: forward it once per
@@ -1224,6 +1384,28 @@ class GrokInteractiveManager:
                     deadline += time.time() - ask_wait_from
                 ask_wait_from = None
             if deadline and time.time() > deadline:
+                # Same as Claude interactive: don't drop a still-busy host TUI
+                # from the phone's "working" list on a wall-clock turn_timeout.
+                still_going = bool(
+                    job.pending_question
+                    or (state.get("parts") or state.get("full"))
+                )
+                if not still_going:
+                    try:
+                        # Grok footer / working chrome while generating.
+                        pane = self._pane_text(tui.name).lower()
+                        still_going = (
+                            "thinking" in pane
+                            or "working" in pane
+                            or "esc" in pane and "interrupt" in pane
+                        )
+                    except Exception:
+                        still_going = False
+                if still_going and timeout_s > 0:
+                    deadline = time.time() + timeout_s
+                    log.info("TUI %s: extending turn deadline by %ds (still busy)",
+                             tui.name, int(timeout_s))
+                    continue
                 tail = self._pane_tail(tui.name)
                 self._fail(job, "turn timed out after %ds%s" % (
                     int(timeout_s), " — screen: %s" % tail if tail else ""))

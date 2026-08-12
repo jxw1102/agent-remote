@@ -55,11 +55,12 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
 
-from ..config import CONFIG_DIR
+from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
 
 log = logging.getLogger(__name__)
 
@@ -151,9 +152,10 @@ def _hook_secret() -> str:
 class _Tui:
     """One detached tmux session hosting one claude TUI."""
 
-    def __init__(self, name: str, cwd: str):
+    def __init__(self, name: str, cwd: str, isolate_root: str = ""):
         self.name = name
         self.cwd = cwd
+        self.isolate_root = isolate_root or ""
         self.session_id = ""          # current claude session id
         self.transcript = ""          # its JSONL path
         self.spawned = False          # tmux session created (prunable when dead)
@@ -217,8 +219,13 @@ class InteractiveManager:
                     continue
                 entry = known.get(name)
                 if entry is None:
-                    log.info("reaping unknown TUI %s", name)
-                    self._tmux("kill-session", "-t", name)
+                    # Never kill. An unrecognised TUI is far more likely to be
+                    # someone's live turn than a leak — this reaper used to
+                    # take down every running TUI on the box whenever a test
+                    # (empty registry, real tmux) constructed a manager, which
+                    # is what "claude TUI exited mid-turn" mid-tool-call was.
+                    log.info("ignoring unknown TUI %s (absent from %s)",
+                             name, _STATE_FILE.name)
                     continue
                 tui = _Tui(name, str(entry.get("cwd", ""))
                            or os.path.expanduser("~"))
@@ -305,7 +312,10 @@ class InteractiveManager:
     # -- tmux helpers ------------------------------------------------------
 
     def _tmux(self, *args, capture=False, input_bytes=None):
-        cmd = [self._tmux_bin] + list(args)
+        # -L: the fleet's own socket (see config.tmux_socket) — never the
+        # shared default one, where the reaper below would meet TUIs that
+        # belong to another AGENTREMOTED_HOME.
+        cmd = [self._tmux_bin, "-L", tmux_socket()] + list(args)
         return subprocess.run(
             cmd, input=input_bytes,
             stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
@@ -334,13 +344,106 @@ class InteractiveManager:
         except (OSError, subprocess.TimeoutExpired):
             return ""
 
+    def _pane_tail(self, name: str, n: int = 20) -> str:
+        """Bottom of the pane only — scrollback must not drive busy state.
+
+        Older turns leave lines like "Waiting for 1 background agent to finish"
+        in the buffer long after the session is idle at ❯; scanning the full
+        capture kept active_tui_status (and the phone "working" pulse) stuck.
+        """
+        rows = [l for l in self._pane_text(name).splitlines() if l.strip()]
+        return "\n".join(rows[-n:]) if rows else ""
+
     def _pane_busy(self, name: str) -> bool:
-        """A model turn is in flight (the TUI's spinner line offers Esc)."""
-        return "esc to interrupt" in self._pane_text(name).lower()
+        """A model turn / subagent is still in flight on the host TUI.
+
+        Classic chat turns show "esc to interrupt". Multi-agent work often
+        leaves the main input idle while a background agent runs — the chrome
+        then says "Waiting for N background agent(s)" without Esc. Treat both
+        as busy so turn_timeout does not drop the session from clients'
+        working list and active_tui_status still reports them.
+
+        Only the tail is inspected (see _pane_tail). Do not match bare
+        "agent" in the status bar ("· ← 1 agent") or historical transcript.
+        """
+        t = self._pane_tail(name).lower()
+        if "esc to interrupt" in t:
+            return True
+        # Live multi-agent wait chrome (current turn), not old scrollback.
+        if "waiting for" in t and "background agent" in t:
+            return True
+        if "waiting for" in t and "agent" in t and "finish" in t:
+            return True
+        # Avoid matching bare "agent" / "subagent" in assistant prose or the
+        # idle chrome ("· ← 1 agent").
+        if "running subagent" in t:
+            return True
+        if "background agent" in t and (
+                "running" in t or "active" in t or "waiting" in t):
+            return True
+        return False
 
     def _pane_queued(self, name: str) -> bool:
         """Typed-ahead messages are still waiting in the TUI's own queue."""
-        return "queued message" in self._pane_text(name).lower()
+        return "queued message" in self._pane_tail(name).lower()
+
+    def active_tui_status(self) -> list:
+        """Busy host TUIs for /ws/status even when no remote job is running.
+
+        After a turn_timeout (or a lost job on restart) the tmux Claude can
+        keep working for a long time. Clients only paint the "working" pulse
+        from the active-job stream, so surface those TUIs as synthetic rows.
+        """
+        out = []
+        with self._lock:
+            items = list(self._tuis.values())
+        now = time.time()
+        for t in items:
+            if not t.spawned:
+                continue
+            sid = (t.session_id or "").strip()
+            if not sid:
+                continue
+            if not self._tmux_alive(t.name) or self._pane_dead(t.name)[0]:
+                continue  # gone, or a frozen pane whose claude has exited
+            job = t.job
+            if job is not None:
+                with job.lock:
+                    if job.status in ("starting", "running"):
+                        continue  # real job row already covers this session
+            busy = bool(t.compacting or t.hook_ask)
+            if not busy:
+                try:
+                    busy = self._pane_busy(t.name) or self._pane_queued(t.name)
+                except Exception:
+                    busy = False
+            if not busy:
+                continue
+            acct = ""
+            iso = ""
+            if job is not None:
+                acct = str(getattr(job, "account", "") or "")
+                iso = str(getattr(job, "isolate_root", "") or "")
+            out.append({
+                "job_id": "tui-%s" % (sid.replace("-", "")[:12]),
+                "session_id": sid,
+                "new_session_id": sid,
+                "status": "running",
+                "prompt": "(live TUI)",
+                "cwd": getattr(t, "cwd", "") or "",
+                "account": acct,
+                "isolate_root": iso,
+                "elapsed_s": max(0, int(now - float(t.last_used or now))),
+                "queued_count": 0,
+                "tool": "",
+                "tool_detail": "",
+                "phase": "working",
+                "phase_detail": "host interactive TUI",
+                "pending_permission": False,
+                "pending_question": False,
+                "next_seq": 0,
+            })
+        return out
 
     def _next_turn_starts(self, job, tui) -> bool:
         """After a Stop with typed-ahead debt: does another turn really begin?
@@ -432,21 +535,45 @@ class InteractiveManager:
         # a tmux server born under launchd gives panes a 256-fd soft limit,
         # under which claude crashes with EMFILE mid-turn (hard limit is
         # unlimited, so the pane shell may raise it itself).
-        shell_cmd = ("ulimit -n 65536 2>/dev/null; AGENTREMOTE_HOOK_URL=%s exec %s"
-                     % (shlex.quote(self._hook_url(tui.name)),
-                        " ".join(shlex.quote(p) for p in parts)))
         tui.start_event.clear()
         tui.session_id = ""
         tui.transcript = ""
+        launch_cwd = tui.isolate_root or tui.cwd
+        if tui.isolate_root:
+            # Same shape as grok guest launch: isolate only the CLI, force
+            # env/cwd via accounts.isolate_shell_line (never TERM=dumb).
+            from .. import accounts as _accounts
+            body = (
+                "ulimit -n 65536 2>/dev/null; "
+                "export AGENTREMOTE_HOOK_URL=%s; exec %s"
+                % (shlex.quote(self._hook_url(tui.name)),
+                   " ".join(shlex.quote(p) for p in parts))
+            )
+            shell_cmd = _accounts.isolate_shell_line(body, tui.isolate_root)
+        else:
+            shell_cmd = (
+                "ulimit -n 65536 2>/dev/null; AGENTREMOTE_HOOK_URL=%s exec %s"
+                % (shlex.quote(self._hook_url(tui.name)),
+                   " ".join(shlex.quote(p) for p in parts))
+            )
+        # One creator for the shared socket: concurrent new-session calls
+        # would each try to spawn the server, and the loser's teardown takes
+        # every other session with it (see config.ensure_tmux_server).
+        ensure_tmux_server(self._tmux_bin)
         try:
             r = self._tmux("new-session", "-d", "-s", tui.name,
-                           "-x", "220", "-y", "50", "-c", tui.cwd, shell_cmd)
+                           "-x", "220", "-y", "50", "-c", launch_cwd, shell_cmd)
         except OSError as e:
             return "tmux not available: %s" % e
         except subprocess.TimeoutExpired:
             return "tmux new-session timed out"
         if r.returncode != 0:
             return "tmux failed: %s" % r.stderr.decode("utf-8", errors="replace").strip()
+        # The pane is `exec claude`, so claude's death used to take the pane,
+        # the session and every diagnostic with it — leaving the turn nothing
+        # to report but a blind "exited mid-turn". remain-on-exit freezes the
+        # corpse instead, so the exit status and final screen survive.
+        self._tmux("set-option", "-t", tui.name, "remain-on-exit", "on")
         tui.spawned = True
         if not tui.start_event.wait(_START_TIMEOUT_S):
             tail = self._pane_tail(tui.name)
@@ -456,29 +583,84 @@ class InteractiveManager:
         time.sleep(_READY_SETTLE_S)
         return ""
 
+    def _pane_dead(self, name: str):
+        """(dead, why) for a session's pane.
+
+        With remain-on-exit the tmux session outlives claude, so "the TUI is
+        gone" is no longer "the session is gone" — it is a pane tmux marks
+        dead, carrying the exit status (and signal, when something killed it)
+        that finally names the cause.
+        """
+        try:
+            out = self._tmux(
+                "display-message", "-p", "-t", name,
+                "#{pane_dead}:#{pane_dead_status}:#{pane_dead_signal}",
+                capture=True)
+            if out.returncode != 0:
+                return False, ""
+            txt = out.stdout.decode("utf-8", errors="replace").strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return False, ""
+        parts = txt.split(":")
+        if not parts or parts[0] != "1":
+            return False, ""
+        status = parts[1] if len(parts) > 1 else ""
+        signal = parts[2] if len(parts) > 2 else ""
+        why = "exit status %s" % (status if status else "?")
+        if signal:
+            why += ", killed by signal %s" % signal
+        return True, why
+
     def _kill(self, tui: _Tui):
+        # Name the caller: a TUI dying mid-turn is indistinguishable from one
+        # the daemon killed itself unless the log says which happened.
+        try:
+            caller = sys._getframe(1).f_code.co_name
+        except Exception:  # noqa: BLE001
+            caller = "?"
+        log.info("killing TUI %s (from %s)", tui.name, caller)
         try:
             self._tmux("kill-session", "-t", tui.name)
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-    def _ensure_tui(self, cwd: str, session_id: str, model: str):
+    def _ensure_tui(self, cwd: str, session_id: str, model: str,
+                    isolate_root: str = ""):
         """Return (tui, error). One TUI per claude session: a continued
         session is matched to its live TUI by session id; a new session (or
         one whose TUI died) gets a fresh TUI, --resume'ing when continuing.
         Parallel sessions in the same project never evict each other."""
+        iso = (isolate_root or "").strip()
         with self._lock:
             # Prune TUIs whose tmux died (/exit, crash, manual kill) — but
             # never one another turn just registered and hasn't launched yet.
-            dead = [n for n, t in self._tuis.items()
-                    if t.spawned and not self._tmux_alive(n)]
-            for name in dead:
+            # Under remain-on-exit a claude that exited leaves the session up
+            # with a dead pane, whose frozen last screen still shows the ❯ and
+            # footer _pane_healthy looks for — so ask tmux, not the screen,
+            # or the next turn pastes into a corpse.
+            dead = []
+            for name, t in self._tuis.items():
+                if not t.spawned:
+                    continue
+                if not self._tmux_alive(name):
+                    dead.append((name, False))
+                elif self._pane_dead(name)[0]:
+                    dead.append((name, True))
+            for name, frozen in dead:
+                if frozen:
+                    self._tmux("kill-session", "-t", name)
                 del self._tuis[name]
             if dead:
                 self._save_state()
             if session_id:
                 for t in self._tuis.values():
                     if t.session_id == session_id:
+                        if (getattr(t, "isolate_root", "") or "") != iso:
+                            log.info("relaunching TUI %s under new isolation",
+                                     t.name)
+                            self._kill(t)
+                            del self._tuis[t.name]
+                            break
                         if self._pane_healthy(t.name):
                             t.last_used = time.time()
                             return t, ""
@@ -499,7 +681,7 @@ class InteractiveManager:
                 self._kill(victim)
                 del self._tuis[victim.name]
                 self._save_state()
-            tui = _Tui(self._tui_name(cwd), cwd)
+            tui = _Tui(self._tui_name(cwd), cwd, isolate_root=iso)
             self._tuis[tui.name] = tui
         err = self._launch(tui, session_id, model)
         if err:
@@ -518,7 +700,9 @@ class InteractiveManager:
             self._fail(job, "interactive mode needs tmux (brew install tmux)")
             return
         cwd = os.path.expanduser(job.cwd or "") or os.path.expanduser("~")
-        tui, err = self._ensure_tui(cwd, job.session_id, job.model)
+        iso = str(getattr(job, "isolate_root", "") or "")
+        tui, err = self._ensure_tui(
+            cwd, job.session_id, job.model, isolate_root=iso)
         if err:
             self._fail(job, err)
             return
@@ -552,7 +736,8 @@ class InteractiveManager:
                         break
         if tui is None or not self._tmux_alive(tui.name):
             cwd = os.path.expanduser(job.cwd or "") or os.path.expanduser("~")
-            tui, err = self._ensure_tui(cwd, sid, job.model)
+            iso = str(getattr(job, "isolate_root", "") or "")
+            tui, err = self._ensure_tui(cwd, sid, job.model, isolate_root=iso)
             if err:
                 self._fail(job, "interrupted by daemon restart: %s" % err)
                 return
@@ -598,6 +783,11 @@ class InteractiveManager:
         return True
 
     def _fail(self, job, message: str):
+        # Interactive failures used to leave no trace at all in daemon.log —
+        # only the phone saw them, so a turn that died overnight was
+        # undiagnosable the next morning.
+        log.warning("interactive job %s failed: %s",
+                    getattr(job, "id", "?"), message)
         with job.lock:
             if job.status != "stopped":
                 job.status = "error"
@@ -1016,11 +1206,31 @@ class InteractiveManager:
                     deadline += time.time() - ask_wait_from
                 ask_wait_from = None
             if deadline and time.time() > deadline:
+                # turn_timeout is a *stall* bound, not a hard wall. Multi-agent
+                # and long tool loops keep "esc to interrupt" up for >30 min
+                # while still making progress — failing here left the host TUI
+                # working but dropped the session from clients' "working" list
+                # (job no longer in active_status).
+                still_going = (
+                    tui.compacting
+                    or bool(state.get("ask"))
+                    or bool(job.pending_question)
+                    or self._pane_busy(tui.name)
+                    or self._pane_queued(tui.name)
+                )
+                if still_going and timeout_s > 0:
+                    deadline = time.time() + timeout_s
+                    life_t = time.time()
+                    log.info("TUI %s: extending turn deadline by %ds (pane still busy)",
+                             tui.name, int(timeout_s))
+                    continue
                 tail = self._pane_tail(tui.name)
                 self._fail(job, "turn timed out after %ds%s" % (
                     int(timeout_s), " — screen: %s" % tail if tail else ""))
                 return
-            if not self._tmux_alive(tui.name):
+            gone = not self._tmux_alive(tui.name)
+            died, why = (False, "") if gone else self._pane_dead(tui.name)
+            if gone or died:
                 if prompt.strip() in ("/exit", "/quit"):
                     # Killing the TUI is what /exit is for — a clean end, not
                     # a failure. The next message launches a fresh TUI and
@@ -1035,8 +1245,20 @@ class InteractiveManager:
                             job.status = "done"
                     job.add_event("result", is_error=False, duration_ms=int(
                         (time.time() - job.started_at) * 1000), cost_usd=0)
+                    self._kill(tui)
                     return
-                self._fail(job, "claude TUI exited mid-turn")
+                detail = ""
+                if died:
+                    # The frozen pane still holds the last screen: save the
+                    # scrollback and quote the reason, then release it.
+                    detail = "%s — %s" % (why, self._save_crash(tui))
+                    self._kill(tui)
+                    tui.session_id = ""
+                    tui.transcript = ""
+                    self._save_state()
+                self._fail(job, "claude TUI exited mid-turn%s"
+                           % (" (%s)" % detail if detail else
+                              " (tmux session vanished — nothing left to read)"))
                 return
             # Crash watchdog (_CRASH_STALL_S): claude can die leaving a
             # backtrace in a still-alive pane — no Stop hook will ever come.

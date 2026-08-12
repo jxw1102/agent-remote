@@ -35,7 +35,7 @@ import time
 import uuid
 from pathlib import Path
 
-from ..config import CONFIG_DIR
+from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
 from ..render_blocks import markdown_to_blocks
 from .codex import (
     _event_chat_message,
@@ -97,9 +97,10 @@ def _safe_json(line: str):
 class _Tui:
     """One detached tmux session hosting one Codex TUI."""
 
-    def __init__(self, name: str, cwd: str):
+    def __init__(self, name: str, cwd: str, isolate_root: str = ""):
         self.name = name
         self.cwd = cwd
+        self.isolate_root = isolate_root or ""
         self.session_id = ""
         self.spawned = False
         self.last_used = time.time()
@@ -153,8 +154,8 @@ class CodexInteractiveManager:
                     continue
                 entry = known.get(name)
                 if entry is None:
-                    log.info("reaping unknown codex TUI %s", name)
-                    self._tmux("kill-session", "-t", name)
+                    # Never kill — see claude_interactive._adopt_or_reap.
+                    log.info("ignoring unknown codex TUI %s", name)
                     continue
                 tui = _Tui(name, str(entry.get("cwd", "")) or os.path.expanduser("~"))
                 tui.session_id = str(entry.get("session_id", ""))
@@ -178,8 +179,10 @@ class CodexInteractiveManager:
         return shutil.which("tmux") or _TMUX_FALLBACK
 
     def _tmux(self, *args, capture=False, input_bytes=None):
+        # -L: the fleet's own socket (see config.tmux_socket).
         return subprocess.run(
-            [self._tmux_bin] + list(args), input=input_bytes,
+            [self._tmux_bin, "-L", tmux_socket()] + list(args),
+            input=input_bytes,
             stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
             stderr=subprocess.PIPE, timeout=15)
 
@@ -248,20 +251,29 @@ class CodexInteractiveManager:
         extra_env = getattr(self.config, "codex_env", None) or {}
         env.update({str(k): str(v) for k, v in extra_env.items()})
 
-        # Use env= on shell_cmd so tmux child sees CODEX_HOME/PATH.
-        env_prefix = " ".join(
-            "%s=%s" % (k, shlex.quote(str(v)))
-            for k, v in env.items()
-            if k in ("CODEX_HOME", "PATH") or k in extra_env
-        )
-        shell_cmd = "%s exec %s" % (
-            env_prefix,
-            " ".join(shlex.quote(p) for p in parts),
-        )
         tui.session_id = resume_sid or ""
+        launch_cwd = tui.isolate_root or tui.cwd
+        if tui.isolate_root:
+            from .. import accounts as _accounts
+            # Guest: isolate only the CLI; CODEX_HOME is set inside the jail.
+            env = _accounts.isolation_env(env, tui.isolate_root)
+            shell_cmd = _accounts.isolate_shell_line(
+                " ".join(shlex.quote(p) for p in parts), tui.isolate_root)
+        else:
+            # Use env= on shell_cmd so tmux child sees CODEX_HOME/PATH.
+            env_prefix = " ".join(
+                "%s=%s" % (k, shlex.quote(str(v)))
+                for k, v in env.items()
+                if k in ("CODEX_HOME", "PATH") or k in extra_env
+            )
+            shell_cmd = "%s exec %s" % (
+                env_prefix,
+                " ".join(shlex.quote(p) for p in parts),
+            )
+        ensure_tmux_server(self._tmux_bin)   # see config.ensure_tmux_server
         try:
             r = self._tmux("new-session", "-d", "-s", tui.name,
-                           "-x", "220", "-y", "50", "-c", tui.cwd, shell_cmd)
+                           "-x", "220", "-y", "50", "-c", launch_cwd, shell_cmd)
         except OSError as e:
             return "tmux not available: %s" % e
         except subprocess.TimeoutExpired:
@@ -292,7 +304,9 @@ class CodexInteractiveManager:
         time.sleep(_READY_SETTLE_S)
         return ""
 
-    def _ensure_tui(self, cwd: str, session_id: str, model: str):
+    def _ensure_tui(self, cwd: str, session_id: str, model: str,
+                    isolate_root: str = ""):
+        iso = (isolate_root or "").strip()
         with self._lock:
             dead = [n for n, t in self._tuis.items()
                     if t.spawned and not self._tmux_alive(n)]
@@ -303,6 +317,12 @@ class CodexInteractiveManager:
             if session_id:
                 for t in self._tuis.values():
                     if t.session_id == session_id:
+                        if (getattr(t, "isolate_root", "") or "") != iso:
+                            log.info("relaunching codex TUI %s under isolation",
+                                     t.name)
+                            self._kill(t)
+                            del self._tuis[t.name]
+                            break
                         t.last_used = time.time()
                         return t, ""
             while len(self._tuis) >= _MAX_TUIS:
@@ -315,7 +335,7 @@ class CodexInteractiveManager:
                 self._kill(victim)
                 del self._tuis[victim.name]
                 self._save_state()
-            tui = _Tui(self._tui_name(cwd), cwd)
+            tui = _Tui(self._tui_name(cwd), cwd, isolate_root=iso)
             self._tuis[tui.name] = tui
         err = self._launch(tui, session_id, model)
         if err:
@@ -764,7 +784,9 @@ class CodexInteractiveManager:
             return
         job.cwd = cwd
         launched_at = time.time()
-        tui, err = self._ensure_tui(cwd, job.session_id, job.model)
+        iso = str(getattr(job, "isolate_root", "") or "")
+        tui, err = self._ensure_tui(
+            cwd, job.session_id, job.model, isolate_root=iso)
         if err:
             self._fail(job, err)
             return
@@ -996,6 +1018,16 @@ class CodexInteractiveManager:
                 return
 
             if deadline and time.time() > deadline:
+                # Don't fail while the hosted TUI is still producing events.
+                still_going = bool(state.get("full") or state.get("parts"))
+                if not still_going and self._tmux_alive(tui.name):
+                    # No completion yet and pane still up — likely still working.
+                    still_going = True
+                if still_going and timeout_s > 0 and self._tmux_alive(tui.name):
+                    deadline = time.time() + timeout_s
+                    log.info("TUI %s: extending turn deadline by %ss (still busy)",
+                             tui.name, int(timeout_s))
+                    continue
                 try:
                     self._tmux("send-keys", "-t", tui.name, "Escape")
                 except (OSError, subprocess.TimeoutExpired):

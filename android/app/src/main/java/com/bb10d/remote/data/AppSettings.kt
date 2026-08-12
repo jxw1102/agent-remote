@@ -25,8 +25,11 @@ data class AppSettings(
     val hapticCues: Boolean = true,
     /** Keep the status stream + job watch alive when the app is not visible. */
     val backgroundWatch: Boolean = true,
-    /** Include agent-spawned / contentless sessions (?all=1). */
-    val showAllSessions: Boolean = false,
+    /**
+     * Kanban mode: show only the projects the human enrolled by acting on them
+     * through the daemon. A filter over the same list, not a second layout.
+     */
+    val focusMode: Boolean = false,
     /** Render assistant markdown; off = plain monospace, always safe. */
     val richText: Boolean = true,
 )
@@ -42,7 +45,7 @@ class SettingsStore(context: Context) {
         val soundCues = booleanPreferencesKey("soundCues")
         val hapticCues = booleanPreferencesKey("hapticCues")
         val backgroundWatch = booleanPreferencesKey("backgroundWatch")
-        val showAllSessions = booleanPreferencesKey("showAllSessions")
+        val focusMode = booleanPreferencesKey("focusMode")
         val richText = booleanPreferencesKey("richText")
     }
 
@@ -54,7 +57,7 @@ class SettingsStore(context: Context) {
             soundCues = p[K.soundCues] ?: d.soundCues,
             hapticCues = p[K.hapticCues] ?: d.hapticCues,
             backgroundWatch = p[K.backgroundWatch] ?: d.backgroundWatch,
-            showAllSessions = p[K.showAllSessions] ?: d.showAllSessions,
+            focusMode = p[K.focusMode] ?: d.focusMode,
             richText = p[K.richText] ?: d.richText,
         )
     }
@@ -64,6 +67,6 @@ class SettingsStore(context: Context) {
     suspend fun setSoundCues(v: Boolean) = store.edit { it[K.soundCues] = v }
     suspend fun setHapticCues(v: Boolean) = store.edit { it[K.hapticCues] = v }
     suspend fun setBackgroundWatch(v: Boolean) = store.edit { it[K.backgroundWatch] = v }
-    suspend fun setShowAllSessions(v: Boolean) = store.edit { it[K.showAllSessions] = v }
+    suspend fun setFocusMode(v: Boolean) = store.edit { it[K.focusMode] = v }
     suspend fun setRichText(v: Boolean) = store.edit { it[K.richText] = v }
 }

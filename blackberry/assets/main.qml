@@ -1,4 +1,5 @@
 import bb.cascades 1.4
+import bb.system 1.2
 
 NavigationPane {
     id: nav
@@ -71,6 +72,22 @@ NavigationPane {
                         usageSheet.show();
                     else if (nav.api && nav.api.usageOpensBrowser)
                         nav.api.openUsageInBrowser();
+                }
+            },
+            ActionItem {
+                // Focus / All. One slot that toggles, labelled with where it
+                // will take you — menu cells are too narrow for two entries,
+                // and the count tells you whether it is worth going.
+                title: (nav.api && nav.api.focusMode)
+                       ? qsTr("All sessions")
+                       : ((nav.api && nav.api.focusCount > 0)
+                          ? qsTr("Focus (%1)").arg(nav.api.focusCount)
+                          : qsTr("Focus"))
+                imageSource: "asset:///images/ic_queue.png"
+                enabled: nav.api ? nav.api.capFocus : false
+                onTriggered: {
+                    if (nav.api)
+                        nav.api.focusMode = !nav.api.focusMode;
                 }
             },
             ActionItem {
@@ -183,9 +200,9 @@ NavigationPane {
                             maxHeight: 44
                             rightMargin: 10
                             verticalAlignment: VerticalAlignment.Center
-                            defaultImageSource: "asset:///images/ic_folder.png"
-                            pressedImageSource: "asset:///images/ic_folder.png"
-                            onClicked: sessionsPage.openProjects(false)
+                            defaultImageSource: "asset:///images/ic_add.png"
+                            pressedImageSource: "asset:///images/ic_add.png"
+                            onClicked: sessionsPage.openProjects(true)
                         }
                         ImageButton {
                             preferredWidth: 44
@@ -283,19 +300,6 @@ NavigationPane {
                                              : Color.create("#9a9a9a")
                     verticalAlignment: VerticalAlignment.Center
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
-                }
-            }
-
-            Container {
-                horizontalAlignment: HorizontalAlignment.Fill
-                leftPadding: 10
-                rightPadding: 10
-                topPadding: 6
-                bottomPadding: 4
-                Button {
-                    text: qsTr("+ New session")
-                    horizontalAlignment: HorizontalAlignment.Fill
-                    onClicked: sessionsPage.openProjects(true)
                 }
             }
 
@@ -503,6 +507,70 @@ NavigationPane {
                                                     "" + ListItemData.id);
                                         }
                                     }
+                                    // Rename: the derived names are often
+                                    // unrecognisable with a dozen projects in
+                                    // flight, which is the point of Focus.
+                                    ActionItem {
+                                        title: qsTr("Rename")
+                                        onTriggered: {
+                                            var a = ListItemData.api;
+                                            if (! a || ! ListItemData.id)
+                                                return;
+                                            var pidx =
+                                                (ListItemData.profileIndex
+                                                 === undefined
+                                                 || ListItemData.profileIndex
+                                                 === null)
+                                                ? -1
+                                                : ListItemData.profileIndex;
+                                            renamePrompt.sessionId =
+                                                "" + ListItemData.id;
+                                            renamePrompt.profileIndex = pidx;
+                                            renamePrompt.inputField.defaultText =
+                                                "" + ListItemData.title;
+                                            renamePrompt.show();
+                                        }
+                                    }
+                                    ActionItem {
+                                        title: qsTr("Name it from the transcript")
+                                        onTriggered: {
+                                            var a = ListItemData.api;
+                                            if (! a || ! ListItemData.id)
+                                                return;
+                                            var pidx =
+                                                (ListItemData.profileIndex
+                                                 === undefined
+                                                 || ListItemData.profileIndex
+                                                 === null)
+                                                ? -1
+                                                : ListItemData.profileIndex;
+                                            a.regenerateSessionTitle(
+                                                pidx, "" + ListItemData.id);
+                                        }
+                                    }
+                                    // Done takes the row out of Focus; the
+                                    // session itself is untouched and stays in
+                                    // the All list.
+                                    ActionItem {
+                                        title: ListItemData.focus
+                                               ? qsTr("Done - out of Focus")
+                                               : qsTr("Track in Focus")
+                                        onTriggered: {
+                                            var a = ListItemData.api;
+                                            if (! a || ! ListItemData.id)
+                                                return;
+                                            var pidx =
+                                                (ListItemData.profileIndex
+                                                 === undefined
+                                                 || ListItemData.profileIndex
+                                                 === null)
+                                                ? -1
+                                                : ListItemData.profileIndex;
+                                            a.setFocusMember(
+                                                pidx, "" + ListItemData.id,
+                                                ! ListItemData.focus);
+                                        }
+                                    }
                                 }
                             ]
                         }
@@ -530,6 +598,8 @@ NavigationPane {
                                     || session.profileIndex === null)
                                    ? -1 : session.profileIndex;
                         api.openSessionRow(pidx, "" + session.id);
+                        // Opening it stops flagging the finished turn.
+                        api.markSessionSeen(pidx, "" + session.id);
                         var page = api.createTranscriptPage();
                         if (! page)
                             return; // factory reported the load error
@@ -547,6 +617,25 @@ NavigationPane {
         attachedObjects: [
             ArrayDataModel {
                 id: sessionsModel
+            },
+            // Rename prompt. The row that opened it is remembered here: a
+            // SystemPrompt callback has no access to ListItemData.
+            SystemPrompt {
+                id: renamePrompt
+                property string sessionId: ""
+                property int profileIndex: -1
+                title: qsTr("Rename session")
+                body: qsTr("Leave it empty to go back to the name the agent derived.")
+                confirmButton.label: qsTr("Save")
+                cancelButton.label: qsTr("Cancel")
+                onFinished: {
+                    if (result != SystemUiResult.ConfirmButtonSelection)
+                        return;
+                    if (nav.api && renamePrompt.sessionId != "")
+                        nav.api.setSessionTitle(renamePrompt.profileIndex,
+                                                renamePrompt.sessionId,
+                                                renamePrompt.inputFieldTextEntry());
+                }
             },
             QueueSheet {
                 id: queueSheet

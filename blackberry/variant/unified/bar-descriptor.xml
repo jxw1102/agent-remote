@@ -6,7 +6,7 @@
     <id>com.bb10d.agentremote</id>
     <author>xiaowen.ji</author>
     <name>Agent Remote</name>
-    <description>Agent Remote: profiles for agentremoted hosts (Claude, Grok, Codex), merged session list, per-provider accents.</description>
+    <description>Control your AI sessions from anywhere with seamless support for Claude, Grok, and Codex.</description>
     <versionNumber>3.0.0</versionNumber>
     <buildId>7</buildId>
     <platformVersion>10.3.1.0</platformVersion>

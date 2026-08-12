@@ -14,13 +14,39 @@ Clients use **one profile** for that host; new session picks the harness.
 
 ## Versioning
 
-Bump `agentremoted/__init__.py` → `__version__` in the **same change** as any
-daemon edit (semver patch for fixes/features, minor for API/cap changes).
-`/api/ping` reports it so you can see whether a host picked up a deploy.
+Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
+(semver patch for fixes, minor for API/cap changes). Do not micro-bump every
+intermediate edit in a single feature. `/api/ping` reports the version so you
+can see whether a host picked up a deploy.
 
-**2.5.3** adds `auth` / `provider_details.*.auth` on `/api/ping` (CLI on PATH,
-subscription vs API key, expired/missing) so clients can show login health
-without calling vendor APIs.
+**2.6.3** process view (`?detail=steps`) smart-formats tool bodies on the
+daemon: Bash shows description + command, Edit/search_replace shows a
+unified diff, Write shows path + body; results unwrap Grok
+SearchReplace/Bash/ListDir envelopes to the success line or shell output
+instead of dumping JSON. Unknown shapes still pretty-print. Claude, Grok
+and Codex all use `agentremoted.steps.format_tool_use` /
+`format_tool_result` (window + expand endpoint).
+**2.6.2** live-status `tool_detail` / `phase_detail` prefer a tool's human
+`description` (Bash, `run_terminal_command`, …) over the raw `command`, so
+the banner stays short; falls back to command/path when description is
+absent. Same key order on Claude, Grok, and Codex detail helpers.
+**2.6.1** interactive TUIs move to a private tmux socket named after
+`$AGENTREMOTED_HOME` (`config.tmux_socket`), the `_adopt_or_reap` reapers no
+longer kill unrecognised sessions, and tmux-server creation is serialised —
+three causes of `claude TUI exited mid-turn`. Adds `$AGENTREMOTED_HOME/tmux`,
+a generated wrapper for reaching the fleet (`~/.agentremoted/tmux ls`).
+Drop folders: `/api/drop` lists directories (`type`, `entries`) and
+`GET /api/drop/<name>` zips one on the fly (temp archive, deleted after the
+transfer; folder delete is refused). Process view: `?detail=steps` on
+`/api/sessions/<id>/messages` attaches tool calls, results and thinking to
+the messages they happened between, with `GET /api/sessions/<id>/steps/<ref>`
+for the full text behind a truncated one — Claude, Grok and Codex alike
+(`agentremoted/steps.py` owns the shape). Without `detail=steps` the
+response is unchanged.
+**2.6.0** optional scoped tokens via `$AGENTREMOTED_HOME/guests.json` (folder
+isolation + harness allow-list), plus Focus: `/api/focus`, focus membership +
+state tags on session rows, session rename / retitle, and `"focus": true` on
+`/api/ping`. **2.5.3** adds `auth` on `/api/ping`.
 
 | provider | sessions from | runs turns with |
 |----------|---------------|-----------------|
@@ -189,7 +215,8 @@ GET  /api/projects
 GET  /api/sessions?project=<id>&limit=<n>
 GET  /api/sessions/search?q=<text>&project=&limit=
 GET  /api/sessions/<id>
-GET  /api/sessions/<id>/messages?offset=&limit=
+GET  /api/sessions/<id>/messages?offset=&limit=[&detail=steps]
+GET  /api/sessions/<id>/steps/<ref>             full text behind a truncated step
 POST /api/sessions/new {cwd?, prompt, provider?, permission_mode?, …}
 POST /api/sessions/<id>/continue {prompt, permission_mode?, …}
 GET  /api/jobs
@@ -202,12 +229,52 @@ POST /api/jobs/<id>/input {prompt}              type a full line into interactiv
 GET  /api/sessions/<id>/tui[?ansi=1]            Live TUI pane (plain default; ansi=1 for SGR)
 POST /api/sessions/<id>/tui/keys {keys?,text?}  key/text injection into Live TUI
 POST /api/attachments
-GET  /api/drop
-GET  /api/drop/<name>
-POST /api/drop/<name>/delete
+GET  /api/focus                                 focus rows only, urgency-sorted
+POST /api/focus/<key>/done                      take a row out of Focus
+POST /api/focus/<key>/restore                   undo done (7-day window)
+POST /api/sessions/<id>/title {title}           rename ("" restores derived name)
+POST /api/sessions/<id>/title/regenerate        re-derive the title (Haiku)
+GET  /api/drop                                  files and folders (type=file|dir)
+GET  /api/drop/<name>                           a folder downloads as <name>.zip
+POST /api/drop/<name>/delete                    files only
 GET  /ws/status
 GET  /sse/status
 ```
+
+### Focus
+
+The projects you are actually carrying, so a session you forgot about does not
+sink out of a recency-sorted list. Clients treat it as a *filter* over the one
+session list — same rows, same layout, plus a state tag.
+
+Rows on `/api/sessions` gain two fields: `focus` (is this row in Focus) and
+`focus_state`, one of:
+
+| `focus_state` | meaning | what it wants |
+| --- | --- | --- |
+| `needs_answer` | blocked on you: an AskUserQuestion (phase `asking`), a plan approval, or a tool permission | answer it |
+| `failed` | the latest turn ended in an error | look at it |
+| `working` | a turn is running | nothing |
+| `turn_finished` | the turn ended cleanly | decide the next step |
+
+Tested in that order, because the states overlap — a running turn blocked on a
+question is `needs_answer`, not `working`. There is deliberately no read/unread
+split: whether you have opened a finished turn is not a property of the session.
+`failed` reads the in-memory job list, so it is forgotten if the job is evicted
+or the daemon restarts, and the row falls back to `turn_finished`.
+
+Membership is **opt-in by human action**: a row appears only when a turn is
+started, continued, typed into, or queued *through the daemon* — every one of
+those handlers sits behind the auth gate. Agent-initiated traffic arrives on
+`/internal/*`, which is handled before that gate, so subagents, hook posts and
+permission callbacks can never enrol anything. Marking done removes the row;
+the session itself is untouched and stays in the full list.
+
+State is never stored — it is derived per request from live job state plus the
+read cursor, so a tag cannot go stale. Membership, the cursor and title
+overrides live in `focus.json` beside the config, shared by every client of the
+daemon so Focus looks the same on web, phone, BlackBerry and the pager.
+`/api/ping` reports `"focus": true`; clients gate the mode on it.
 
 Cap `live_tui` on `/api/ping` when the harness can host a tmux TUI. Clients
 poll `GET …/tui` (~2–5 Hz; plain by default, `?ansi=1` for colour) and send
@@ -269,4 +336,6 @@ Auth: `X-Auth-Token` / `Authorization: Bearer` / `?token=`.
 cd daemon
 python3 tests/smoke_test.py
 python3 tests/render_test.py
+python3 tests/focus_test.py        # focus state machine (unit)
+python3 tests/focus_api_test.py    # focus over HTTP, incl. enrolment rules
 ```

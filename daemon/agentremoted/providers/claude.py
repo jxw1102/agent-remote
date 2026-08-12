@@ -24,6 +24,8 @@ the phone, and pre-allows the host's own MCP servers so only edits and shell
 commands ever ask.
 """
 
+from __future__ import annotations
+
 import getpass
 import hashlib
 import json
@@ -43,6 +45,8 @@ from datetime import datetime
 from pathlib import Path
 
 from ..config import CONFIG_DIR
+from .. import steps as steps_mod
+from .. import titles
 from ..render_blocks import inline_to_rich, markdown_to_blocks
 from .. import providers
 from .. import search_util
@@ -66,7 +70,13 @@ _MAX_PREVIEW = 200
 _MAX_TITLE = 60
 
 # Fields worth surfacing when a tool use is shown or needs approval.
-_DETAIL_KEYS = ("command", "file_path", "path", "pattern", "url", "prompt", "query")
+# Prefer human `description` (Bash / run_terminal_command almost always set
+# it) over the raw `command` so the live-status banner stays short and
+# readable; fall through to path/url/etc. for tools that never send one.
+_DETAIL_KEYS = (
+    "description", "command", "file_path", "path", "pattern", "url",
+    "prompt", "query",
+)
 
 # Tool name -> what the agent is doing right now (live-status banner verb).
 _PHASE_BY_TOOL = {
@@ -101,8 +111,10 @@ _TODO_JSONL_SCAN = 256 * 1024
 def tool_detail(tool_input: dict, max_len: int = 200) -> str:
     """One short single-line snippet for the phone status banner / permission.
 
-    Collapses whitespace so a multi-line Bash `command` cannot expand the
-    status strip into many wraps; then middle-ellipsis so head + tail stay
+    Prefers a human `description` when the tool provided one (typical for
+    Bash), else the first non-empty key in `_DETAIL_KEYS`. Collapses
+    whitespace so a multi-line Bash `command` cannot expand the status
+    strip into many wraps; then middle-ellipsis so head + tail stay
     readable (path prefix and filename, command verb and last args).
     """
     if not isinstance(tool_input, dict):
@@ -369,16 +381,11 @@ _usage_cache = {
 # re-summarizes from that compaction's summary blob (the richest description of
 # the session so far). The sig is keyed to the compaction *count*, so a title
 # regenerates exactly once per compaction and stays stable in between.
-_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
-_TITLE_MODEL = "claude-haiku-4-5-20251001"
-_TITLE_MAX_CHARS = 42
-_TITLE_SIG_VERSION = "v3"  # bump to invalidate every cached title after a logic change
-_TITLE_INPUT_CHARS = 4000  # hard cap on the API input
-_TITLE_SYSTEM = (
-    "You name coding sessions. From the text below, reply with ONLY a short "
-    "topic title of at most 5 words. No markdown, no quotes, no trailing "
-    "punctuation, no leading 'Title:'."
-)
+# Titling machinery is shared with grok/codex — see ../titles.py. Kept under
+# the old private names so this module's call sites read unchanged.
+_TITLE_SIG_VERSION = titles.SIG_VERSION
+_TITLE_MAX_CHARS = titles.MAX_CHARS
+_clean_title = titles.clean_title
 
 
 # OAuth token refresh, the same grant the CLI performs. When the cached access
@@ -950,18 +957,6 @@ def list_models(config) -> list:
     return list(models or cached)
 
 
-def _clean_title(text: str) -> str:
-    """Normalize a model reply into a bare title: drop markdown/quotes/leading
-    '#', collapse whitespace, trim trailing punctuation, clamp for mobile."""
-    t = " ".join((text or "").split())
-    t = t.lstrip("#").strip()
-    t = t.strip("*_`\"'").strip()
-    t = t.rstrip(".:;,").strip()
-    if len(t) > _TITLE_MAX_CHARS:
-        t = t[: _TITLE_MAX_CHARS - 1].rstrip() + "\u2026"
-    return t
-
-
 def _title_source(compactions: int, first: str, last_summary: str):
     """Pick the (sig, api_text) pair for a session's current compaction count.
 
@@ -976,109 +971,14 @@ def _title_source(compactions: int, first: str, last_summary: str):
     return "%s:c%d" % (_TITLE_SIG_VERSION, compactions), last_summary
 
 
-def _summarize_title(config, text: str) -> str:
-    """One short title from Haiku via the subscription OAuth token, or "" on
-    any failure (caller keeps the heuristic title)."""
-    text = text.strip()[:_TITLE_INPUT_CHARS]
-    if not text:
-        return ""
-    token = _oauth_token(config)
-    if not token:
-        return ""
-    body = json.dumps({
-        "model": _TITLE_MODEL,
-        "max_tokens": 32,
-        "system": _TITLE_SYSTEM,
-        "messages": [{"role": "user",
-                      "content": "Coding session to name:\n\n" + text}],
-    }).encode("utf-8")
-    req = urllib.request.Request(_MESSAGES_URL, data=body, headers={
-        "Authorization": "Bearer " + token,
-        "anthropic-version": "2023-06-01",
-        "anthropic-beta": "oauth-2025-04-20",
-        "Content-Type": "application/json",
-        "User-Agent": "agentremoted",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError,
-            json.JSONDecodeError, ValueError):
-        return ""
-    out = "".join(b.get("text", "") for b in raw.get("content", [])
-                  if isinstance(b, dict) and b.get("type") == "text")
-    return _clean_title(out)
+def summarize_title(config, text: str) -> str:
+    """Public entry point for one-off retitling (server.py's regenerate button).
 
-
-class _TitleCache:
-    """Persistent session_id -> {title, sig} map, filled lazily by a single
-    background worker so the sessions list never blocks on the Haiku call."""
-
-    def __init__(self, config):
-        self._config = config
-        self._path = CONFIG_DIR / "session_titles.json"
-        self._lock = threading.Lock()
-        self._map = {}
-        self._queue = queue.Queue()
-        self._pending = set()
-        self._worker = None
-        self._load()
-
-    def _load(self):
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
-        if isinstance(data, dict):
-            self._map = {k: v for k, v in data.items()
-                         if isinstance(v, dict) and v.get("title")}
-
-    def _save(self):
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.parent / (self._path.name + ".tmp")
-            tmp.write_text(json.dumps(self._map), encoding="utf-8")
-            os.replace(str(tmp), str(self._path))
-        except OSError:
-            pass
-
-    def get(self, session_id: str, sig: str) -> str:
-        with self._lock:
-            entry = self._map.get(session_id)
-            if entry and entry.get("sig") == sig:
-                return entry.get("title", "")
-        return ""
-
-    def request(self, session_id: str, sig: str, text: str) -> None:
-        """Queue a title generation unless one is cached (same sig) or already
-        in flight for this session."""
-        if not text:
-            return
-        with self._lock:
-            entry = self._map.get(session_id)
-            if entry and entry.get("sig") == sig:
-                return
-            if session_id in self._pending:
-                return
-            self._pending.add(session_id)
-            if self._worker is None:
-                self._worker = threading.Thread(target=self._run, daemon=True)
-                self._worker.start()
-        self._queue.put((session_id, sig, text))
-
-    def _run(self):
-        while True:
-            session_id, sig, text = self._queue.get()
-            try:
-                title = _summarize_title(self._config, text)
-                if title:
-                    with self._lock:
-                        self._map[session_id] = {"title": title, "sig": sig}
-                        self._save()
-            finally:
-                with self._lock:
-                    self._pending.discard(session_id)
-                self._queue.task_done()
+    Same Haiku call the background titler uses, run synchronously: the caller is
+    a button press that wants a title back in the response. Works for any
+    harness — the token is the Claude subscription either way.
+    """
+    return titles.summarize(config, text, _oauth_token)
 
 
 def _safe_json(line: str):
@@ -1149,6 +1049,85 @@ def _human_user_text(obj: dict) -> str:
     if obj.get("isMeta") or obj.get("isCompactSummary"):
         return ""
     return _clean_user_text(_text_of(obj.get("message")))
+
+
+# ---------------------------------------------------------------- process view
+#
+# The default transcript is the *result*: what the human asked and what the
+# agent said. Everything else in a turn — the tool calls, their output, the
+# thinking — is dropped by _parse_line (83% of the records in a working
+# session). `?detail=steps` attaches that material to the messages it happened
+# between, as "steps".
+#
+# Steps are children of a message, never messages of their own. A tool_result
+# record is `type: "user"` in the JSONL, so promoting one to a top-level user
+# item would corrupt every client that counts user messages — the web's
+# "Rewind to here" computes /rewind N that way and would cut the session at
+# the wrong point.
+def _result_text(block: dict) -> str:
+    """tool_result content is a string on some CLI versions and a list of
+    blocks on others."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                parts.append(b.get("text", ""))
+            elif isinstance(b, dict) and b.get("type") == "image":
+                parts.append("[image]")
+        return "\n".join(p for p in parts if p)
+    return ""
+
+
+def _steps_of(obj: dict) -> list:
+    """Process records inside one transcript line, in content order."""
+    if obj.get("isSidechain"):
+        return []
+    content = (obj.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return []
+    uid = obj.get("uuid", "")
+    ts = obj.get("timestamp", "")
+    out = []
+    for i, b in enumerate(content):
+        if not isinstance(b, dict):
+            continue
+        kind = b.get("type")
+        ref = "%s:%d" % (uid, i)
+        if kind == "tool_use":
+            raw = b.get("input")
+            name = b.get("name", "?")
+            full = steps_mod.format_tool_use(name, raw)
+            out.append(steps_mod.tool_use(
+                ref, ts, name,
+                tool_detail(raw if isinstance(raw, dict) else {}), full))
+        elif kind == "tool_result":
+            raw_text = _result_text(b)
+            out.append(steps_mod.tool_result(
+                ref, ts, not bool(b.get("is_error")),
+                steps_mod.format_tool_result(raw_text)))
+        elif kind == "thinking":
+            out.append(steps_mod.thinking(ref, ts, b.get("thinking")))
+    return out
+
+
+def _step_full(obj: dict, index: int) -> str:
+    """Full text of one step, for the expand endpoint."""
+    content = (obj.get("message") or {}).get("content")
+    if not isinstance(content, list) or index >= len(content):
+        return None
+    b = content[index]
+    if not isinstance(b, dict):
+        return None
+    if b.get("type") == "tool_result":
+        return steps_mod.format_tool_result(_result_text(b))
+    if b.get("type") == "thinking":
+        return b.get("thinking") or ""
+    if b.get("type") == "tool_use":
+        return steps_mod.format_tool_use(b.get("name", "?"), b.get("input"))
+    return None
 
 
 def _text_of(message: dict) -> str:
@@ -1299,7 +1278,10 @@ class ClaudeStore:
     def __init__(self, projects_dir: Path, config=None):
         self.projects_dir = projects_dir
         # Short mobile-friendly titles summarized by Haiku, cached on disk.
-        self._titles = _TitleCache(config)
+        # Shared with the other harnesses: one worker, one file.
+        self._titles = titles.TitleCache(config, _oauth_token)
+        # Set by providers.build_one to this harness's own generator.
+        self.titler = None
         # (mtime_ns, size) -> (compactions, first_user_text, last_summary) so
         # the sessions list doesn't re-scan an unchanged transcript.
         self._scan_memo = {}
@@ -1448,11 +1430,18 @@ class ClaudeStore:
                     files.extend(entry.glob("*.jsonl"))
         files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
         sessions = []
+        seen_ids = set()
         for f in files:
             if user_only and not self._is_user_session(f):
                 continue
+            # Same uuid can exist under two project dirs after moves/copies;
+            # keep the newest mtime only (files already newest-first).
+            sid = f.stem
+            if sid in seen_ids:
+                continue
             summary = self._session_summary(f)
             if summary:
+                seen_ids.add(sid)
                 sessions.append(summary)
             if len(sessions) >= limit:
                 break
@@ -1597,7 +1586,34 @@ class ClaudeStore:
 
     # -- transcripts ---------------------------------------------------
 
-    def get_messages(self, session_id: str, offset: int = None, limit: int = 50) -> dict:
+    supports_steps = True     # `?detail=steps` (see _steps_of)
+
+    def get_step(self, session_id: str, ref: str):
+        """Full text behind one truncated step. `ref` is "<record uuid>:<block
+        index>" — the block index matters because one record holds several."""
+        path = self.find_session_file(session_id)
+        if path is None or not ref or ":" not in ref:
+            return None
+        uid, _, idx = ref.rpartition(":")
+        try:
+            index = int(idx)
+        except ValueError:
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if uid not in line:
+                    continue      # cheap reject before the JSON parse
+                obj = _safe_json(line)
+                if not isinstance(obj, dict) or obj.get("uuid") != uid:
+                    continue
+                text = _step_full(obj, index)
+                if text is None:
+                    return None
+                return {"ref": ref, "text": text, "bytes": len(text)}
+        return None
+
+    def get_messages(self, session_id: str, offset: int = None, limit: int = 50,
+                     steps: bool = False) -> dict:
         """Parsed transcript. Default window is the *end* of the session,
         which is what a phone client wants first.
 
@@ -1616,10 +1632,12 @@ class ClaudeStore:
 
         t0 = time.perf_counter()
         messages = []
+        step_rows = []      # (record position, uuid, step) — only when asked
         # uuid -> parentUuid for EVERY record, not just the messages: the
         # chain threads through system / file-history-snapshot lines, so a
         # message's parent is usually not another message.
         parent_of = {}
+        pos = 0
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 obj = _safe_json(line)
@@ -1629,7 +1647,16 @@ class ClaudeStore:
                         parent_of[uid] = obj.get("parentUuid")
                 msg = self._parse_line(line, obj)
                 if msg:
+                    msg["_pos"] = pos
                     messages.append(msg)
+                # A record can hold BOTH text and tool_use, so steps are read
+                # from every line, not only the ones _parse_line rejected.
+                if steps and isinstance(obj, dict):
+                    for st in _steps_of(obj):
+                        step_rows.append((pos, obj.get("uuid", ""), st))
+                pos += 1
+        # Computed before the filter: _active_branch replaces the list.
+        branch = _branch_uuids(messages, parent_of) if steps else None
         messages = _active_branch(messages, parent_of)
         t1 = time.perf_counter()
 
@@ -1640,6 +1667,12 @@ class ClaudeStore:
         window = messages[offset: offset + limit]
         for msg in window:
             msg["blocks"] = _render_blocks(msg["role"], msg["text"])
+        if steps:
+            live = [(pos, st) for pos, uid, st in step_rows
+                    if branch is None or not uid or uid in branch]
+            steps_mod.attach(window, live)
+        for msg in messages:
+            msg.pop("_pos", None)
         t2 = time.perf_counter()
 
         return {
@@ -1801,7 +1834,7 @@ class ClaudeStore:
                 if cached and not _looks_like_filename_title(cached):
                     title = cached
                 elif src and not _is_attachment_only(src):
-                    self._titles.request(path.stem, sig, src)
+                    self._titles.request(path.stem, sig, src, self.titler)
 
         try:
             size_bytes = path.stat().st_size
@@ -1849,6 +1882,31 @@ class ClaudeStore:
             "ts": obj.get("timestamp", ""),
             "text": text,
         }
+
+
+def _branch_uuids(messages: list, parent_of: dict):
+    """Every record uuid reachable from the newest message, or None when the
+    chain cannot be trusted.
+
+    Same walk and same give-up rule as _active_branch, but it keeps the whole
+    reachable set rather than just the messages — steps need it, because a
+    tool call's uuid is never a message uuid. None means "do not filter",
+    matching _active_branch's "show too much beats show nothing".
+    """
+    if len(messages) < 2:
+        return None
+    keep, seen = set(), set()
+    uid = messages[-1].get("uuid")
+    while uid and uid not in seen:
+        seen.add(uid)
+        keep.add(uid)
+        uid = parent_of.get(uid)
+    if not keep:
+        return None
+    branch = [m for m in messages if m.get("uuid") in keep]
+    if not branch or (len(branch) == 1 and len(messages) > 1):
+        return None
+    return keep
 
 
 def _active_branch(messages: list, parent_of: dict) -> list:
@@ -2319,7 +2377,9 @@ class ClaudeRunner:
     # ban anything not advertised here.
     # /rewind is served by the DAEMON (session-file surgery in jobs.py), so
     # unlike the TUI built-ins it also works on headless turns.
-    _BUILTIN_SLASH = ["/compact", "/exit", "/rewind"]
+    # /goal is a multi-client control/skill entry — always advertised so
+    # BB/Android/web/iOS allow it (they refuse anything not on this list).
+    _BUILTIN_SLASH = ["/compact", "/exit", "/goal", "/rewind"]
 
     def slash_commands(self) -> list:
         """Everything a phone-typed /command can reach: config extras,
@@ -2343,6 +2403,15 @@ class ClaudeRunner:
         except OSError:
             pass
         return sorted(commands)
+
+    def title_for(self, text: str) -> str:
+        """Name a Claude session using Claude.
+
+        Unlike the other two this needs no subprocess: one short Haiku request
+        over the subscription token the daemon already refreshes, so it is fast
+        and creates no session.
+        """
+        return summarize_title(self.config, text)
 
     def prepare(self, job, mode):
         cmd = [

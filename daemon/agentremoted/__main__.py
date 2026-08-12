@@ -6,7 +6,8 @@ import sys
 
 from . import __version__
 from . import providers
-from .config import load_config, load_or_create_token, CONFIG_DIR
+from .config import (load_config, load_or_create_token, CONFIG_DIR,
+                     write_tmux_helper)
 from .jobs import JobManager
 from .server import make_server
 
@@ -90,6 +91,10 @@ def main():
         log.info("host→phone drop folder: %s", drop)
     except OSError as e:
         log.warning("could not create drop folder %s: %s", config.drop_path, e)
+    helper = write_tmux_helper()
+    if helper:
+        log.info("interactive TUIs: %s ls  (they are on a private tmux "
+                 "socket, so plain `tmux ls` will not show them)", helper)
 
     # Force interactive managers to adopt surviving tmux TUIs *before*
     # rehydrating mid-turn jobs so resume can rebind by session id.

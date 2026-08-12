@@ -52,6 +52,14 @@ class Job:
         self.new_session_id = ""           # session id created by this run
         self.prompt = prompt
         self.cwd = cwd
+        # Guest folder root (realpath). Empty = main account, no confinement.
+        # When set, child processes chroot/cwd into this tree (see accounts).
+        self.isolate_root = ""
+        # Ownership id: "main" or "guest:<root>". API responses never cross
+        # accounts — A must not receive B's jobs/events/status.
+        self.account = "main"
+        # Harness name (claude/grok/codex) for guest provider allow-lists.
+        self.provider = ""
         self.status = "starting"           # starting|running|done|error|stopped
         self.error = ""
         self.result_text = ""
@@ -113,6 +121,9 @@ class Job:
                 "new_session_id": self.new_session_id,
                 "prompt": self.prompt,
                 "cwd": self.cwd,
+                "isolate_root": self.isolate_root,
+                "account": self.account,
+                "provider": self.provider,
                 "status": self.status,
                 "error": self.error,
                 "result_text": self.result_text,
@@ -170,6 +181,12 @@ class Job:
         except (TypeError, ValueError):
             job.started_at = time.time()
         job.tui_name = str(data.get("tui_name") or "")
+        job.isolate_root = str(data.get("isolate_root") or "")
+        acct = str(data.get("account") or "").strip()
+        if not acct:
+            acct = ("guest:" + job.isolate_root) if job.isolate_root else "main"
+        job.account = acct
+        job.provider = str(data.get("provider") or "").strip().lower()
         job.perm_nonce = str(data.get("perm_nonce") or uuid.uuid4().hex)
         try:
             job._perm_seq = int(data.get("perm_seq") or 0)
@@ -298,11 +315,18 @@ class Job:
 
     # -- AskUserQuestion -----------------------------------------------
 
-    def request_question(self, questions: list, timeout: float):
+    def request_question(self, questions: list, timeout: float,
+                         abort_when=None):
         """Publish AskUserQuestion to the phone and block for the answer.
 
         Returns a list (one entry per question) of chosen labels, or None
-        when cancelled / timed out — the caller then Escapes the panel.
+        when cancelled / timed out / ``abort_when`` fires — the caller then
+        either drives the TUI keys or treats the panel as already resolved
+        (e.g. answered in the host TUI / Live TUI without the phone API).
+
+        ``abort_when`` is an optional zero-arg callable polled every ~0.4s.
+        When it returns true, the wait ends as a cancel (pending_question
+        cleared so clients leave "waiting for you").
         """
         with self.lock:
             self._q_seq += 1
@@ -317,7 +341,28 @@ class Job:
         job_event = {"request_id": request_id, "questions": questions}
         self.add_event("question", **job_event)
 
-        got = self._q_event.wait(timeout)
+        # Slice the wait so abort_when can notice the journal cleared while
+        # the phone never POSTed /question (host pane or Live TUI answered).
+        end = None
+        if timeout is not None and timeout > 0:
+            end = time.time() + float(timeout)
+        got = False
+        while True:
+            slice_s = 0.4
+            if end is not None:
+                left = end - time.time()
+                if left <= 0:
+                    break
+                slice_s = min(slice_s, left)
+            if self._q_event.wait(slice_s):
+                got = True
+                break
+            if abort_when is not None:
+                try:
+                    if abort_when():
+                        break
+                except Exception:
+                    pass
 
         with self.lock:
             answers = self._q_answers
@@ -354,6 +399,8 @@ class Job:
             if not self.pending_question:
                 return
             self._q_answers = None
+            # Drop the phone-facing gate immediately (status stream).
+            self.pending_question = None
             self._q_event.set()
 
     def brief(self) -> dict:
@@ -364,6 +411,13 @@ class Job:
                 "new_session_id": self.new_session_id,
                 "status": self.status,
                 "prompt": self.prompt[:120],
+                "cwd": self.cwd,
+                "isolate_root": self.isolate_root,
+                "account": self.account,
+                "provider": self.provider,
+                # Lets a caller pick the LATEST job for a session (the focus
+                # list needs it to tell a failed last turn from an older one).
+                "started_at": self.started_at,
                 "queued_count": len(self.queued),
                 "event_count": len(self.events),
             }
@@ -481,11 +535,18 @@ class JobManager:
 
     def start_job(self, prompt: str, cwd: str, session_id: str = "",
                   permission_mode: str = "", model: str = "", effort: str = "",
-                  queued: list = None) -> Job:
+                  queued: list = None, isolate_root: str = "",
+                  account: str = "main") -> Job:
         job = Job(uuid.uuid4().hex[:12], session_id, prompt, cwd)
         job.permission_mode = permission_mode
         job.model = model
         job.effort = effort
+        job.isolate_root = str(isolate_root or "")
+        acct = str(account or "").strip()
+        if not acct:
+            acct = ("guest:" + job.isolate_root) if job.isolate_root else "main"
+        job.account = acct
+        job.provider = str(getattr(self.runner, "name", "") or "").strip().lower()
         if queued:
             job.queued = list(queued)
         with self.lock:
@@ -526,6 +587,10 @@ class JobManager:
                     "new_session_id": job.new_session_id,
                     "status": job.status,
                     "prompt": job.prompt[:120],
+                    "cwd": job.cwd,
+                    "account": job.account,
+                    "isolate_root": job.isolate_root,
+                    "provider": job.provider,
                     "elapsed_s": int(now - job.started_at),
                     "queued_count": len(job.queued),
                     "tool": tool.get("name", ""),
@@ -685,23 +750,40 @@ class JobManager:
         if job.cwd and not os.path.isdir(job.cwd):
             self._fail_early(job, "project directory not found: %s" % job.cwd)
             return
+        # Scoped accounts: force cwd under the guest root and chroot when
+        # privileged so tools cannot walk outside the allowed tree.
+        from . import accounts as _accounts
+        popen_kw = {
+            "cwd": job.cwd or None,
+            "env": env,
+            # Prompt is always on argv; leave stdin closed so CLIs that
+            # optionally read more input (codex exec) do not hang.
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            # Own process group so stop() can kill the CLI *and* whatever
+            # tools it spawned, not just the top-level process.
+            "start_new_session": True,
+        }
+        if job.isolate_root:
+            iso = _accounts.isolation_popen_kwargs(job.isolate_root)
+            # Prefer guest root as cwd; keep job.cwd if it is already inside.
+            if iso.get("cwd"):
+                if not job.cwd or not _accounts.path_under(job.cwd, job.isolate_root):
+                    popen_kw["cwd"] = iso["cwd"]
+                else:
+                    popen_kw["cwd"] = job.cwd
+            if iso.get("preexec_fn"):
+                popen_kw["preexec_fn"] = iso["preexec_fn"]
+            popen_kw["env"] = _accounts.isolation_env(env, job.isolate_root)
+            # macOS: seatbelt so absolute paths cannot walk out of the root
+            # (chroot alone needs euid 0; HOME rewrite is not enough).
+            cmd = _accounts.isolate_argv(cmd, job.isolate_root)
         try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=job.cwd or None,
-                env=env,
-                # Prompt is always on argv; leave stdin closed so CLIs that
-                # optionally read more input (codex exec) do not hang.
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                # Own process group so stop() can kill the CLI *and* whatever
-                # tools it spawned, not just the top-level process.
-                start_new_session=True,
-            )
+            proc = subprocess.Popen(cmd, **popen_kw)
         except OSError as e:
             self.runner.cleanup(job)
             self._fail_early(job, "failed to launch %s: %s" % (self.runner.name, e))
@@ -832,9 +914,12 @@ class JobManager:
             mode = job.permission_mode
             model = job.model
             effort = job.effort
+            isolate_root = job.isolate_root
+            account = job.account
         nxt = self.start_job(entry["prompt"], cwd, session_id=session,
                              permission_mode=mode, model=model, effort=effort,
-                             queued=remaining)
+                             queued=remaining, isolate_root=isolate_root,
+                             account=account)
         with job.lock:
             job.next_job_id = nxt.id
 

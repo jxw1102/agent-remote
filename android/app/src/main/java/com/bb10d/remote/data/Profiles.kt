@@ -36,6 +36,8 @@ data class Profile(
     val effort: String = "",
 ) {
     val provider: String get() = caps.provider
+    /** Focus support, cached from the last ping. */
+    val focus: Boolean get() = caps.focus
     val displayName: String get() = name.ifBlank { hostLabel }
 
     /** "192.168.1.5:8473" — what the user recognises a daemon by. */

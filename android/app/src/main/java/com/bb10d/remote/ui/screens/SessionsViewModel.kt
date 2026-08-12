@@ -83,8 +83,52 @@ class SessionsViewModel(val repo: AgentRepository) : ViewModel() {
                     reload()
                 }
         }
+        // Switching Focus/All changes which endpoint the list comes from.
         viewModelScope.launch {
-            repo.settings.map { it.showAllSessions }.drop(1).collect { reload() }
+            repo.settings.map { it.focusMode }.drop(1).collect { reload() }
+        }
+    }
+
+    // -- focus list --------------------------------------------------------
+
+    fun setFocusMode(on: Boolean) {
+        viewModelScope.launch { repo.settingsStore.setFocusMode(on) }
+    }
+
+    /** Mark done (member = false) or put a session back in Focus. */
+    fun setFocusMember(ref: SessionRef, member: Boolean) {
+        viewModelScope.launch {
+            repo.setFocusMember(ref, member)
+            // Membership decides whether the row belongs in Focus mode at all.
+            if (settings.value.focusMode) reload()
+        }
+    }
+
+    /** Called when a transcript is opened: dims that row's finished tag. */
+    fun markSeen(ref: SessionRef) {
+        viewModelScope.launch { repo.markSeen(ref) }
+    }
+
+    private val _renaming = MutableStateFlow<String?>(null)
+
+    /** Non-null while a title request is in flight, so the sheet can wait. */
+    val renaming: StateFlow<String?> = _renaming.asStateFlow()
+
+    fun rename(ref: SessionRef, title: String, onDone: (String?) -> Unit = {}) {
+        viewModelScope.launch {
+            _renaming.value = "Saving…"
+            val res = repo.renameSession(ref, title)
+            _renaming.value = null
+            onDone(res.exceptionOrNull()?.let { repo.reason(it) })
+        }
+    }
+
+    fun regenerateTitle(ref: SessionRef, onDone: (String?, String?) -> Unit = { _, _ -> }) {
+        viewModelScope.launch {
+            _renaming.value = "Asking the model for a title…"
+            val res = repo.regenerateTitle(ref)
+            _renaming.value = null
+            onDone(res.getOrNull(), res.exceptionOrNull()?.let { repo.reason(it) })
         }
     }
 

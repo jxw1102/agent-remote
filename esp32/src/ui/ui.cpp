@@ -804,7 +804,13 @@ void runSessionsFetch() {
     if (!cfg->daemons[d].enabled) continue;
     std::vector<SessionRow> rows;
     String e;
-    if (agentapi::fetchSessions(d, &rows, &e)) {
+    // Focus mode swaps the endpoint: /api/focus is membership-filtered and
+    // urgency-sorted by the daemon, so a project untouched for weeks still
+    // shows up — the recent-list limit would have dropped it.
+    const bool okRows = cfg->focusMode
+                            ? agentapi::fetchFocus(d, &rows, &e)
+                            : agentapi::fetchSessions(d, &rows, &e);
+    if (okRows) {
       ok = true;
       for (auto &r : rows) all.push_back(r);
     } else if (err.isEmpty()) {
@@ -814,8 +820,19 @@ void runSessionsFetch() {
                (unsigned)ESP.getFreeHeap());
   }
   // Newest first across every daemon (ISO timestamps sort lexicographically;
-  // rows without one sink to the bottom).
+  // rows without one sink to the bottom). Focus mode ranks by urgency first,
+  // because the pager only ever shows the top rows: "needs you" must win over
+  // something that merely ran more recently.
   std::sort(all.begin(), all.end(), [](const SessionRow &a, const SessionRow &b) {
+    auto weight = [](const String &st) {
+      if (st == "needs_answer") return 0;
+      if (st == "failed") return 1;
+      if (st == "working") return 2;
+      if (st == "turn_finished") return 3;
+      return 4;
+    };
+    const int wa = weight(a.focusState), wb = weight(b.focusState);
+    if (wa != wb) return wa < wb;
     return a.lastActive > b.lastActive;
   });
   sessFetchResult.swap(all);
@@ -848,6 +865,18 @@ void fillSessionsList() {
   for (int i = 0; i < shown; i++) {
     String row = String(sessions[i].working ? LV_SYMBOL_PLAY " " : "") +
                  sessions[i].title;
+    // Focus state tag, appended to the same one-line row: Focus is a
+    // filter over this list, not a different layout. Focus mode only, and
+    // "working" is dropped — the play symbol above already says it.
+    // One-line rows in one colour: "lit vs dim" becomes "shown vs omitted", so
+    // a finished turn is flagged only until you have opened it.
+    const bool staleFinished = sessions[i].focusState == "turn_finished"
+                               && !sessions[i].focusUnread;
+    const char *tag = (cfg->focusMode && !staleFinished)
+                          ? agentapi::focusStateLabel(sessions[i].focusState)
+                          : "";
+    if (tag[0] && sessions[i].focusState != "working")
+      row += String("  \xC2\xB7 ") + tag;
     if (cfg->daemonCount > 1)
       row += "   [" + cfg->daemonName(sessions[i].daemon).substring(0, 6) + "]";
     lv_obj_t *btn = lv_list_add_button(sessList, NULL, row.c_str());
@@ -863,10 +892,33 @@ void fillSessionsList() {
   if (firstBtn) lv_group_focus_obj(firstBtn);
 }
 
+// Focus / All. On the pager this is a toggle rather than a segmented control:
+// there is no room for two buttons, and the header title already says which
+// mode is showing.
+void focusModeToggled(lv_event_t *e) {
+  lv_obj_t *sw = (lv_obj_t *)lv_event_get_target(e);
+  cfg->focusMode = lv_obj_has_state(sw, LV_STATE_CHECKED);
+  persist();
+  startSessionsFetch();
+}
+
 lv_obj_t *buildSessions() {
   lv_obj_t *scr = makeScreen();
-  addHeader(scr, "Sessions");
+  addHeader(scr, cfg->focusMode ? "Focus" : "Sessions");
   lv_obj_t *body = addBody(scr);
+
+  // Focus switch: on = only the projects enrolled through a daemon.
+  lv_obj_t *modeRow = lv_obj_create(body);
+  lv_obj_remove_style_all(modeRow);
+  lv_obj_set_size(modeRow, LV_PCT(100), 28);
+  lv_obj_t *modeLb = lv_label_create(modeRow);
+  lv_label_set_text(modeLb, "Focus only");
+  lv_obj_align(modeLb, LV_ALIGN_LEFT_MID, 4, 0);
+  lv_obj_t *modeSw = lv_switch_create(modeRow);
+  lv_obj_set_size(modeSw, 44, 22);
+  if (cfg->focusMode) lv_obj_add_state(modeSw, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(modeSw, focusModeToggled, LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_align(modeSw, LV_ALIGN_RIGHT_MID, -4, 0);
 
   sessList = lv_list_create(body);
   // Transparent chrome only — removing the whole main style also wipes the

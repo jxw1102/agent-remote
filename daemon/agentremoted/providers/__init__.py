@@ -23,6 +23,8 @@ Runner — how one turn is executed as a subprocess (used by jobs.JobManager):
     capabilities() -> dict                feature flags for /api/ping
     auth_health() -> dict                 optional CLI/login snapshot for /api/ping
     slash_commands() -> [str]             commands offered to the app
+    title_for(text) -> str                (optional) name a session with THIS
+                                          harness's own model; "" on failure
     prepare(job, mode) -> (cmd, env)      build the CLI invocation; may set
                                           job.cwd default; raises RunnerError
     handle_stream_line(job, line)         parse one stdout line into events
@@ -57,18 +59,29 @@ class ProviderBundle:
 
 
 def build_one(config, name: str):
-    """Return (store, runner) for a single named provider."""
+    """Return (store, runner) for a single named provider.
+
+    The store is handed the runner's `title_for` so a session is named by the
+    harness that owns it (see ../titles.py). Post-wired rather than passed in,
+    because the store is built first and only the runner knows how to talk to
+    its CLI.
+    """
     name = str(name or "claude").lower()
+    store = runner = None
     if name == "claude":
         from .claude import ClaudeRunner, ClaudeStore
-        return ClaudeStore(config.projects_path, config), ClaudeRunner(config)
-    if name == "grok":
+        store, runner = ClaudeStore(config.projects_path, config), ClaudeRunner(config)
+    elif name == "grok":
         from .grok import GrokRunner, GrokStore
-        return GrokStore(config.grok_home_path), GrokRunner(config)
-    if name == "codex":
+        store, runner = GrokStore(config.grok_home_path, config), GrokRunner(config)
+    elif name == "codex":
         from .codex import CodexRunner, CodexStore
-        store = CodexStore(config.codex_home_path, config)
-        return store, CodexRunner(config)
+        store, runner = CodexStore(config.codex_home_path, config), CodexRunner(config)
+    if store is not None:
+        titler = getattr(runner, "title_for", None)
+        if callable(titler):
+            store.titler = titler
+        return store, runner
     raise ValueError(
         "unknown provider %r (expected 'claude', 'grok', or 'codex')" % name)
 

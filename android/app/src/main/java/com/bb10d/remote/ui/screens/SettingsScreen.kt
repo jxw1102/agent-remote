@@ -119,15 +119,6 @@ fun SettingsScreen(vm: SettingsViewModel, onBack: () -> Unit, onProfiles: () -> 
             )
             Hairline(inset = 16)
 
-            SectionLabel("Session list")
-            SwitchRow(
-                title = "Include agent-spawned sessions",
-                subtitle = "Shows subagent transcripts and sessions that never got a turn.",
-                checked = settings.showAllSessions,
-                onChange = vm::setShowAllSessions,
-            )
-            Hairline(inset = 16)
-
             SectionLabel("About")
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                 Text(

@@ -56,6 +56,12 @@ data class SessionsState(
     val feeds: Map<String, ProfileFeed> = emptyMap(),
     val loading: Boolean = false,
     val searchQuery: String = "",
+    /**
+     * True when [rows] came from a Focus fetch. Without it the Focus chip
+     * briefly showed the All list's count between the tap and the fetch
+     * landing.
+     */
+    val focusRows: Boolean = false,
 ) {
     /** Errors worth showing above the list (dead daemon, bad token). */
     val problems: List<Pair<String, String>>
@@ -171,7 +177,12 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
     suspend fun refreshSessions(query: String = "") {
         val state = profiles.value
         val targets = state.enabled
-        val all = settings.value.showAllSessions
+        // Agent-spawned sessions are always filtered out: subagent transcripts
+        // and shells that never got a turn are not work you started, and no
+        // setting brings them back.
+        val all = false
+        // Focus is a filter over this same list, not a second screen.
+        val focus = settings.value.focusMode && query.isBlank()
         _sessions.value = _sessions.value.copy(
             loading = true,
             searchQuery = query,
@@ -184,11 +195,26 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
             targets.forEach { profile ->
                 launch {
                     val outcome = runCatching {
-                        val list = if (query.isBlank()) {
-                            client(profile).sessions(limit = PER_PROFILE_LIMIT, all = all).sessions
-                        } else {
-                            client(profile).search(query, limit = PER_PROFILE_LIMIT, all = all)
-                                .results
+                        val list = when {
+                            query.isNotBlank() ->
+                                client(profile).search(query, limit = PER_PROFILE_LIMIT, all = all)
+                                    .results
+                            // Focus mode asks the daemon for the rows rather
+                            // than filtering the session list here: a project
+                            // untouched for weeks falls outside the recency
+                            // window, and that is the row that must not be lost.
+                            focus -> if (profile.focus) {
+                                client(profile).focus().sessions
+                            } else {
+                                // Its whole session list would silently fill
+                                // Focus with sessions never enrolled.
+                                emptyList()
+                            }
+                            else ->
+                                client(profile).sessions(
+                                    limit = PER_PROFILE_LIMIT,
+                                    all = all,
+                                ).sessions
                         }
                         list.map { s -> row(profile, s) }
                     }
@@ -209,7 +235,77 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
             feeds = feeds.toMap(),
             loading = false,
             searchQuery = query,
+            focusRows = focus,
         )
+    }
+
+    // -- focus list --------------------------------------------------------
+
+    /**
+     * Take a session out of Focus, or put it back. Membership lives on
+     * the daemon so every client agrees; the local row is patched immediately
+     * so the list does not wait for a refetch.
+     */
+    suspend fun setFocusMember(ref: SessionRef, member: Boolean): Result<Boolean> {
+        val profile = profile(ref.profileId) ?: return Result.failure(
+            IllegalStateException("unknown daemon"),
+        )
+        return runCatching {
+            val res = client(profile).focusDone(ref.sessionId, done = !member)
+            patchSession(ref) { it.copy(focus = res.focus) }
+            res.focus
+        }
+    }
+
+    /** Dim a finished turn's tag once the human has opened it. */
+    suspend fun markSeen(ref: SessionRef) {
+        val profile = profile(ref.profileId) ?: return
+        if (!profile.focus) return
+        runCatching { client(profile).focusSeen(ref.sessionId) }
+        patchSession(ref) { it.copy(focusUnread = false) }
+    }
+
+    /** Rename a session; an empty title restores the derived name. */
+    suspend fun renameSession(ref: SessionRef, title: String): Result<String> {
+        val profile = profile(ref.profileId) ?: return Result.failure(
+            IllegalStateException("unknown daemon"),
+        )
+        return runCatching {
+            val res = client(profile).setTitle(ref.sessionId, title)
+            if (res.title.isBlank()) {
+                // Cleared: the provider's own title comes back on the next read.
+                refreshSession(ref)
+            } else {
+                patchSession(ref) { it.copy(title = res.title, titleManual = res.manual) }
+            }
+            res.title
+        }
+    }
+
+    /** Ask the daemon to derive a fresh title from the transcript. */
+    suspend fun regenerateTitle(ref: SessionRef): Result<String> {
+        val profile = profile(ref.profileId) ?: return Result.failure(
+            IllegalStateException("unknown daemon"),
+        )
+        return runCatching {
+            val res = client(profile).regenerateTitle(ref.sessionId)
+            patchSession(ref) { it.copy(title = res.title, titleManual = false) }
+            res.title
+        }
+    }
+
+    /** Patch one row's session in place, leaving sort order alone. */
+    private fun patchSession(ref: SessionRef, edit: (SessionDto) -> SessionDto) {
+        _sessions.value = _sessions.value.let { state ->
+            val at = state.rows.indexOfFirst { it.ref == ref }
+            if (at < 0) {
+                state
+            } else {
+                val rows = state.rows.toMutableList()
+                rows[at] = rows[at].copy(session = edit(rows[at].session))
+                state.copy(rows = rows)
+            }
+        }
     }
 
     /** Refresh a single row in place — cheap after a turn ends. */

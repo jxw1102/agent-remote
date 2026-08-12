@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # Build one unsigned .bar from the shared codebase:
-#   ./build-bar.sh grok     ->  dist/GrokRemote.bar    (Grok Remote)
-#   ./build-bar.sh claude   ->  dist/ClaudeRemote.bar  (Claude Remote)
 #   ./build-bar.sh all      ->  both
 # Uses a host-installed BB10 NDK (/opt/bbndk) — same flow that produced the
 # on-device-proven GrokRemote/ClaudeSessions bars.

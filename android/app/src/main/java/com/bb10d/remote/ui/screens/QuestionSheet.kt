@@ -65,6 +65,8 @@ fun QuestionSheet(
     accent: Color,
     onAnswer: (answers: List<List<String>>, notes: List<String>) -> Unit,
     onCancel: () -> Unit,
+    /** Backdrop / swipe / system back — hide only; does not Esc the host panel. */
+    onDismiss: () -> Unit = onCancel,
 ) {
     if (questions.isEmpty()) return
     val pal = palette
@@ -82,7 +84,7 @@ fun QuestionSheet(
     val complete = questions.indices.all { picks[it].isNotEmpty() }
 
     ModalBottomSheet(
-        onDismissRequest = onCancel,
+        onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = MaterialTheme.colorScheme.surface,
     ) {

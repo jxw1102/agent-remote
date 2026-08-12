@@ -1,6 +1,4 @@
 # One codebase, three artifacts:
-#   qmake VARIANT=grok    app.pro  ->  GrokRemote   (Grok Remote)
-#   qmake VARIANT=claude  app.pro  ->  ClaudeRemote (Claude Remote)  [default]
 #   qmake VARIANT=unified app.pro  ->  AgentRemote  (Agent Remote)
 # Branding constants live in src/brand.hpp behind the VARIANT_* define;
 # per-artifact bar-descriptor.xml + icon live under variant/<name>/.

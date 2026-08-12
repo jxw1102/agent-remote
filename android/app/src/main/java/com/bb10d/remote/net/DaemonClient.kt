@@ -1,6 +1,8 @@
 package com.bb10d.remote.net
 
 import com.bb10d.remote.data.AttachmentDto
+import com.bb10d.remote.data.FocusActionDto
+import com.bb10d.remote.data.FocusDto
 import com.bb10d.remote.data.DropListDto
 import com.bb10d.remote.data.ErrorDto
 import com.bb10d.remote.data.JobSnapshotDto
@@ -13,6 +15,7 @@ import com.bb10d.remote.data.SearchDto
 import com.bb10d.remote.data.SessionDto
 import com.bb10d.remote.data.SessionsDto
 import com.bb10d.remote.data.ShellResultDto
+import com.bb10d.remote.data.TitleDto
 import com.bb10d.remote.data.TuiFrameDto
 import com.bb10d.remote.data.UsageDto
 import kotlinx.coroutines.Dispatchers
@@ -290,6 +293,48 @@ class DaemonClient(
 
     suspend fun session(id: String): SessionDto =
         call(request(url("api/sessions/$id")).get().build(), SessionDto.serializer())
+
+    // -- focus list --------------------------------------------------------
+    //
+    // Focus mode asks the daemon for the rows rather than filtering
+    // /api/sessions here: a project untouched for weeks falls outside the
+    // recency window, and that is exactly the row that must not be lost.
+
+    suspend fun focus(): FocusDto =
+        call(request(url("api/focus")).get().build(), FocusDto.serializer())
+
+    /** Take a row off Focus (done) or put it back (restore). */
+    suspend fun focusDone(sessionId: String, done: Boolean): FocusActionDto = call(
+        request(url("api/focus/$sessionId/" + if (done) "done" else "restore"))
+            .post(jsonBody(buildJsonObject {})).build(),
+        FocusActionDto.serializer(),
+    )
+
+    /**
+     * Mark a session looked at. Cosmetic only — it dims a finished turn's tag
+     * and changes no state.
+     */
+    suspend fun focusSeen(sessionId: String): FocusActionDto = call(
+        request(url("api/focus/$sessionId/seen"))
+            .post(jsonBody(buildJsonObject {})).build(),
+        FocusActionDto.serializer(),
+    )
+
+    /** Rename a session; an empty title drops back to the derived name. */
+    suspend fun setTitle(sessionId: String, title: String): TitleDto = call(
+        request(url("api/sessions/$sessionId/title")).post(
+            jsonBody(buildJsonObject { put("title", title) }),
+        ).build(),
+        TitleDto.serializer(),
+    )
+
+    /** Ask the daemon to derive a fresh title from the transcript. */
+    suspend fun regenerateTitle(sessionId: String): TitleDto = call(
+        request(url("api/sessions/$sessionId/title/regenerate"))
+            .post(jsonBody(buildJsonObject {})).build(),
+        TitleDto.serializer(),
+        timeoutSeconds = 60,
+    )
 
     /** offset < 0 asks for the tail, which is what a phone wants first. */
     suspend fun messages(id: String, offset: Int, limit: Int): MessagesDto = call(

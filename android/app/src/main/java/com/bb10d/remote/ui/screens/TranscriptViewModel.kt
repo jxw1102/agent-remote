@@ -625,11 +625,11 @@ class TranscriptViewModel(
         if (profile.effectiveExecMode() != ExecMode.INTERACTIVE && command != "/rewind") {
             return "$command needs interactive execution — headless turns cannot run commands"
         }
-        // No hardcoded whitelist: the daemon advertises what each harness
-        // really has (claude/grok/codex: /compact /exit /rewind), so
-        // anything off THIS session's list is refused here.
+        // Daemon advertises harness built-ins; always allow /rewind and /goal
+        // so older daemons / all clients stay consistent.
         val known = profile.caps.slashFor(sessionHarness())
-        if (known.contains(command)) return null
+        val always = listOf("/rewind", "/goal")
+        if (known.contains(command) || always.contains(command)) return null
         return if (known.isEmpty()) {
             "This daemon does not advertise any slash commands"
         } else {
@@ -678,8 +678,10 @@ class TranscriptViewModel(
             append("[shell] ! ").append(command).append("\n[output]\n```\n")
             append(output.take(SHELL_FEED_LIMIT))
             if (exitCode != 0) append("\n(exit code ").append(exitCode).append(")")
-            append("\n```\n[silent] Shell result for context only. Do not reply or acknowledge ")
-            append("this message - wait for the next user instruction.")
+            // No trailing "wait for the next user instruction": the model
+            // echoed that clause straight back instead of staying quiet.
+            append("\n```\n[silent] Shell result for context only. ")
+            append("Do not reply or acknowledge this message.")
         }
         watcher.markStarting()
         viewModelScope.launch {
@@ -732,24 +734,40 @@ class TranscriptViewModel(
         val c = client ?: return
         val pending = job.value.pendingQuestion ?: return
         val jobId = job.value.jobId
-        // Drop the sheet now — daemon may still report pending until resolve
-        // races the interactive driver; a lagging poll must not re-open it.
-        watcher.clearPendingQuestion()
+        // Drop + suppress re-open: daemon may lag until the interactive driver
+        // types the picks into the host TUI.
+        watcher.clearPendingQuestion(suppressPolls = true)
         viewModelScope.launch {
             runCatching { c.answerQuestion(jobId, pending.requestId, answers, notes) }
-                .onFailure { setStatus(repo.reason(it)) }
+                .onFailure {
+                    // Failed submit — let the same ask surface again.
+                    watcher.restorePendingQuestion(pending.requestId)
+                    setStatus(repo.reason(it))
+                }
         }
     }
 
+    /**
+     * Explicit Cancel on the sheet (not swipe-away). Escapes the host panel.
+     * Sheet dismiss alone must not call this — see TranscriptScreen banner.
+     */
     fun cancelQuestion() {
         val c = client ?: return
         val pending = job.value.pendingQuestion ?: return
         val jobId = job.value.jobId
-        watcher.clearPendingQuestion()
+        watcher.clearPendingQuestion(suppressPolls = true)
         viewModelScope.launch {
             runCatching { c.answerQuestion(jobId, pending.requestId, null) }
-                .onFailure { setStatus(repo.reason(it)) }
+                .onFailure {
+                    watcher.restorePendingQuestion(pending.requestId)
+                    setStatus(repo.reason(it))
+                }
         }
+    }
+
+    /** If a prior mistaken dismiss suppressed this id, allow polls to restore it. */
+    fun reopenQuestion(requestId: String) {
+        watcher.restorePendingQuestion(requestId)
     }
 
     fun cancelQueued(queueId: String) {

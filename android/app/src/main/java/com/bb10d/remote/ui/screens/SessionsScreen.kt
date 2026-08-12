@@ -3,6 +3,7 @@ package com.bb10d.remote.ui.screens
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +25,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.List
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.DataUsage
@@ -72,6 +74,7 @@ import com.bb10d.remote.data.SessionRow
 import com.bb10d.remote.data.Time
 import com.bb10d.remote.ui.components.EmptyState
 import com.bb10d.remote.ui.components.ErrorBanner
+import com.bb10d.remote.ui.components.FocusPill
 import com.bb10d.remote.ui.components.Hairline
 import com.bb10d.remote.ui.components.MetaPill
 import com.bb10d.remote.ui.components.ProviderChip
@@ -100,9 +103,13 @@ fun SessionsScreen(
     val query by vm.query.collectAsStateWithLifecycle()
     val profileFilter by vm.profileFilter.collectAsStateWithLifecycle()
     val projectFilter by vm.projectFilter.collectAsStateWithLifecycle()
+    val settings by vm.settings.collectAsStateWithLifecycle()
 
     var searching by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    // Long-pressed row awaiting a rename / focus action.
+    var actionRow by remember { mutableStateOf<SessionRow?>(null) }
+    val renaming by vm.renaming.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val pal = palette
 
@@ -172,13 +179,22 @@ fun SessionsScreen(
                         containerColor = MaterialTheme.colorScheme.background,
                     ),
                 )
-                if (profileState.profiles.size > 1 || projectFilter != null) {
+                // Always shown now: the Focus/All switch lives here, and it has
+                // to be reachable with a single daemon configured too.
+                if (profileState.profiles.isNotEmpty() || projectFilter != null) {
                     FilterRow(
                         profiles = profileState.profiles.map {
                             Triple(it.id, it.displayName, it.provider)
                         },
                         selected = profileFilter,
                         project = projectFilter,
+                        focusMode = settings.focusMode,
+                        // Only once the rows actually came from a Focus
+                        // fetch — otherwise the chip flashes the All count.
+                        focusCount = if (settings.focusMode && state.focusRows &&
+                            !state.loading
+                        ) rows.size else 0,
+                        onBoardMode = vm::setFocusMode,
                         onSelect = vm::setProfileFilter,
                         onClearProject = { vm.setProjectFilter(null) },
                     )
@@ -247,12 +263,29 @@ fun SessionsScreen(
                     blocked = blocked,
                     problems = problems,
                     searching = query.isNotBlank(),
+                    showFocusState = settings.focusMode,
                     listState = listState,
-                    onOpen = onOpen,
+                    onOpen = { ref, provider ->
+                        // Opening it dims that row's finished tag.
+                        vm.markSeen(ref)
+                        onOpen(ref, provider)
+                    },
+                    onLongPress = { actionRow = it },
                     onProfiles = onProfiles,
                 )
             }
         }
+    }
+
+    actionRow?.let { target ->
+        SessionActionsDialog(
+            row = target,
+            busy = renaming,
+            onRename = { title, done -> vm.rename(target.ref, title, done) },
+            onRegenerate = { done -> vm.regenerateTitle(target.ref, done) },
+            onBoard = { member -> vm.setFocusMember(target.ref, member) },
+            onDismiss = { actionRow = null },
+        )
     }
 
     LaunchedEffect(rows.size) {
@@ -302,6 +335,9 @@ private fun FilterRow(
     profiles: List<Triple<String, String, String>>,
     selected: String?,
     project: ProjectFilter?,
+    focusMode: Boolean,
+    focusCount: Int,
+    onBoardMode: (Boolean) -> Unit,
     onSelect: (String?) -> Unit,
     onClearProject: () -> Unit,
 ) {
@@ -310,6 +346,25 @@ private fun FilterRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
+        // Focus / All comes first: it decides what the rest of the row filters.
+        item {
+            FilterChip(
+                selected = focusMode,
+                onClick = { onBoardMode(!focusMode) },
+                label = {
+                    Text(
+                        if (focusMode && focusCount > 0) "Focus · $focusCount" else "Focus",
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Outlined.Check,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                },
+            )
+        }
         item {
             FilterChip(
                 selected = selected == null,
@@ -355,6 +410,80 @@ private fun FilterRow(
     }
 }
 
+/**
+ * Rename a session, ask the daemon to derive a title, or take the card off the
+ * Focus. Reached by long-pressing a row, so the row itself keeps its layout.
+ *
+ * Renaming exists because the derived names are often unrecognisable when a
+ * dozen projects run in parallel — which is the whole point of Focus.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SessionActionsDialog(
+    row: SessionRow,
+    busy: String?,
+    onRename: (String, (String?) -> Unit) -> Unit,
+    onRegenerate: ((String?, String?) -> Unit) -> Unit,
+    onBoard: (Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val pal = palette
+    var title by remember(row.ref.key) { mutableStateOf(row.session.title) }
+    var note by remember(row.ref.key) { mutableStateOf<String?>(null) }
+    val member = row.session.focus
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename session") },
+        text = {
+            Column {
+                TextField(
+                    value = title,
+                    onValueChange = { title = it.take(120) },
+                    singleLine = true,
+                    placeholder = { Text("e.g. BB10 pager chime") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    busy ?: note
+                        ?: "Leave it empty to go back to the name the agent derived.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = pal.dim,
+                )
+                Spacer(Modifier.height(12.dp))
+                TextButton(
+                    onClick = {
+                        onRegenerate { fresh, err ->
+                            if (fresh != null) title = fresh
+                            note = err ?: "Generated from the transcript. Save to keep it."
+                        }
+                    },
+                    enabled = busy == null,
+                ) { Text("Regenerate from transcript") }
+                TextButton(onClick = { onBoard(!member); onDismiss() }) {
+                    Text(
+                        if (member) "Done — take it off Focus"
+                        else "Track in Focus",
+                        color = if (member) pal.dim else pal.ok,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onRename(title) { err ->
+                        if (err == null) onDismiss() else note = err
+                    }
+                },
+                enabled = busy == null,
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
 @Composable
 private fun SessionList(
     rows: List<SessionRow>,
@@ -362,8 +491,10 @@ private fun SessionList(
     blocked: Set<String>,
     problems: List<Pair<String, String>>,
     searching: Boolean,
+    showFocusState: Boolean,
     listState: androidx.compose.foundation.lazy.LazyListState,
     onOpen: (SessionRef, provider: String) -> Unit,
+    onLongPress: (SessionRow) -> Unit,
     onProfiles: () -> Unit,
 ) {
     LazyColumn(
@@ -388,7 +519,9 @@ private fun SessionList(
                     working = working.contains(row.ref.key),
                     blocked = blocked.contains(row.ref.key),
                     searching = searching,
+                    showFocusState = showFocusState,
                     onClick = { onOpen(row.ref, row.provider) },
+                    onLongClick = { onLongPress(row) },
                 )
                 Hairline(inset = 16)
             }
@@ -441,14 +574,18 @@ private fun SessionCard(
     working: Boolean,
     blocked: Boolean,
     searching: Boolean,
+    showFocusState: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     val pal = palette
     val accent = Accent.forProvider(row.provider)
     Column(
         Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            // Long press: rename / retitle / focus, without adding controls to
+            // the row itself.
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Row(verticalAlignment = Alignment.Top) {
@@ -506,6 +643,23 @@ private fun SessionCard(
                 Spacer(Modifier.width(6.dp))
                 MetaPill("⑂ ${row.session.gitBranch}")
             }
+            // Focus state tag — one more pill on the same row. Focus mode only:
+            // in the All list it is noise on rows the human never enrolled.
+            // Suppressed when the card above already says "waiting for your
+            // answer", which is the same fact in stronger words.
+            // Derived from the live status stream, not the value fetched with
+            // the list, so a turn ending is visible without a manual refresh.
+            val focusState = liveFocusState(row.session.focusState, working, blocked)
+            if (showFocusState && focusState.isNotEmpty() && !blocked) {
+                Spacer(Modifier.width(6.dp))
+                // A turn that ended while we watched the stream is unread by
+                // definition — you were looking at the list, not the transcript.
+                FocusPill(
+                    focusState,
+                    unread = row.session.focusUnread ||
+                        row.session.focusState == "working",
+                )
+            }
         }
 
         val preview = listPreview(row.session, searching)
@@ -520,6 +674,21 @@ private fun SessionCard(
             )
         }
     }
+}
+
+/**
+ * The focus tag as of *now*, not as of the last list fetch.
+ *
+ * The status stream carries only in-flight jobs, so it proves `needs_answer`
+ * and `working` outright and refutes them once the job leaves the stream. It
+ * cannot tell `failed` from `turn_finished` — both are absent — so those keep
+ * the daemon's value, which the next refresh corrects.
+ */
+private fun liveFocusState(said: String, working: Boolean, blocked: Boolean): String {
+    if (blocked) return "needs_answer"
+    if (working) return "working"
+    if (said == "working" || said == "needs_answer") return "turn_finished"
+    return said
 }
 
 /** Session list title: never a bare attachment filename (chip lives in chat). */

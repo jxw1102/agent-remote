@@ -185,6 +185,24 @@ function cellAlign(sep) {
   return "";
 }
 
+/**
+ * Rank/index first column only when the header is #/n/id, or the header is
+ * empty AND every body cell is a short numeric/roman index. An empty header
+ * with long label cells (comparison tables) must stay a normal column.
+ */
+function isRankFirstColumn(header, rows) {
+  const firstHead = String(header[0] || "").trim();
+  if (/^(#|n|no\.?|id)$/i.test(firstHead)) return true;
+  if (firstHead) return false;
+  if (!rows.length) return false;
+  return rows.every((r) => {
+    const c = String(r[0] || "").trim();
+    if (!c) return true;
+    if (c.length > 6) return false;
+    return /^(#?\d{1,4}|[ivxlcdm]{1,6})$/i.test(c);
+  });
+}
+
 function table(header, rows, aligns = []) {
   const width = Math.max(header.length, ...rows.map((r) => r.length), 0);
   const pad = (cells) => {
@@ -193,8 +211,10 @@ function table(header, rows, aligns = []) {
     return out;
   };
   // First column is often "#" / a rank — keep it narrow via a class.
-  const firstHead = String(header[0] || "").trim();
-  const rankCol = !firstHead || /^(#|n|no\.?|id)$/i.test(firstHead);
+  // Do NOT treat a blank header as rank: agents often leave the row-label
+  // column untitled (e.g. | | A | B | with "PPV orders" in body cells), and
+  // max-width:4em then clips those labels into the next column.
+  const rankCol = isRankFirstColumn(header, rows);
 
   const wrap = el("div", "md-table-wrap");
   const t = el("table");

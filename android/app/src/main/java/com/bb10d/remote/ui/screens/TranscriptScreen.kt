@@ -173,6 +173,9 @@ private fun TranscriptScreenBody(
     // itself. Rewind then asks again, because it cannot be undone.
     var actionItem by remember { mutableStateOf<TranscriptItem?>(null) }
     var confirmRewind by remember { mutableStateOf<TranscriptItem?>(null) }
+    // Sheet can be dismissed without cancelling on the daemon; banner reopens it.
+    var questionSheetOpen by remember { mutableStateOf(false) }
+    var lastQuestionRequestId by remember { mutableStateOf<String?>(null) }
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
@@ -401,8 +404,17 @@ private fun TranscriptScreenBody(
                 )
             }
 
-            if (jobState.pendingQuestion != null) {
-                QuestionBanner(accent.tint)
+            // Daemon still has a pending ask, but the sheet was dismissed —
+            // keep a re-open control (web "Answer" banner parity).
+            if (jobState.pendingQuestion != null && !questionSheetOpen) {
+                QuestionBanner(
+                    accent = accent.tint,
+                    onAnswer = {
+                        jobState.pendingQuestion?.requestId
+                            ?.let(vm::reopenQuestion)
+                        questionSheetOpen = true
+                    },
+                )
             }
 
             AnimatedVisibility(ui.status.isNotBlank()) {
@@ -522,13 +534,40 @@ private fun TranscriptScreenBody(
     }
 
 
-    jobState.pendingQuestion?.let { pending ->
-        QuestionSheet(
-            questions = pending.questions,
-            accent = accent.tint,
-            onAnswer = { answers, notes -> vm.answerQuestion(answers, notes) },
-            onCancel = vm::cancelQuestion,
-        )
+    // Auto-open the sheet once per request_id; swipe/back only hides it.
+    val pendingQ = jobState.pendingQuestion
+    LaunchedEffect(pendingQ?.requestId) {
+        val id = pendingQ?.requestId
+        if (id.isNullOrBlank()) {
+            questionSheetOpen = false
+            lastQuestionRequestId = null
+            return@LaunchedEffect
+        }
+        if (id != lastQuestionRequestId) {
+            lastQuestionRequestId = id
+            questionSheetOpen = true
+        }
+    }
+    if (questionSheetOpen) {
+        pendingQ?.let { pending ->
+            QuestionSheet(
+                questions = pending.questions,
+                accent = accent.tint,
+                onAnswer = { answers, notes ->
+                    questionSheetOpen = false
+                    vm.answerQuestion(answers, notes)
+                },
+                onCancel = {
+                    // Explicit Cancel button → Esc host panel.
+                    questionSheetOpen = false
+                    vm.cancelQuestion()
+                },
+                onDismiss = {
+                    // Backdrop / swipe / system back — keep pending on daemon.
+                    questionSheetOpen = false
+                },
+            )
+        }
     }
 }
 
@@ -767,13 +806,14 @@ private fun PermissionPrompt(
 }
 
 @Composable
-private fun QuestionBanner(accent: Color) {
+private fun QuestionBanner(accent: Color, onAnswer: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(accent.copy(alpha = 0.14f))
+            .clickable(onClick = onAnswer)
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -782,6 +822,13 @@ private fun QuestionBanner(accent: Color) {
         Text(
             "A question is waiting for you",
             style = MaterialTheme.typography.labelMedium,
+            color = accent,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            "Answer",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
             color = accent,
         )
     }

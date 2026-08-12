@@ -99,6 +99,9 @@ data class PingDto(
     @SerialName("drop_path") val dropPath: String = "",
     /** agentremoted multi-harness: one profile fronts several providers. */
     val multi: Boolean = false,
+    /** Focus support (agentremoted ≥ 2.6); gates Focus mode. */
+    val focus: Boolean = false,
+    @SerialName("focus_states") val focusStates: List<String> = emptyList(),
     val providers: List<String> = emptyList(),
     @SerialName("provider_details")
     val providerDetails: Map<String, ProviderDetailDto> = emptyMap(),
@@ -144,10 +147,51 @@ data class SessionDto(
     val snippet: String = "",
     /** Multi-harness daemon tags each session with its provider. */
     val provider: String = "",
+    /** Focus: is this a session the human is tracking. */
+    val focus: Boolean = false,
+    /**
+     * Focus state tag, derived by the daemon from live job state:
+     * needs_answer | failed | working | turn_finished. Empty for sessions that
+     * are not in Focus.
+     */
+    @SerialName("focus_state") val focusState: String = "",
+    /**
+     * Cosmetic companion to [focusState]: a finished turn you have not opened
+     * is drawn lit, one you have is drawn dim. Never a state of its own.
+     */
+    @SerialName("focus_unread") val focusUnread: Boolean = false,
+    /** True when the title is a manual rename rather than a derived one. */
+    @SerialName("title_manual") val titleManual: Boolean = false,
 )
 
 @Serializable
 data class SessionsDto(val sessions: List<SessionDto> = emptyList())
+
+/** GET /api/focus — the enrolled sessions only, most urgent first. */
+@Serializable
+data class FocusDto(
+    val sessions: List<SessionDto> = emptyList(),
+    val counts: Map<String, Int> = emptyMap(),
+    val total: Int = 0,
+)
+
+/** POST /api/sessions/<id>/title and .../title/regenerate. */
+@Serializable
+data class TitleDto(
+    val ok: Boolean = false,
+    val id: String = "",
+    val title: String = "",
+    val manual: Boolean = false,
+)
+
+/** POST /api/focus/<key>/{done,restore,seen}. */
+@Serializable
+data class FocusActionDto(
+    val ok: Boolean = false,
+    val changed: Boolean = false,
+    val key: String = "",
+    val focus: Boolean = false,
+)
 
 @Serializable
 data class SearchDto(
@@ -402,6 +446,8 @@ data class Caps(
     val dropPath: String = "",
     val fetchedAtMs: Long = 0,
     val multi: Boolean = false,
+    /** Focus support (agentremoted >= 2.6); gates Focus mode. */
+    val focus: Boolean = false,
     val providers: List<String> = emptyList(),
     val providerDetails: Map<String, ProviderDetailDto> = emptyMap(),
     val auth: AuthHealthDto? = null,
@@ -525,6 +571,7 @@ data class Caps(
             dropPath = ping.dropPath,
             fetchedAtMs = nowMs,
             multi = ping.multi,
+            focus = ping.focus,
             providers = ping.providers,
             providerDetails = ping.providerDetails,
             auth = ping.auth,

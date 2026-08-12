@@ -28,6 +28,15 @@ Endpoints (all under /api, all JSON):
   GET  /api/sessions/<id>/messages?offset=&limit= transcript window (default: tail)
   POST /api/sessions/<id>/continue {prompt, permission_mode?}
   POST /api/sessions/new {cwd, prompt, permission_mode?}
+  GET  /api/focus                                 focus rows only (session
+                                                  summaries the human enrolled,
+                                                  each tagged focus_state)
+  POST /api/focus/<key>/done                      take a row off the list
+  POST /api/focus/<key>/restore                   undo done (7-day window)
+  POST /api/focus/<key>/seen                      read cursor (styles a finished
+                                                  turn lit vs dim; not a state)
+  POST /api/sessions/<id>/title {title}           rename ("" clears override)
+  POST /api/sessions/<id>/title/regenerate        re-derive the title via Haiku
   GET  /api/jobs                                  running/recent jobs
   GET  /ws/status                                 WebSocket: active-job status pushes
   GET  /sse/status                                SSE: active-job status pushes
@@ -40,9 +49,15 @@ Endpoints (all under /api, all JSON):
   POST /api/jobs/<id>/question {request_id, answers|cancel}  answer AskUserQuestion
   POST /api/shell {command, cwd?}                      run a shell command
   POST /api/attachments?name=<filename>                raw file body -> {path}
-  GET  /api/drop                                       host→phone drop folder listing
-  GET  /api/drop/<name>                                download one drop file (raw)
+  GET  /api/drop                                       host→phone drop listing
+                                                       (files and folders;
+                                                       type=file|dir, dirs also
+                                                       carry entries/partial)
+  GET  /api/drop/<name>                                download one drop entry
+                                                       (a folder arrives zipped
+                                                       as <name>.zip)
   POST /api/drop/<name>/delete                         remove one drop file
+                                                       (folders are refused)
   POST /internal/permission {job_id, nonce, ...}       (helper MCP tool only)
   POST /internal/hook?secret= {hook payload}           (interactive TUI hooks)
 """
@@ -57,18 +72,24 @@ import re
 import shlex
 import ssl
 import subprocess
+import tempfile
 import time
 import uuid
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
 from . import __version__
+from . import accounts
+from . import focus as focus_store
 from . import ssestream
 from . import wstream
 
 log = logging.getLogger(__name__)
 
 _SESSION_MSGS = re.compile(r"^/api/sessions/([^/]+)/messages$")
+# Process view: full text behind one truncated step (<record uuid>:<block ix>).
+_SESSION_STEP = re.compile(r"^/api/sessions/([^/]+)/steps/([^/]+)$")
 _SESSION_CONT = re.compile(r"^/api/sessions/([^/]+)/continue$")
 _SESSION_TUI = re.compile(r"^/api/sessions/([^/]+)/tui$")
 _SESSION_TUI_KEYS = re.compile(r"^/api/sessions/([^/]+)/tui/keys$")
@@ -82,6 +103,11 @@ _JOB_PERM = re.compile(r"^/api/jobs/([^/]+)/permission$")
 _JOB_QUESTION = re.compile(r"^/api/jobs/([^/]+)/question$")
 _DROP_FILE = re.compile(r"^/api/drop/([^/]+)$")
 _DROP_DELETE = re.compile(r"^/api/drop/([^/]+)/delete$")
+_SESSION_TITLE = re.compile(r"^/api/sessions/([^/]+)/title$")
+_SESSION_RETITLE = re.compile(r"^/api/sessions/([^/]+)/title/regenerate$")
+_FOCUS_DONE = re.compile(r"^/api/focus/([^/]+)/done$")
+_FOCUS_RESTORE = re.compile(r"^/api/focus/([^/]+)/restore$")
+_FOCUS_SEEN = re.compile(r"^/api/focus/([^/]+)/seen$")
 
 
 MAX_BODY = 256 * 1024
@@ -129,6 +155,11 @@ class ApiHandler(BaseHTTPRequestHandler):
     token = ""
     # Multi-provider: OrderedDict name → ProviderBundle. Empty/None = single.
     bundles = None
+    # Focus-list membership + title overrides, shared across every provider
+    # and every client of this daemon (focus.Focus).
+    focus = None
+    # Set per-request by _authorize(); never share data across principals.
+    principal = None
 
     # -- plumbing --------------------------------------------------------
 
@@ -155,6 +186,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.store = b.store
                 self.jobs = b.jobs
                 self.runner = b.runner
+                # Principal may already be set on keep-alive reuse of handler
+                # class attrs — prefer guest store when applicable.
+                if getattr(self, "principal", None) is not None:
+                    self._rebind_store_for_principal()
                 return rest, query, b
         return path, query, None
 
@@ -172,7 +207,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         b = (self.bundles or {}).get(name)
         if b is None:
             return None
-        self.store = b.store
+        self.store = self._store_for_provider(name, b)
         self.jobs = b.jobs
         self.runner = b.runner
         return b
@@ -180,12 +215,14 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _find_session(self, session_id):
         """(provider_name, bundle, session_dict) or (None, None, None)."""
         if self.store is not None and (not self.bundles or len(self.bundles) <= 1):
-            s = self.store.get_session(session_id)
+            name = self.runner.name if self.runner else ""
+            store = self._store_for_provider(name) if name else self.store
+            s = store.get_session(session_id) if store is not None else None
             if s is not None:
-                name = self.runner.name if self.runner else ""
                 return name, None, s
         for name, b in (self.bundles or {}).items():
-            s = b.store.get_session(session_id)
+            store = self._store_for_provider(name, b)
+            s = store.get_session(session_id) if store is not None else None
             if s is not None:
                 return name, b, s
         return None, None, None
@@ -204,13 +241,69 @@ class ApiHandler(BaseHTTPRequestHandler):
         return None, None, None
 
     def _merged_active_status(self):
-        """Active jobs across every harness, each tagged with provider."""
+        """Active jobs across every harness, each tagged with provider.
+
+        Also merges busy interactive host TUIs that no longer have a running
+        job (e.g. turn_timeout fired while multi-agent work continued). Without
+        those rows clients drop the session from the "working" list even though
+        the tmux agent is still mid-turn.
+        """
         out = []
+        seen_sessions = set()  # provider/session_id already covered by a job
         for name, b in (self.bundles or {}).items():
             for row in b.jobs.active_status():
                 row = dict(row)
                 row["provider"] = name
                 out.append(row)
+                for sid in (row.get("session_id"), row.get("new_session_id")):
+                    if sid:
+                        seen_sessions.add("%s/%s" % (name, sid))
+            # Busy live TUIs without a running job.
+            runner = getattr(b, "runner", None)
+            mgr_fn = getattr(runner, "_interactive_mgr", None) if runner else None
+            if not callable(mgr_fn):
+                continue
+            try:
+                mgr = mgr_fn()
+            except Exception:
+                continue
+            status_fn = getattr(mgr, "active_tui_status", None)
+            if not callable(status_fn):
+                continue
+            try:
+                extra = status_fn() or []
+            except Exception as e:
+                log.debug("active_tui_status %s: %s", name, e)
+                continue
+            for row in extra:
+                row = dict(row)
+                row["provider"] = name
+                sid = row.get("new_session_id") or row.get("session_id") or ""
+                key = "%s/%s" % (name, sid) if sid else ""
+                if key and key in seen_sessions:
+                    continue
+                if key:
+                    seen_sessions.add(key)
+                out.append(row)
+        # Single-provider path (no multi bundles): same merge for self.jobs.
+        if not self.bundles and self.jobs is not None:
+            for row in self.jobs.active_status():
+                out.append(dict(row))
+                for sid in (row.get("session_id"), row.get("new_session_id")):
+                    if sid:
+                        seen_sessions.add(sid)
+            runner = self.runner
+            mgr_fn = getattr(runner, "_interactive_mgr", None) if runner else None
+            if callable(mgr_fn):
+                try:
+                    extra = (mgr_fn().active_tui_status() or [])
+                except Exception:
+                    extra = []
+                for row in extra:
+                    sid = row.get("new_session_id") or row.get("session_id") or ""
+                    if sid and sid in seen_sessions:
+                        continue
+                    out.append(dict(row))
         out.sort(key=lambda s: s.get("job_id") or "")
         return out
 
@@ -304,7 +397,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         queues = []
         for name, b in bundles:
             try:
-                rows = list(b.store.list_sessions(
+                store = self._store_for_provider(name, b)
+                rows = list(store.list_sessions(
                     project, fetch, user_only=user_only) or [])
             except Exception:
                 log.exception("list_sessions failed for %s", name)
@@ -319,18 +413,28 @@ class ApiHandler(BaseHTTPRequestHandler):
             queues.append([name, tagged, 0])  # name, rows, cursor
 
         selected = []
-        seen = set()
+        # Dedupe by session id (not just provider+id). Running-job rows carry
+        # provider; store rows used to omit it, so (grok, id) + ("", id) both
+        # passed and the same session appeared twice in the list.
+        seen_ids = set()
+
+        run_by_id, pending = self._split_running(self._running_job_sessions())
 
         def _add(s):
-            key = (s.get("provider") or "", s.get("id") or "")
-            if not key[1] or key in seen:
+            sid = (s.get("id") or "").strip()
+            if not sid or sid in seen_ids:
                 return False
-            seen.add(key)
+            # A live job lends its liveness to the session's own row; it never
+            # replaces the row (that renamed sessions after the prompt).
+            if sid in run_by_id:
+                s = self._apply_running(s, run_by_id.pop(sid))
+            seen_ids.add(sid)
             selected.append(s)
             return True
 
-        # In-flight turns first (new Codex before sqlite has a thread).
-        for s in self._running_job_sessions():
+        # Sessions that have no transcript yet (new Codex before sqlite has a
+        # thread): the prompt is the only name they have.
+        for s in pending:
             _add(s)
 
         # Round-robin: one from each harness per wave (Codex never buried).
@@ -348,6 +452,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                         break
             if not progressed:
                 break
+
+        # Running sessions no harness page reached still deserve a row.
+        for sid, r in list(run_by_id.items()):
+            if sid not in seen_ids:
+                seen_ids.add(sid)
+                selected.append(r)
 
         return selected[:limit]
 
@@ -378,6 +488,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 st = str(j.get("status") or "")
                 if st not in ("running", "starting"):
                     continue
+                # Never surface another account's in-flight job as a session.
+                if self.principal is not None and not accounts.job_owned_by(
+                        j, self.principal):
+                    continue
                 sid = (j.get("new_session_id") or j.get("session_id") or "").strip()
                 jid = str(j.get("id") or "")
                 prompt = " ".join(str(j.get("prompt") or "").split())
@@ -407,34 +521,77 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "provider": prov,
                     "job_id": jid,
                     "running": True,
+                    "account": j.get("account") or "",
+                    "isolate_root": j.get("isolate_root") or "",
                 })
         return out
+
+    def _apply_running(self, row: dict, run: dict) -> dict:
+        """Overlay liveness onto a real session row.
+
+        A running job used to be *prepended* as its own row titled with the
+        prompt, and it won the dedupe — so sending "continue" to a well-named
+        session renamed it "continue" until the turn ended. Identity belongs to
+        the session; only the liveness flags come from the job.
+        """
+        row = dict(row)
+        row["running"] = True
+        row["job_id"] = run.get("job_id") or row.get("job_id") or ""
+        # In-flight turns still sort to the top.
+        if run.get("last_active"):
+            row["last_active"] = run["last_active"]
+        if not str(row.get("title") or "").strip():
+            row["title"] = run.get("title") or ""
+        return row
+
+    def _split_running(self, rows):
+        """(by-session-id, no-session-yet) split of the synthetic job rows."""
+        by_id, pending = {}, []
+        for r in rows or []:
+            sid = str(r.get("id") or "").strip()
+            if not sid:
+                continue
+            if sid.startswith(focus_store.JOB_KEY_PREFIX):
+                # No session id yet: the prompt IS the only name it has.
+                pending.append(r)
+            else:
+                by_id[sid] = r
+        return by_id, pending
 
     def _sessions_with_running(self, sessions, limit):
         """Prepend active jobs onto a single-provider session list."""
         limit = max(1, min(int(limit or 25), 200))
-        seen = set()
+        seen_ids = set()
         out = []
-        for s in self._running_job_sessions():
-            key = (s.get("provider") or "", s.get("id") or "")
-            if key[1] and key not in seen:
-                seen.add(key)
+        run_by_id, pending = self._split_running(self._running_job_sessions())
+        for s in pending:
+            sid = (s.get("id") or "").strip()
+            if sid and sid not in seen_ids:
+                seen_ids.add(sid)
                 out.append(s)
         for s in sessions or []:
             s = dict(s)
-            key = (s.get("provider") or "", s.get("id") or "")
-            if key[1] and key not in seen:
-                seen.add(key)
+            sid = (s.get("id") or "").strip()
+            if sid and sid in run_by_id:
+                s = self._apply_running(s, run_by_id.pop(sid))
+            if sid and sid not in seen_ids:
+                seen_ids.add(sid)
                 out.append(s)
             if len(out) >= limit:
                 break
+        # Running sessions the store page did not reach still deserve a row.
+        for sid, r in run_by_id.items():
+            if sid not in seen_ids:
+                seen_ids.add(sid)
+                out.append(r)
         out.sort(key=self._activity_sort_key, reverse=True)
         return out[:limit]
 
     def _merged_projects(self):
         rows = []
         for name, b in (self.bundles or {}).items():
-            for p in b.store.list_projects():
+            store = self._store_for_provider(name, b)
+            for p in store.list_projects():
                 p = dict(p)
                 p["provider"] = name
                 # Disambiguate project ids across harnesses.
@@ -456,7 +613,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         def _one(item):
             name, b = item
-            search_fn = getattr(b.store, "search_sessions", None)
+            store = self._store_for_provider(name, b)
+            search_fn = getattr(store, "search_sessions", None)
             if search_fn is None:
                 return []
             out = []
@@ -496,23 +654,41 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         count = 0
+        # Over-fetch when scoped so filtering still fills `limit`.
+        fetch = limit if (
+            self.principal is None or self.principal.is_main
+        ) else min(max(limit * 4, 50), 100)
         try:
             if multi:
-                for row in self._iter_merged_search(q, project, limit, user_only):
+                for row in self._iter_merged_search(
+                        q, project, fetch, user_only):
+                    if not self._session_in_scope(row):
+                        continue
                     self._write_ndjson({"type": "hit", "session": row})
                     count += 1
+                    if count >= limit:
+                        break
             else:
                 it_fn = getattr(self.store, "iter_search_sessions", None)
                 if it_fn is None:
                     search_fn = getattr(self.store, "search_sessions", None)
-                    rows = search_fn(q, project, limit, user_only=user_only) if search_fn else []
+                    rows = (search_fn(q, project, fetch, user_only=user_only)
+                            if search_fn else [])
                     for row in rows:
+                        if not self._session_in_scope(row):
+                            continue
                         self._write_ndjson({"type": "hit", "session": row})
                         count += 1
+                        if count >= limit:
+                            break
                 else:
-                    for row in it_fn(q, project, limit, user_only=user_only):
+                    for row in it_fn(q, project, fetch, user_only=user_only):
+                        if not self._session_in_scope(row):
+                            continue
                         self._write_ndjson({"type": "hit", "session": row})
                         count += 1
+                        if count >= limit:
+                            break
             self._write_ndjson({"type": "done", "query": q, "count": count})
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -545,14 +721,15 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         def _worker(name, b):
             try:
-                it_fn = getattr(b.store, "iter_search_sessions", None)
+                store = self._store_for_provider(name, b)
+                it_fn = getattr(store, "iter_search_sessions", None)
                 if it_fn is not None:
                     for s in it_fn(q, project, limit, user_only=user_only):
                         s = dict(s)
                         s["provider"] = name
                         q_out.put(s)
                 else:
-                    search_fn = getattr(b.store, "search_sessions", None)
+                    search_fn = getattr(store, "search_sessions", None)
                     if search_fn is None:
                         return
                     for s in search_fn(q, project, limit, user_only=user_only):
@@ -648,7 +825,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _error(self, status, message):
         self._send_json({"error": message}, status=status, close=True)
 
-    def _authorized(self, query) -> bool:
+    def _extract_token(self, query) -> str:
         supplied = self.headers.get("X-Auth-Token", "")
         if not supplied:
             bearer = self.headers.get("Authorization", "")
@@ -658,7 +835,565 @@ class ApiHandler(BaseHTTPRequestHandler):
             supplied = self.headers.get("X-Grok-Token", "")  # legacy client
         if not supplied:
             supplied = (query.get("token") or [""])[0]
-        return bool(supplied) and hmac.compare_digest(supplied, self.token)
+        return (supplied or "").strip()
+
+    def _authorize(self, query) -> bool:
+        """Resolve the caller to a Principal. Main and each guest are isolated.
+
+        On success sets ``self.principal``; on failure clears it and returns
+        False. Never return account A's jobs/sessions/drops to account B.
+        """
+        supplied = self._extract_token(query)
+        principal = accounts.resolve_principal(supplied, self.token)
+        self.principal = principal
+        if principal is not None:
+            self._rebind_store_for_principal()
+        return principal is not None
+
+    def _authorized(self, query) -> bool:
+        # Back-compat alias used throughout this module.
+        return self._authorize(query)
+
+    def _make_guest_store(self, provider_name: str, guest_root: str):
+        """Store rooted under the guest's harness home (sessions live there).
+
+        Sandboxed agents set GROK_HOME / CLAUDE_CONFIG_DIR / CODEX_HOME to
+        ``<guest_root>/.{grok,claude,codex}``, so transcripts are not under
+        the main account's host home. The HTTP layer must read the same tree.
+        """
+        from pathlib import Path
+        root = Path(guest_root)
+        name = (provider_name or "").strip().lower()
+        try:
+            if name == "grok":
+                from .providers.grok import GrokStore
+                return GrokStore(root / ".grok")
+            if name == "claude":
+                from .providers.claude import ClaudeStore
+                return ClaudeStore(root / ".claude" / "projects", self.config)
+            if name == "codex":
+                from .providers.codex import CodexStore
+                return CodexStore(root / ".codex", self.config)
+        except Exception:
+            log.exception("guest store for %s failed", name)
+        return None
+
+    def _store_for_provider(self, name: str, bundle=None):
+        """Store for *name*, guest-scoped when the caller is a guest."""
+        p = self.principal
+        if p is not None and p.is_guest and p.root:
+            gs = self._make_guest_store(name, p.root)
+            if gs is not None:
+                return gs
+        if bundle is not None:
+            return bundle.store
+        if self.store is not None and (
+                not self.bundles or len(self.bundles) <= 1
+                or (self.runner and getattr(self.runner, "name", "") == name)):
+            return self.store
+        b = (self.bundles or {}).get(name)
+        return b.store if b is not None else self.store
+
+    def _rebind_store_for_principal(self):
+        """After auth, point self.store at the guest harness home if needed."""
+        p = self.principal
+        if p is None or not p.is_guest or not p.root:
+            return
+        name = ""
+        if self.runner is not None:
+            name = str(getattr(self.runner, "name", "") or "")
+        elif self.bundles and len(self.bundles) == 1:
+            name = next(iter(self.bundles))
+        if not name:
+            return
+        gs = self._make_guest_store(name, p.root)
+        if gs is not None:
+            self.store = gs
+
+    def _require_job(self, job_id):
+        """Return Job if it exists *and* belongs to self.principal, else None.
+
+        Unknown ids and cross-account ids both look like 404 so one account
+        cannot probe another's job ids.
+        """
+        job = None
+        mgr = self._jobs_for_id(job_id)
+        if mgr is not None:
+            job = mgr.get(job_id)
+        if job is None:
+            # Multi: search all bundles.
+            _name, _b, job = self._find_job(job_id)
+        if job is None:
+            return None
+        if not accounts.job_in_scope(job, self.principal):
+            return None
+        return job
+
+    def _session_in_scope(self, session) -> bool:
+        if not isinstance(session, dict):
+            return False
+        return accounts.record_in_scope(session, self.principal)
+
+    def _filter_rows(self, rows) -> list:
+        return accounts.filter_records(rows, self.principal)
+
+    # ---- focus list --------------------------------------------------
+    #
+    # Focus is a filter over the one session list, not a second view: rows keep
+    # their shape and gain two fields — `focus` (is this a card) and
+    # `focus_state` (the tag to draw). Membership is stored; the tag is
+    # derived on every request from live job state, so it can never go stale.
+
+    def _focus_live_state(self) -> dict:
+        """key -> (running, pending) for every in-flight turn.
+
+        Keyed by both session id and `job:<id>` so a card enrolled before its
+        session existed still resolves.
+        """
+        try:
+            rows = self._active_status_scoped() or []
+        except Exception:
+            log.exception("focus: active status failed")
+            return {}
+        out = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            # `asking` is set exactly when AskUserQuestion is on screen, so it
+            # is the same "stop and answer" fact as the pending flags. The
+            # `planning` phase is NOT included: it is the agent's own todo list
+            # (claude.py emit_claude_todos), not a request for a human.
+            pending = bool(row.get("pending_permission")
+                           or row.get("pending_question")
+                           or str(row.get("phase") or "") == "asking")
+            for field in ("new_session_id", "session_id"):
+                key = str(row.get(field) or "").strip()
+                if key:
+                    out[key] = (True, pending)
+            jid = str(row.get("job_id") or "").strip()
+            if jid:
+                out[focus_store.JOB_KEY_PREFIX + jid] = (True, pending)
+        return out
+
+    def _focus_job_briefs(self) -> list:
+        """Every job this daemon still remembers, finished ones included."""
+        out = []
+        managers = []
+        if self.jobs is not None:
+            managers.append(self.jobs)
+        for bundle in (self.bundles or {}).values():
+            if bundle.jobs not in managers:
+                managers.append(bundle.jobs)
+        for mgr in managers:
+            try:
+                out.extend(mgr.list_jobs() or [])
+            except Exception:
+                log.exception("focus: list_jobs failed")
+        return out
+
+    def _focus_failed_keys(self, briefs) -> set:
+        """Session keys whose MOST RECENT remembered job ended in error.
+
+        Only the latest job counts — an old failure followed by a good turn is
+        not a failed session. `stopped` is excluded: you pressing Stop is a
+        decision, not a breakage.
+
+        Limitation worth knowing: this reads the in-memory job list, so a
+        failure is forgotten once the job is evicted or the daemon restarts,
+        and the row falls back to "turn finished".
+        """
+        latest = {}   # key -> (started_at, status)
+        for job in briefs or []:
+            if not isinstance(job, dict):
+                continue
+            status = str(job.get("status") or "")
+            started = 0.0
+            try:
+                started = float(job.get("started_at") or 0.0)
+            except (TypeError, ValueError):
+                started = 0.0
+            for field in ("new_session_id", "session_id"):
+                key = str(job.get(field) or "").strip()
+                if not key:
+                    continue
+                prev = latest.get(key)
+                if prev is None or started >= prev[0]:
+                    latest[key] = (started, status)
+        return {k for k, (_ts, st) in latest.items() if st == "error"}
+
+    def _focus_migrate_keys(self) -> None:
+        """Follow cards as a turn learns its real session id.
+
+        Driven by the job list rather than the session rows, because only
+        synthetic running-job rows carry `job_id` — once a turn finishes, its
+        transcript row has no link back to the job, and a card still keyed
+        `job:<id>` would be orphaned with nothing to match it.
+        """
+        b = self.focus
+        if b is None:
+            return
+        for job in self._focus_job_briefs():
+            if not isinstance(job, dict):
+                continue
+            jid = str(job.get("id") or "").strip()
+            old = str(job.get("session_id") or "").strip()
+            new = str(job.get("new_session_id") or "").strip()
+            target = new or old
+            if not target:
+                continue
+            if jid:
+                b.rekey(focus_store.JOB_KEY_PREFIX + jid, target)
+            # Providers that mint a fresh id on resume (grok) leave the card
+            # sitting on a session that will never be written to again.
+            if new and old and new != old:
+                b.rekey(old, new)
+
+    def _decorate_focus(self, rows, live=None) -> list:
+        """Stamp focus membership + state tag + title override onto rows."""
+        b = self.focus
+        if b is None:
+            return list(rows or [])
+        self._focus_migrate_keys()
+        if live is None:
+            live = self._focus_live_state()
+        failed = self._focus_failed_keys(self._focus_job_briefs())
+        active = b.active_keys()
+        out = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                out.append(row)
+                continue
+            row = dict(row)
+            key = str(row.get("id") or "").strip()
+            jid = str(row.get("job_id") or "").strip()
+            title = b.title(key)
+            if title:
+                row["title"] = title
+                entry = b.title_entry(key) or {}
+                row["title_manual"] = bool(entry.get("manual"))
+            member = key in active
+            row["focus"] = member
+            if not member:
+                out.append(row)
+                continue
+            running, pending = live.get(key, (None, False))
+            if running is None and jid:
+                running, pending = live.get(
+                    focus_store.JOB_KEY_PREFIX + jid, (None, False))
+            if running is None:
+                # No live job for this row; the synthetic running-job rows
+                # still carry the flag, so trust it before calling it idle.
+                running = bool(row.get("running"))
+            row["focus_state"] = focus_store.state_for(
+                running=bool(running),
+                pending=bool(pending),
+                failed=key in failed,
+            )
+            # Cosmetic companion to the state, not a state of its own: a
+            # finished turn you have not opened is drawn lit, one you have is
+            # drawn dim. Clients advance the cursor via /api/focus/<key>/seen.
+            row["focus_unread"] = self._activity_sort_key(row) > b.seen_at(key)
+            out.append(row)
+        return out
+
+    def _focus_key_for_job(self, job, session_id: str = "") -> str:
+        """Focus key for a job: its session id once known, else the job id."""
+        key = str(session_id or "").strip()
+        if key:
+            return key
+        for attr in ("new_session_id", "session_id"):
+            key = str(getattr(job, attr, "") or "").strip()
+            if key:
+                return key
+        return focus_store.JOB_KEY_PREFIX + str(getattr(job, "id", "") or "")
+
+    def _focus_enroll_key(self, key: str, *, provider: str = "",
+                          cwd: str = "", job_id: str = "") -> None:
+        """Put a card on the focus list for a human-driven turn.
+
+        Only ever reached from POST handlers past the auth gate. Work the agent
+        starts for itself arrives on /internal/* and never gets here, which is
+        what keeps subagents and hook traffic off the list.
+        """
+        b = self.focus
+        if b is None or not key:
+            return
+        try:
+            b.enroll(key, provider=provider, cwd=cwd, job_id=job_id)
+        except Exception:
+            # Never fail the turn the human asked for over bookkeeping.
+            log.exception("focus: enroll failed")
+
+    def _focus_enroll(self, job, session_id: str = "") -> None:
+        if job is None:
+            self._focus_enroll_key(str(session_id or "").strip())
+            return
+        provider = str(getattr(job, "provider", "") or "")
+        if not provider and self.runner is not None:
+            provider = str(getattr(self.runner, "name", "") or "")
+        self._focus_enroll_key(
+            self._focus_key_for_job(job, session_id),
+            provider=provider,
+            cwd=str(getattr(job, "cwd", "") or ""),
+            job_id=str(getattr(job, "id", "") or ""),
+        )
+
+    def _all_session_rows(self, limit: int = 200) -> list:
+        """Every session row this principal can see, provider-tagged."""
+        limit = max(1, min(int(limit or 200), 200))
+        if self.bundles and len(self.bundles) > 1:
+            rows = self._merged_sessions(None, limit, True)
+        elif self.store is not None:
+            rows = self._sessions_with_running(
+                self.store.list_sessions(None, limit, user_only=True), limit)
+        else:
+            rows = []
+        return self._filter_rows(rows)
+
+    def _handle_focus_list(self):
+        """The kanban rows: same session summaries, membership-filtered.
+
+        Served as its own endpoint so thin clients (the pager) get the list
+        without fetching and filtering the whole session list themselves.
+        """
+        b = self.focus
+        if b is None:
+            self._send_json({"sessions": [], "counts": {}, "total": 0})
+            return
+        rows = self._decorate_focus(self._all_session_rows(200))
+        cards = [r for r in rows if isinstance(r, dict) and r.get("focus")]
+        # Most urgent first, then most recently active — the pager shows only
+        # the first row or two, so the ordering is the whole UI there.
+        weight = {name: i for i, name in enumerate(focus_store.STATES)}
+        cards.sort(key=lambda r: (
+            weight.get(r.get("focus_state"), len(weight)),
+            -self._activity_sort_key(r),
+        ))
+        counts = {name: 0 for name in focus_store.STATES}
+        for row in cards:
+            name = row.get("focus_state")
+            if name in counts:
+                counts[name] += 1
+        self._send_json({
+            "sessions": cards,
+            "counts": counts,
+            "total": len(cards),
+            "states": list(focus_store.STATES),
+            "labels": dict(focus_store.STATE_LABELS),
+        })
+
+    def _focus_key_from_path(self, raw: str) -> str:
+        return unquote(str(raw or "")).strip()
+
+    def _route_focus_post(self, path, body) -> bool:
+        """Handle a focus/title POST. True when this request was answered."""
+        # Longest pattern first: /title/regenerate also matches /title's regex
+        # prefix only by accident of ordering, so be explicit about it.
+        m = _SESSION_RETITLE.match(path)
+        if m:
+            self._handle_session_retitle(m.group(1))
+            return True
+        m = _SESSION_TITLE.match(path)
+        if m:
+            self._handle_session_title(m.group(1), body)
+            return True
+        for pattern, action in ((_FOCUS_DONE, "done"),
+                                (_FOCUS_RESTORE, "restore"),
+                                (_FOCUS_SEEN, "seen")):
+            m = pattern.match(path)
+            if m:
+                self._handle_focus_action(m.group(1), action)
+                return True
+        return False
+
+    def _handle_focus_action(self, raw_key: str, action: str):
+        b = self.focus
+        if b is None:
+            self._error(503, "focus list unavailable")
+            return
+        key = self._focus_key_from_path(raw_key)
+        if not key:
+            self._error(400, "session key required")
+            return
+        if action == "done":
+            changed = b.mark_done(key)
+        elif action == "restore":
+            changed = b.restore(key)
+        else:
+            changed = b.mark_seen(key)
+        # Idempotent by design: marking done twice, or seen when already seen,
+        # is a no-op the client should not have to special-case.
+        self._send_json({"ok": True, "changed": bool(changed), "key": key,
+                         "focus": b.is_member(key)})
+
+    def _handle_session_title(self, raw_id: str, body):
+        """Rename a session (or clear the override with an empty title)."""
+        b = self.focus
+        if b is None:
+            self._error(503, "focus list unavailable")
+            return
+        if not isinstance(body, dict) or "title" not in body:
+            self._error(400, "body must be JSON with a 'title'")
+            return
+        key = self._focus_key_from_path(raw_id)
+        if not key:
+            self._error(400, "session id required")
+            return
+        raw = body.get("title")
+        if not isinstance(raw, str):
+            self._error(400, "'title' must be a string")
+            return
+        title = b.set_title(key, raw, manual=True)
+        self._send_json({"ok": True, "id": key, "title": title,
+                         "manual": bool(title)})
+
+    def _handle_session_retitle(self, raw_id: str):
+        """Re-derive a title from the transcript, discarding any rename.
+
+        Synchronous: it is a button press, and the model call is one short
+        Haiku turn. Falls back to the provider's own title on any failure so
+        the button can never blank a session's name.
+        """
+        b = self.focus
+        if b is None:
+            self._error(503, "focus list unavailable")
+            return
+        key = self._focus_key_from_path(raw_id)
+        if not key:
+            self._error(400, "session id required")
+            return
+        name, bundle, session = self._find_session(key)
+        if session is None or not self._session_in_scope(session):
+            self._error(404, "session not found")
+            return
+        store = bundle.store if bundle is not None else self.store
+        text = self._retitle_source_text(store, key, session)
+        if not text:
+            self._error(422, "nothing to summarise yet")
+            return
+        # Named by the harness that owns it: Grok titles a Grok session, Codex a
+        # Codex one. Runs inline because this is a button press — Grok/Codex go
+        # through their CLI, so allow it the same budget their one-shot needs.
+        runner = bundle.runner if bundle is not None else self.runner
+        titler = getattr(runner, "title_for", None)
+        title = ""
+        if callable(titler):
+            try:
+                title = titler(text) or ""
+            except Exception:
+                log.exception("retitle failed for %s", key)
+                title = ""
+        if not title:
+            # No usable login, or the harness declined. Say so plainly —
+            # silently keeping the old title looks like a broken button.
+            self._error(503, "%s could not name this session"
+                             % (str(getattr(runner, "name", "") or "the harness")))
+            return
+        b.set_title(key, title, manual=False)
+        self._send_json({"ok": True, "id": key, "title": title,
+                         "manual": False})
+
+    def _retitle_source_text(self, store, session_id: str, session: dict) -> str:
+        """Text to summarise: the opening ask plus the latest exchange.
+
+        Both ends matter — the first message says what the project *is*, the
+        last says where it got to, and a title drawn from only one of them is
+        wrong half the time.
+        """
+        parts = []
+        title = str((session or {}).get("title") or "").strip()
+        if title:
+            parts.append(title)
+        cwd = str((session or {}).get("cwd") or "").strip()
+        if cwd:
+            parts.append("Working directory: " + cwd)
+        try:
+            window = store.get_messages(session_id, offset=0, limit=4) or {}
+            head = window.get("messages") or []
+        except Exception:
+            head = []
+        try:
+            total = int((window or {}).get("total") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        tail = []
+        if total > 8:
+            try:
+                win = store.get_messages(
+                    session_id, offset=max(0, total - 4), limit=4) or {}
+                tail = win.get("messages") or []
+            except Exception:
+                tail = []
+        for group in (head, tail):
+            for msg in group:
+                if not isinstance(msg, dict):
+                    continue
+                text = " ".join(str(msg.get("text") or "").split())
+                if text:
+                    parts.append("%s: %s" % (msg.get("role") or "?", text[:600]))
+        return "\n".join(parts).strip()
+
+    def _provider_allowed(self, name: str) -> bool:
+        p = self.principal
+        if p is None:
+            return True
+        return p.allows_provider(name)
+
+    def _allowed_bundle_items(self):
+        """(name, bundle) pairs visible to the current principal."""
+        items = list((self.bundles or {}).items())
+        if self.principal is None or self.principal.is_main:
+            return items
+        return [(n, b) for n, b in items if self.principal.allows_provider(n)]
+
+    def _deny_if_provider_blocked(self, name: str = "") -> bool:
+        """If guest is not allowed this harness, send 403 and return True."""
+        p = self.principal
+        if p is None or p.is_main:
+            return False
+        prov = (name or "").strip().lower()
+        if not prov and self.runner is not None:
+            prov = str(getattr(self.runner, "name", "") or "").strip().lower()
+        if prov and not p.allows_provider(prov):
+            self._error(403, "provider not allowed")
+            return True
+        return False
+
+    def _scoped_drop_path(self):
+        p = self.principal
+        if p is None:
+            return self.config.drop_path
+        return p.drop_path()
+
+    def _scoped_upload_path(self):
+        p = self.principal
+        if p is None:
+            return self.config.upload_path
+        return p.upload_path()
+
+    def _start_job_for_principal(self, **kwargs):
+        """start_job with account + isolate_root stamped from self.principal."""
+        p = self.principal or accounts.main_principal()
+        kwargs.setdefault("account", p.account)
+        kwargs.setdefault("isolate_root", p.isolate_root)
+        # Guests must not run without a real confinement backend (bwrap /
+        # sandbox-exec / chroot). Soft cd-only is not isolation.
+        if p.is_guest and p.isolate_root and not accounts.isolation_ready(
+                p.isolate_root):
+            raise RuntimeError(accounts.isolation_required_hint())
+        job = self.jobs.start_job(**kwargs)
+        # Every caller of this method is a client POST past the auth gate —
+        # /api/sessions/new or /api/sessions/<id>/continue — so starting a turn
+        # here is by definition the human picking up a project.
+        self._focus_enroll(job, str(kwargs.get("session_id") or ""))
+        return job
+
+    def _active_status_scoped(self):
+        """Active jobs (+ busy TUIs) visible to the current principal only."""
+        return self._filter_rows(self._merged_active_status())
+
+    def _merged_active_status_scoped(self):
+        return self._active_status_scoped()
 
     def _read_body(self):
         """Read and parse the request body.
@@ -753,18 +1488,25 @@ class ApiHandler(BaseHTTPRequestHandler):
             if multi and bundle is None:
                 # Catalogue for one-profile clients: harness list + caps so
                 # the app can paint a picker without a second fan-out.
+                # With a guest token, only allowed harnesses are advertised.
+                authorized = self._authorized(query)
+                bundle_items = (
+                    self._allowed_bundle_items() if authorized
+                    else list((self.bundles or {}).items())
+                )
+                provider_names = [n for n, _ in bundle_items]
                 payload = {
                     "ok": True,
                     "app": "agentremoted",
                     "version": __version__,
                     "host": platform.node(),
                     "multi": True,
-                    "providers": list(self.bundles.keys()),
-                    "paths": {n: "/" + n for n in self.bundles},
+                    "providers": provider_names,
+                    "paths": {n: "/" + n for n in provider_names},
                 }
                 details = {}
                 auth_by = {}
-                for name, b in self.bundles.items():
+                for name, b in bundle_items:
                     details[name] = {
                         "caps": b.runner.capabilities(),
                     }
@@ -783,25 +1525,25 @@ class ApiHandler(BaseHTTPRequestHandler):
                             }
                         details[name]["auth"] = ah
                         auth_by[name] = ah
-                if self._authorized(query):
-                    for name, b in self.bundles.items():
+                if authorized:
+                    for name, b in bundle_items:
                         details[name]["slash_commands"] = b.runner.slash_commands()
                         models = getattr(b.runner, "models", None)
                         details[name]["models"] = models() if models else []
                         efforts = getattr(b.runner, "efforts", None)
                         details[name]["efforts"] = efforts() if efforts else []
                     try:
-                        drop = self.config.drop_path
+                        drop = self._scoped_drop_path()
                         drop.mkdir(parents=True, exist_ok=True)
                         payload["drop_path"] = str(drop)
                     except OSError:
-                        payload["drop_path"] = str(self.config.drop_path)
+                        payload["drop_path"] = str(self._scoped_drop_path())
                 payload["provider_details"] = details
                 # Aggregate auth: worst status among harnesses (missing > expired
                 # > warning > unknown > ok) so a multi host shows one summary.
                 payload["auth"] = self._auth_summary(auth_by)
                 # Default harness for UIs that need a primary accent.
-                payload["provider"] = list(self.bundles.keys())[0]
+                payload["provider"] = provider_names[0] if provider_names else ""
                 # Root caps are a union so one-profile clients know what any
                 # harness can do without reading provider_details first.
                 #
@@ -818,18 +1560,24 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "projects": True,
                     "ws_status": True,
                 }
-                for b in self.bundles.values():
+                for _n, b in bundle_items:
                     for key, val in (b.runner.capabilities() or {}).items():
                         if isinstance(val, bool):
                             union[key] = union.get(key, False) or val
                         elif key not in union:
                             union[key] = val
                 payload["caps"] = union
+                # Focus list support: clients gate the mode toggle,
+                # rename, and regenerate on this flag.
+                payload["focus"] = self.focus is not None
+                payload["focus_states"] = list(focus_store.STATES)
                 self._send_json(payload)
                 return
             if self.runner is None:
                 self._error(404, "unknown provider path")
                 return
+            # Guest token on a disallowed harness path: still answer ping
+            # (connectivity) but mark provider; gated API routes return 403.
             payload = {
                 "ok": True,
                 "app": "agentremoted",
@@ -861,16 +1609,26 @@ class ApiHandler(BaseHTTPRequestHandler):
                 payload["efforts"] = efforts() if efforts else []
                 # Absolute path the agent should copy host→phone files into.
                 try:
-                    drop = self.config.drop_path
+                    drop = self._scoped_drop_path()
                     drop.mkdir(parents=True, exist_ok=True)
                     payload["drop_path"] = str(drop)
                 except OSError:
-                    payload["drop_path"] = str(self.config.drop_path)
+                    payload["drop_path"] = str(self._scoped_drop_path())
+            # Focus list support: clients gate the mode toggle,
+            # rename, and regenerate on this flag.
+            payload["focus"] = self.focus is not None
+            payload["focus_states"] = list(focus_store.STATES)
             self._send_json(payload)
             return
 
         if not self._authorized(query):
             self._error(401, "missing or invalid token")
+            return
+
+        # Focus state spans providers, so it is answered before the harness
+        # split — one implementation for the multi root and prefixed paths.
+        if path == "/api/focus":
+            self._handle_focus_list()
             return
 
         # Multi root: one profile talks to the catalogue host; we merge
@@ -879,16 +1637,20 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._route_get_multi(path, query)
             return
 
+        # Prefixed harness path (or single-provider process): guest allow-list.
+        if self._deny_if_provider_blocked():
+            return
+
         if path == "/ws/status" and wstream.is_upgrade(self.headers):
             # Hijacks the connection until the client leaves; nothing may
             # be written through the normal HTTP path afterwards.
             self.close_connection = True
-            wstream.serve_status(self, self.jobs)
+            wstream.serve_status(self, None, active_fn=self._active_status_scoped)
             return
 
         if path == "/sse/status":
             self.close_connection = True
-            ssestream.serve_status(self, self.jobs)
+            ssestream.serve_status(self, None, active_fn=self._active_status_scoped)
             return
 
         if path == "/api/usage":
@@ -906,16 +1668,24 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/projects":
-            self._send_json({"projects": self.store.list_projects()})
+            self._send_json({
+                "projects": self._filter_rows(self.store.list_projects()),
+            })
             return
 
         if path == "/api/sessions":
             project = (query.get("project") or [None])[0]
             limit = min(max(self._int_param(query, "limit", 25), 1), 200)
+            # Over-fetch then filter so guests still fill the limit.
+            fetch = limit if (
+                self.principal is None or self.principal.is_main
+            ) else min(max(limit * 4, 50), 200)
             sessions = self.store.list_sessions(
-                project, limit, user_only=not self._flag(query, "all"))
+                project, fetch, user_only=not self._flag(query, "all"))
+            sessions = self._filter_rows(
+                self._sessions_with_running(sessions, fetch))
             self._send_json({
-                "sessions": self._sessions_with_running(sessions, limit),
+                "sessions": self._decorate_focus(sessions[:limit]),
             })
             return
 
@@ -938,13 +1708,22 @@ class ApiHandler(BaseHTTPRequestHandler):
             if search_fn is None:
                 self._error(501, "search not supported")
                 return
-            results = search_fn(q, project, limit, user_only=user_only)
+            fetch = limit if (
+                self.principal is None or self.principal.is_main
+            ) else min(max(limit * 4, 50), 100)
+            results = search_fn(q, project, fetch, user_only=user_only)
+            results = self._decorate_focus(self._filter_rows(results)[:limit])
             self._send_json({"query": q, "results": results})
             return
 
         m = _SESSION_MSGS.match(path)
         if m:
             self._send_session_messages(m.group(1), query)
+            return
+
+        m = _SESSION_STEP.match(path)
+        if m:
+            self._send_session_step(m.group(1), m.group(2))
             return
 
         m = _SESSION_TUI.match(path)
@@ -955,19 +1734,19 @@ class ApiHandler(BaseHTTPRequestHandler):
         m = _SESSION_ONE.match(path)
         if m:
             session = self.store.get_session(m.group(1))
-            if session is None:
+            if session is None or not self._session_in_scope(session):
                 self._error(404, "session not found")
             else:
-                self._send_json(session)
+                self._send_json(self._decorate_focus([session])[0])
             return
 
         if path == "/api/jobs":
-            self._send_json({"jobs": self.jobs.list_jobs()})
+            self._send_json({"jobs": self._filter_rows(self.jobs.list_jobs())})
             return
 
         m = _JOB_ONE.match(path)
         if m:
-            job = self.jobs.get(m.group(1))
+            job = self._require_job(m.group(1))
             if job is None:
                 self._error(404, "job not found")
             else:
@@ -990,19 +1769,21 @@ class ApiHandler(BaseHTTPRequestHandler):
         """Root routes for multi-provider (one client profile)."""
         if path == "/ws/status" and wstream.is_upgrade(self.headers):
             self.close_connection = True
-            wstream.serve_status(self, None, active_fn=self._merged_active_status)
+            wstream.serve_status(
+                self, None, active_fn=self._merged_active_status_scoped)
             return
         if path == "/sse/status":
             self.close_connection = True
-            ssestream.serve_status(self, None, active_fn=self._merged_active_status)
+            ssestream.serve_status(
+                self, None, active_fn=self._merged_active_status_scoped)
             return
         if path == "/api/usage":
             # One profile, every harness: return per-provider sections plus a
             # flat buckets list (titles tagged "Claude · …") for older clients
-            # that only render buckets.
+            # that only render buckets. Guests only see allowed harnesses.
             sections = []
             flat = []
-            for name, b in (self.bundles or {}).items():
+            for name, b in self._allowed_bundle_items():
                 label = str(name or "").strip().capitalize() or "Agent"
                 usage_fn = getattr(b.runner, "usage", None)
                 if usage_fn is None:
@@ -1095,7 +1876,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             })
             return
         if path == "/api/projects":
-            self._send_json({"projects": self._merged_projects()})
+            self._send_json({
+                "projects": self._filter_rows(self._merged_projects()),
+            })
             return
         if path == "/api/sessions":
             project = (query.get("project") or [None])[0]
@@ -1105,14 +1888,19 @@ class ApiHandler(BaseHTTPRequestHandler):
                 provider_filter, project = str(project).split(":", 1)
             limit = min(max(self._int_param(query, "limit", 25), 1), 200)
             user_only = not self._flag(query, "all")
+            fetch = limit if (
+                self.principal is None or self.principal.is_main
+            ) else min(max(limit * 4, 50), 200)
             if provider_filter and provider_filter in (self.bundles or {}):
                 b = self.bundles[provider_filter]
+                store = self._store_for_provider(provider_filter, b)
                 sessions = [dict(s, provider=provider_filter)
-                            for s in b.store.list_sessions(
-                                project, limit, user_only=user_only)]
+                            for s in store.list_sessions(
+                                project, fetch, user_only=user_only)]
             else:
-                sessions = self._merged_sessions(project, limit, user_only)
-            self._send_json({"sessions": sessions})
+                sessions = self._merged_sessions(project, fetch, user_only)
+            sessions = self._filter_rows(sessions)[:limit]
+            self._send_json({"sessions": self._decorate_focus(sessions)})
             return
         if path == "/api/sessions/search":
             from . import search_util
@@ -1126,25 +1914,41 @@ class ApiHandler(BaseHTTPRequestHandler):
             if self._flag(query, "stream"):
                 self._stream_search(q, project, limit, user_only, multi=True)
                 return
-            results = self._merged_search(q, project, limit, user_only=user_only)
+            fetch = limit if (
+                self.principal is None or self.principal.is_main
+            ) else min(max(limit * 4, 50), 100)
+            results = self._merged_search(
+                q, project, fetch, user_only=user_only)
+            results = self._decorate_focus(self._filter_rows(results)[:limit])
             self._send_json({"query": q, "results": results})
             return
         m = _SESSION_MSGS.match(path)
         if m:
-            name, b, _ = self._find_session(m.group(1))
-            if b is None:
+            name, b, session = self._find_session(m.group(1))
+            if b is None or not self._session_in_scope(session or {}):
                 self._error(404, "session not found")
                 return
             self._bind_bundle(name)
             self._send_session_messages(m.group(1), query)
             return
+        m = _SESSION_STEP.match(path)
+        if m:
+            name, b, session = self._find_session(m.group(1))
+            if b is None or not self._session_in_scope(session or {}):
+                self._error(404, "session not found")
+                return
+            self._bind_bundle(name)
+            self._send_session_step(m.group(1), m.group(2))
+            return
         m = _SESSION_TUI.match(path)
         if m:
-            name, b, _ = self._find_session(m.group(1))
+            name, b, session = self._find_session(m.group(1))
             if b is None:
                 # TUI may exist for a brand-new session before store indexes it.
-                # Still try every harness.
                 self._handle_tui_capture(m.group(1), query)
+                return
+            if not self._session_in_scope(session or {}):
+                self._error(404, "session not found")
                 return
             self._bind_bundle(name)
             self._handle_tui_capture(m.group(1), query)
@@ -1152,12 +1956,12 @@ class ApiHandler(BaseHTTPRequestHandler):
         m = _SESSION_ONE.match(path)
         if m:
             name, b, session = self._find_session(m.group(1))
-            if session is None:
+            if session is None or not self._session_in_scope(session):
                 self._error(404, "session not found")
                 return
             session = dict(session)
             session["provider"] = name
-            self._send_json(session)
+            self._send_json(self._decorate_focus([session])[0])
             return
         if path == "/api/jobs":
             jobs = []
@@ -1166,12 +1970,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                     j = dict(j)
                     j["provider"] = name
                     jobs.append(j)
-            self._send_json({"jobs": jobs})
+            self._send_json({"jobs": self._filter_rows(jobs)})
             return
         m = _JOB_ONE.match(path)
         if m:
             name, b, job = self._find_job(m.group(1))
-            if job is None:
+            if job is None or not accounts.job_in_scope(job, self.principal):
                 self._error(404, "job not found")
                 return
             since = max(self._int_param(query, "since", 0), 0)
@@ -1190,10 +1994,47 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         self._error(404, "not found")
 
+    def _send_session_step(self, session_id, ref):
+        """Full text behind a truncated step, fetched only when expanded —
+        this is what keeps a 200KB tool result out of the window fetch."""
+        session = None
+        if self.store is not None:
+            session = self.store.get_session(session_id)
+        if session is None:
+            _n, _b, session = self._find_session(session_id)
+        if session is None or not self._session_in_scope(session):
+            self._error(404, "session not found")
+            return
+        getter = getattr(self.store, "get_step", None)
+        if not callable(getter):
+            self._error(404, "not supported by this harness")
+            return
+        result = getter(session_id, unquote(ref))
+        if result is None:
+            self._error(404, "step not found")
+            return
+        self._send_json(result)
+
     def _send_session_messages(self, session_id, query):
+        session = None
+        if self.store is not None:
+            session = self.store.get_session(session_id)
+        if session is None:
+            _n, _b, session = self._find_session(session_id)
+        if session is None or not self._session_in_scope(session):
+            self._error(404, "session not found")
+            return
         offset = self._int_param(query, "offset", None)
         limit = min(max(self._int_param(query, "limit", 50), 1), 500)
-        result = self.store.get_messages(session_id, offset, limit)
+        # Opt-in process view. Without it the response is byte-identical to
+        # what every client got before steps existed, which is what keeps
+        # BlackBerry / Android / ESP32 out of this feature entirely.
+        want_steps = (query.get("detail", [""])[0] or "").lower() == "steps"
+        if want_steps and getattr(self.store, "supports_steps", False):
+            result = self.store.get_messages(session_id, offset, limit,
+                                             steps=True)
+        else:
+            result = self.store.get_messages(session_id, offset, limit)
         if result is None:
             self._error(404, "session not found")
             return
@@ -1263,9 +2104,18 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(401, "missing or invalid token")
             return
 
+        # Focus + title writes span providers, so they are answered before the
+        # harness split — one implementation for multi root and prefixed paths.
+        if self._route_focus_post(path, body):
+            return
+
         # Multi root: resolve harness from body.provider or session/job id.
         if multi and bundle is None:
             self._route_post_multi(path, query, body)
+            return
+
+        # Prefixed harness path (or single-provider process): guest allow-list.
+        if self._deny_if_provider_blocked():
             return
 
         if path == "/api/clientlog":
@@ -1317,7 +2167,10 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         m = _JOB_STOP.match(path)
         if m:
-            if self.jobs.stop(m.group(1)):
+            job = self._require_job(m.group(1))
+            if job is None:
+                self._error(404, "job not found")
+            elif self.jobs.stop(m.group(1)):
                 self._send_json({"ok": True})
             else:
                 self._error(404, "job not found")
@@ -1341,9 +2194,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             if isinstance(body, dict):
                 sid = body.get("session_id") or body.get("sessionId") or ""
             if sid:
-                name, b, _ = self._find_session(str(sid))
-                if b is not None:
+                name, b, session = self._find_session(str(sid))
+                if b is not None and self._session_in_scope(session or {}):
                     self._bind_bundle(name)
+                elif b is not None:
+                    self._error(404, "session not found")
+                    return
             elif self.bundles:
                 # Fall back to first harness for store-less shell.
                 self._bind_bundle(next(iter(self.bundles)))
@@ -1354,36 +2210,46 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._error(400, "body must be JSON")
                 return
             provider = str(body.get("provider") or "").strip().lower()
+            allowed = [n for n, _ in self._allowed_bundle_items()]
             if not provider:
                 self._error(400, "provider is required "
-                            "(one of: %s)" % ", ".join(self.bundles.keys()))
+                            "(one of: %s)" % ", ".join(allowed or self.bundles.keys()))
                 return
             if provider not in self.bundles:
                 self._error(400, "unknown provider %r" % provider)
+                return
+            if not self._provider_allowed(provider):
+                self._error(403, "provider not allowed")
                 return
             self._bind_bundle(provider)
             self._handle_new_session(body)
             return
         m = _SESSION_CONT.match(path)
         if m:
-            name, b, _ = self._find_session(m.group(1))
-            if b is None:
+            name, b, session = self._find_session(m.group(1))
+            if b is None or not self._session_in_scope(session or {}):
                 self._error(404, "session not found")
+                return
+            if name and not self._provider_allowed(name):
+                self._error(403, "provider not allowed")
                 return
             self._bind_bundle(name)
             self._handle_continue(m.group(1), body)
             return
         m = _SESSION_TUI_KEYS.match(path)
         if m:
-            name, b, _ = self._find_session(m.group(1))
+            name, b, session = self._find_session(m.group(1))
             if b is not None:
+                if not self._session_in_scope(session or {}):
+                    self._error(404, "session not found")
+                    return
                 self._bind_bundle(name)
             self._handle_tui_keys(m.group(1), body)
             return
         m = _JOB_PERM.match(path)
         if m:
-            name, b, _ = self._find_job(m.group(1))
-            if b is None:
+            name, b, job = self._find_job(m.group(1))
+            if b is None or not accounts.job_in_scope(job, self.principal):
                 self._error(404, "job not found")
                 return
             self._bind_bundle(name)
@@ -1391,8 +2257,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         m = _JOB_QUESTION.match(path)
         if m:
-            name, b, _ = self._find_job(m.group(1))
-            if b is None:
+            name, b, job = self._find_job(m.group(1))
+            if b is None or not accounts.job_in_scope(job, self.principal):
                 self._error(404, "job not found")
                 return
             self._bind_bundle(name)
@@ -1400,17 +2266,25 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         m = _JOB_INPUT.match(path)
         if m:
-            name, b, _ = self._find_job(m.group(1))
+            jid = m.group(1)
+            name, b, job = self._find_job(jid)
             if b is None:
+                # Synthetic tui-* status rows (busy host TUI, no JobManager
+                # job) — still accept input by resolving the session id.
+                name, b, _sid = self._resolve_synthetic_tui_job(jid)
+                if b is None:
+                    self._error(404, "job not found")
+                    return
+            elif not accounts.job_in_scope(job, self.principal):
                 self._error(404, "job not found")
                 return
             self._bind_bundle(name)
-            self._handle_job_input(m.group(1), body)
+            self._handle_job_input(jid, body)
             return
         m = _JOB_QUEUE.match(path)
         if m:
-            name, b, _ = self._find_job(m.group(1))
-            if b is None:
+            name, b, job = self._find_job(m.group(1))
+            if b is None or not accounts.job_in_scope(job, self.principal):
                 self._error(404, "job not found")
                 return
             self._bind_bundle(name)
@@ -1418,8 +2292,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         m = _JOB_QCANCEL.match(path)
         if m:
-            name, b, _ = self._find_job(m.group(1))
-            if b is None:
+            name, b, job = self._find_job(m.group(1))
+            if b is None or not accounts.job_in_scope(job, self.principal):
                 self._error(404, "job not found")
                 return
             self._bind_bundle(name)
@@ -1427,8 +2301,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         m = _JOB_STOP.match(path)
         if m:
-            name, b, _ = self._find_job(m.group(1))
-            if b is None:
+            name, b, job = self._find_job(m.group(1))
+            if b is None or not accounts.job_in_scope(job, self.principal):
                 self._error(404, "job not found")
                 return
             if b.jobs.stop(m.group(1)):
@@ -1478,24 +2352,50 @@ class ApiHandler(BaseHTTPRequestHandler):
         # (launchd WorkingDirectory is often the agentremoted source tree).
         cwd = body.get("cwd") or None
         if isinstance(cwd, str):
-            cwd = os.path.expanduser(cwd.strip()) or None
+            cwd = cwd.strip() or None
         else:
             cwd = None
         if not cwd:
             sid = body.get("session_id") or body.get("sessionId") or ""
             if isinstance(sid, str) and sid.strip():
-                session = self.store.get_session(sid.strip())
-                if session:
+                session = self.store.get_session(sid.strip()) if self.store else None
+                if session is None:
+                    _n, _b, session = self._find_session(sid.strip())
+                if session and self._session_in_scope(session):
                     raw = session.get("cwd") or ""
                     if isinstance(raw, str) and raw.strip():
-                        cwd = os.path.expanduser(raw.strip()) or None
+                        cwd = raw.strip()
+                elif session is not None:
+                    self._error(404, "session not found")
+                    return
+        p = self.principal or accounts.main_principal()
+        cwd_resolved, cerr = accounts.confine_cwd(cwd or "", p)
+        if cerr:
+            self._error(403, cerr)
+            return
+        cwd = cwd_resolved or None
         if cwd is not None and not os.path.isdir(cwd):
             self._error(400, "cwd not found: %s" % cwd)
             return
+        run_kw = {
+            "shell": True,
+            "capture_output": True,
+            "timeout": 30,
+            "cwd": cwd,
+        }
+        if p.is_guest and p.isolate_root:
+            if not accounts.isolation_ready(p.isolate_root):
+                self._error(503, accounts.isolation_required_hint())
+                return
+            iso = accounts.isolation_popen_kwargs(p.isolate_root)
+            if iso.get("cwd"):
+                run_kw["cwd"] = iso["cwd"]
+            if iso.get("preexec_fn"):
+                run_kw["preexec_fn"] = iso["preexec_fn"]
+            run_kw["env"] = accounts.isolation_env(None, p.isolate_root)
+            cmd = accounts.wrap_shell_command(cmd, p.isolate_root)
         try:
-            result = subprocess.run(
-                cmd, shell=True, capture_output=True, timeout=30,
-                cwd=cwd)
+            result = subprocess.run(cmd, **run_kw)
             output = result.stdout.decode("utf-8", errors="replace")
             stderr = result.stderr.decode("utf-8", errors="replace")
             if stderr:
@@ -1516,18 +2416,29 @@ class ApiHandler(BaseHTTPRequestHandler):
                 or not body["prompt"].strip():
             self._error(400, "body must be JSON with a non-empty 'prompt'")
             return
-        session = self.store.get_session(session_id)
+        session = self.store.get_session(session_id) if self.store else None
         if session is None:
+            _n, _b, session = self._find_session(session_id)
+        if session is None or not self._session_in_scope(session):
             self._error(404, "session not found")
             return
-        job = self.jobs.start_job(
-            prompt=body["prompt"],
-            cwd=session.get("cwd", ""),
-            session_id=session_id,
-            permission_mode=body.get("permission_mode", ""),
-            model=str(body.get("model", "") or ""),
-            effort=str(body.get("effort", "") or ""),
-        )
+        p = self.principal or accounts.main_principal()
+        cwd, cerr = accounts.confine_cwd(session.get("cwd", "") or "", p)
+        if cerr:
+            self._error(403, cerr)
+            return
+        try:
+            job = self._start_job_for_principal(
+                prompt=body["prompt"],
+                cwd=cwd or session.get("cwd", ""),
+                session_id=session_id,
+                permission_mode=body.get("permission_mode", ""),
+                model=str(body.get("model", "") or ""),
+                effort=str(body.get("effort", "") or ""),
+            )
+        except RuntimeError as e:
+            self._error(503, str(e))
+            return
         # 200 (not 202): some mobile HTTP stacks / proxies mishandle 202
         # bodies; clients only need the job_id JSON either way.
         self._send_json({"job_id": job.id}, status=200)
@@ -1540,19 +2451,73 @@ class ApiHandler(BaseHTTPRequestHandler):
         cwd = body.get("cwd", "")
         if not isinstance(cwd, str):
             cwd = ""
-        cwd = os.path.expanduser(cwd.strip())
+        p = self.principal or accounts.main_principal()
+        cwd, cerr = accounts.confine_cwd(cwd, p)
+        if cerr:
+            self._error(403, cerr)
+            return
         # claude requires a project dir; grok falls back to its workspace.
         if not cwd and self.runner.capabilities().get("requires_cwd", True):
-            self._error(400, "'cwd' is required for a new session")
+            if p.is_guest:
+                cwd = p.root
+            else:
+                self._error(400, "'cwd' is required for a new session")
+                return
+        try:
+            job = self._start_job_for_principal(
+                prompt=body["prompt"],
+                cwd=cwd,
+                permission_mode=body.get("permission_mode", ""),
+                model=str(body.get("model", "") or ""),
+                effort=str(body.get("effort", "") or ""),
+            )
+        except RuntimeError as e:
+            self._error(503, str(e))
             return
-        job = self.jobs.start_job(
-            prompt=body["prompt"],
-            cwd=cwd,
-            permission_mode=body.get("permission_mode", ""),
-            model=str(body.get("model", "") or ""),
-            effort=str(body.get("effort", "") or ""),
-        )
         self._send_json({"job_id": job.id}, status=200)
+
+    def _resolve_synthetic_tui_job(self, job_id):
+        """Map synthetic status id `tui-<sidprefix>` → (provider, bundle, session_id).
+
+        These ids are advertised by interactive managers' active_tui_status()
+        so clients can pulse "working" after a real job timed out. They are
+        not JobManager jobs — clients that POST /input against them used to
+        get a hard 404 and drop the prompt.
+        """
+        jid = (job_id or "").strip()
+        if not jid.startswith("tui-"):
+            return None, None, None
+        # Multi-harness: walk each provider's interactive manager.
+        for name, b in (self.bundles or {}).items():
+            runner = getattr(b, "runner", None)
+            mgr_fn = getattr(runner, "_interactive_mgr", None) if runner else None
+            if not callable(mgr_fn):
+                continue
+            try:
+                mgr = mgr_fn()
+                rows = (mgr.active_tui_status() or []) if hasattr(mgr, "active_tui_status") else []
+            except Exception:
+                continue
+            for row in rows:
+                if (row.get("job_id") or "") == jid:
+                    sid = (row.get("new_session_id") or row.get("session_id") or "").strip()
+                    if sid:
+                        return name, b, sid
+        # Single-provider.
+        if not self.bundles and self.runner is not None:
+            mgr_fn = getattr(self.runner, "_interactive_mgr", None)
+            if callable(mgr_fn):
+                try:
+                    mgr = mgr_fn()
+                    rows = (mgr.active_tui_status() or []) if hasattr(mgr, "active_tui_status") else []
+                except Exception:
+                    rows = []
+                for row in rows:
+                    if (row.get("job_id") or "") == jid:
+                        sid = (row.get("new_session_id") or row.get("session_id") or "").strip()
+                        if sid:
+                            return None, None, sid  # caller uses self.runner
+        return None, None, None
 
     def _handle_job_input(self, job_id, body):
         """Type a message into an interactive job's TUI (no daemon queue)."""
@@ -1560,11 +2525,79 @@ class ApiHandler(BaseHTTPRequestHandler):
                 or not body["prompt"].strip():
             self._error(400, "body must be JSON with a non-empty 'prompt'")
             return
-        reason = self.jobs.type_into_tui(job_id, body["prompt"])
+        prompt = body["prompt"]
+        reason = None
+
+        def _accepted(job_obj=None, session_id=""):
+            # Typing into a live session is the human picking that project up,
+            # exactly like starting a turn — so it enrols too.
+            self._focus_enroll(job_obj, session_id)
+            self._send_json({"ok": True}, status=202)
+
+        # Ownership: never type into another account's real job.
+        name, b, job = self._find_job(job_id)
+        if job is not None:
+            if not accounts.job_in_scope(job, self.principal):
+                self._error(404, "job not found")
+                return
+            mgr = b.jobs if b is not None else self.jobs
+            if mgr is not None:
+                reason = mgr.type_into_tui(job_id, prompt)
+                if not reason:
+                    _accepted(job)
+                    return
+        elif self.jobs is not None and self.jobs.get(job_id) is not None:
+            j = self.jobs.get(job_id)
+            if not accounts.job_in_scope(j, self.principal):
+                self._error(404, "job not found")
+                return
+            reason = self.jobs.type_into_tui(job_id, prompt)
+            if not reason:
+                _accepted(j)
+                return
+        # Real job missing / not interactive — try synthetic tui-* → session.
+        if str(job_id).startswith("tui-") or (reason and "not running" in reason):
+            _name, _b, sid = self._resolve_synthetic_tui_job(job_id)
+            if not sid:
+                # Also accept exact synthetic id match from *scoped* status.
+                for row in self._active_status_scoped():
+                    if (row.get("job_id") or "") == job_id:
+                        sid = (row.get("new_session_id") or
+                               row.get("session_id") or "").strip()
+                        break
+            if sid:
+                # Session must be in scope so guest A cannot drive guest B's TUI.
+                sess = None
+                if self.store is not None:
+                    sess = self.store.get_session(sid)
+                if sess is None:
+                    _n, _bb, sess = self._find_session(sid)
+                if sess is not None and not self._session_in_scope(sess):
+                    self._error(404, "job not found")
+                    return
+                runner = self._tui_runner_for_session(sid) or self.runner
+                typer = getattr(runner, "type_into_tui", None) if runner else None
+                if callable(typer):
+                    reason = typer(sid, prompt) or ""
+                    if not reason:
+                        _accepted(session_id=sid)
+                        return
+                keys_fn = getattr(runner, "send_tui_keys", None) if runner else None
+                if callable(keys_fn):
+                    # Fallback: type the line + Enter into the host pane.
+                    text = prompt if prompt.endswith("\n") else (prompt + "\n")
+                    reason = keys_fn(sid, text=text) or ""
+                    if not reason:
+                        _accepted(session_id=sid)
+                        return
         if reason:
-            self._error(409, reason)
+            # 404 for unknown synthetic; 409 for real job that can't accept.
+            if str(job_id).startswith("tui-") and "not running" in (reason or ""):
+                self._error(404, "job not found")
+            else:
+                self._error(409, reason)
             return
-        self._send_json({"ok": True}, status=202)
+        self._error(404, "job not found")
 
     def _tui_runner_for_session(self, session_id: str):
         """Pick the runner that owns a live TUI for session_id (multi or single)."""
@@ -1593,6 +2626,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         clients. Colour clients pass ``?ansi=1`` (or true/yes/on).
         """
         from .live_tui import frame_payload
+        # Never stream another account's pane.
+        sess = None
+        if self.store is not None:
+            sess = self.store.get_session(session_id)
+        if sess is None:
+            _n, _b, sess = self._find_session(session_id)
+        if sess is not None and not self._session_in_scope(sess):
+            self._error(404, "session not found")
+            return
         want_ansi = self._flag(query or {}, "ansi")
         last = None
         # Multi: try every harness so an attached TUI is found regardless of
@@ -1634,6 +2676,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         if (not keys) and not text:
             self._error(400, "provide 'keys' and/or 'text'")
             return
+        sess = None
+        if self.store is not None:
+            sess = self.store.get_session(session_id)
+        if sess is None:
+            _n, _b, sess = self._find_session(session_id)
+        if sess is not None and not self._session_in_scope(sess):
+            self._error(404, "session not found")
+            return
         runner = self._tui_runner_for_session(session_id)
         if runner is None or not hasattr(runner, "send_tui_keys"):
             # Multi probe
@@ -1674,13 +2724,23 @@ class ApiHandler(BaseHTTPRequestHandler):
                 or not body["prompt"].strip():
             self._error(400, "body must be JSON with a non-empty 'prompt'")
             return
+        job = self._require_job(job_id)
+        if job is None:
+            self._error(404, "job not found")
+            return
         queued, reason = self.jobs.enqueue(job_id, body["prompt"])
         if queued is None:
             self._error(409, reason)
             return
+        # Queuing a prompt is a commitment to that project just as much as
+        # sending one right now.
+        self._focus_enroll(job)
         self._send_json({"queued": queued}, status=202)
 
     def _handle_queue_cancel(self, job_id, qid):
+        if self._require_job(job_id) is None:
+            self._error(404, "job not found")
+            return
         result = self.jobs.cancel_queued(job_id, qid)
         if result is None:
             self._error(404, "no such queued prompt")
@@ -1691,6 +2751,9 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _handle_permission_answer(self, job_id, body):
         if not isinstance(body, dict) or not isinstance(body.get("request_id"), str):
             self._error(400, "body must be JSON with 'request_id' and 'allow'")
+            return
+        if self._require_job(job_id) is None:
+            self._error(404, "job not found")
             return
         ok = self.jobs.resolve_permission(
             job_id, body["request_id"], bool(body.get("allow")),
@@ -1707,6 +2770,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         A missing/false 'answers' with cancel=true Escapes the panel."""
         if not isinstance(body, dict) or not isinstance(body.get("request_id"), str):
             self._error(400, "body must be JSON with 'request_id' and 'answers'")
+            return
+        if self._require_job(job_id) is None:
+            self._error(404, "job not found")
             return
         answers = None
         if not body.get("cancel"):
@@ -1756,7 +2822,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(413, "attachment too large (max %d MB)"
                         % (max_bytes // (1024 * 1024)))
             return
-        upload_dir = self.config.upload_path
+        upload_dir = self._scoped_upload_path()
         dest = None
         try:
             upload_dir.mkdir(parents=True, exist_ok=True)
@@ -1840,12 +2906,20 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": True, "path": str(dest), "size": written},
                         status=201)
 
-    def _resolve_drop_file(self, raw_name):
-        """Return (Path, None) or (None, error_message) for a drop filename."""
+    def _resolve_drop_entry(self, raw_name, *, dirs_ok=True):
+        """Return (Path, None) or (None, error) for a drop entry.
+
+        Resolving before the containment check is what keeps a symlink in the
+        drop folder from serving files outside it — the resolved target has to
+        land back inside.
+        """
         name = _safe_drop_name(raw_name)
         if not name:
             return None, "invalid filename"
-        drop_dir = self.config.drop_path.resolve()
+        try:
+            drop_dir = self._scoped_drop_path().resolve()
+        except OSError as e:
+            return None, "drop dir unavailable: %s" % e
         try:
             drop_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -1856,13 +2930,89 @@ class ApiHandler(BaseHTTPRequestHandler):
             candidate.relative_to(drop_dir)
         except ValueError:
             return None, "invalid filename"
+        if candidate.is_dir():
+            if not dirs_ok:
+                return None, "that is a folder"
+            return candidate, None
         if not candidate.is_file():
             return None, "file not found"
         return candidate, None
 
+    def _resolve_drop_file(self, raw_name):
+        """Files only — used by delete, which must never recurse."""
+        return self._resolve_drop_entry(raw_name, dirs_ok=False)
+
+    @staticmethod
+    def _dir_stats(root, cap=20000):
+        """(bytes, file_count, truncated) for a staged folder.
+
+        Bounded: a listing must not stall on a huge tree, so the walk gives up
+        after `cap` files and says so instead of lying with a partial total.
+        """
+        total = files = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                for fn in filenames:
+                    if fn.startswith("."):
+                        continue
+                    files += 1
+                    if files > cap:
+                        return total, cap, True
+                    try:
+                        total += os.path.getsize(os.path.join(dirpath, fn))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total, files, False
+
+    def _zip_drop_dir(self, folder, drop_dir, max_bytes):
+        """Zip a staged folder to a temp file. Returns (path, None) or
+        (None, error). Caller always deletes the path it gets back.
+
+        The archive is built OUTSIDE the drop folder on purpose: writing it
+        inside would make it show up in the next listing (and, on a second
+        download, zip the previous zip).
+        """
+        fd, tmp = tempfile.mkstemp(prefix="agentremoted-drop-", suffix=".zip")
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED,
+                                 allowZip64=True) as zf:
+                # Top-level entry named after the folder, so unzipping yields
+                # one folder rather than spraying files into Downloads.
+                for dirpath, dirnames, filenames in os.walk(folder):
+                    dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                    for fn in filenames:
+                        if fn.startswith("."):
+                            continue
+                        full = os.path.join(dirpath, fn)
+                        real = os.path.realpath(full)
+                        # Same containment rule as _resolve_drop_entry: a
+                        # symlink may not carry files out of the drop folder.
+                        if os.path.commonpath([real, str(drop_dir)]) != str(drop_dir):
+                            continue
+                        if not os.path.isfile(real):
+                            continue
+                        rel = os.path.relpath(full, folder)
+                        try:
+                            zf.write(real, os.path.join(folder.name, rel))
+                        except OSError:
+                            continue
+                        if os.path.getsize(tmp) > max_bytes:
+                            return None, ("folder too large once zipped "
+                                          "(max %d MB)"
+                                          % (max_bytes // (1024 * 1024)))
+                if not zf.namelist():
+                    zf.writestr(folder.name + "/", b"")
+        except (OSError, zipfile.BadZipFile, RuntimeError) as e:
+            return None, "zip failed: %s" % e
+        return tmp, None
+
     def _handle_drop_list(self):
         """List files the agent (or user) put in the host→phone drop folder."""
-        drop_dir = self.config.drop_path
+        drop_dir = self._scoped_drop_path()
         try:
             drop_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -1871,17 +3021,31 @@ class ApiHandler(BaseHTTPRequestHandler):
         files = []
         try:
             for entry in sorted(drop_dir.iterdir(), key=lambda p: p.name.lower()):
-                if not entry.is_file() or entry.name.startswith("."):
+                if entry.name.startswith("."):
+                    continue
+                is_dir = entry.is_dir()
+                if not is_dir and not entry.is_file():
                     continue
                 try:
                     st = entry.stat()
                 except OSError:
                     continue
-                files.append({
+                row = {
                     "name": entry.name,
                     "size": int(st.st_size),
                     "mtime": int(st.st_mtime),
-                })
+                    # "file" is stated explicitly so a client never has to
+                    # infer it; older clients ignore the key and keep working.
+                    "type": "dir" if is_dir else "file",
+                }
+                if is_dir:
+                    total, count, partial = self._dir_stats(entry)
+                    # size = what the folder weighs, so the row reads like a
+                    # file row; the zip that downloads it will be smaller.
+                    row["size"] = int(total)
+                    row["entries"] = int(count)
+                    row["partial"] = bool(partial)
+                files.append(row)
         except OSError as e:
             self._error(500, "could not list drop: %s" % e)
             return
@@ -1891,33 +3055,60 @@ class ApiHandler(BaseHTTPRequestHandler):
         })
 
     def _handle_drop_download(self, raw_name):
-        """Stream one drop file as raw bytes to the phone."""
-        path, err = self._resolve_drop_file(raw_name)
+        """Stream one drop entry as raw bytes to the phone.
+
+        A folder is zipped to a temp file first (outside the drop folder) and
+        the archive is deleted as soon as it is on the wire, so staging a
+        folder never leaves a second copy on the host.
+        """
+        path, err = self._resolve_drop_entry(raw_name)
         if path is None:
             status = 404 if err == "file not found" else 400
             self._error(status, err)
             return
         max_bytes = int(getattr(self.config, "max_drop_mb", 64) or 64) * 1024 * 1024
+        tmp_zip = None
+        out_name = path.name
+        if path.is_dir():
+            try:
+                drop_dir = self._scoped_drop_path().resolve()
+            except OSError as e:
+                self._error(500, "drop dir unavailable: %s" % e)
+                return
+            tmp_zip, zerr = self._zip_drop_dir(path, drop_dir, max_bytes)
+            if tmp_zip is None:
+                self._error(413 if "too large" in (zerr or "") else 500, zerr)
+                return
+            out_name = path.name + ".zip"
         try:
-            size = path.stat().st_size
-        except OSError as e:
-            self._error(500, "stat failed: %s" % e)
-            return
-        if size > max_bytes:
-            self._error(413, "file too large (max %d MB)"
-                        % (max_bytes // (1024 * 1024)))
-            return
-        try:
-            # Read fully: BB10's QNAM is happier with Content-Length + one
-            # write than chunked transfer of an unknown length.
-            data = path.read_bytes()
-        except OSError as e:
-            self._error(500, "read failed: %s" % e)
-            return
+            read_from = tmp_zip if tmp_zip else str(path)
+            try:
+                size = os.path.getsize(read_from)
+            except OSError as e:
+                self._error(500, "stat failed: %s" % e)
+                return
+            if size > max_bytes:
+                self._error(413, "file too large (max %d MB)"
+                            % (max_bytes // (1024 * 1024)))
+                return
+            try:
+                # Read fully: BB10's QNAM is happier with Content-Length + one
+                # write than chunked transfer of an unknown length.
+                with open(read_from, "rb") as fh:
+                    data = fh.read()
+            except OSError as e:
+                self._error(500, "read failed: %s" % e)
+                return
+        finally:
+            if tmp_zip:
+                try:
+                    os.unlink(tmp_zip)
+                except OSError:
+                    pass
         # ASCII-safe Content-Disposition filename; the real name is in the
         # URL path the client already knows.
         safe_ascii = "".join(
-            ch if (ch.isalnum() or ch in "-_.") else "_" for ch in path.name
+            ch if (ch.isalnum() or ch in "-_.") else "_" for ch in out_name
         ) or "file"
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
@@ -1925,7 +3116,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition",
                          'attachment; filename="%s"' % safe_ascii)
         self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Drop-Name", path.name)
+        # out_name, not path.name: a folder arrives as <folder>.zip and the
+        # client saves it under the name it actually got.
+        self.send_header("X-Drop-Name", out_name)
         self.send_header("X-Drop-Size", str(len(data)))
         # Browser client downloads these cross-origin.
         self.send_header("Access-Control-Expose-Headers", "X-Drop-Name, X-Drop-Size")
@@ -1934,8 +3127,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _handle_drop_delete(self, raw_name):
+        # Files only. Recursive delete over HTTP is a far bigger gun than
+        # "tidy up a staged file", so a folder is refused rather than emptied.
         path, err = self._resolve_drop_file(raw_name)
         if path is None:
+            if err == "that is a folder":
+                self._error(400, "cannot delete a folder from a client — "
+                                 "remove it on the host")
+                return
             status = 404 if err == "file not found" else 400
             self._error(status, err)
             return
@@ -1990,6 +3189,8 @@ def make_server(config, token, bundles) -> ThreadingHTTPServer:
         "config": config,
         "token": token,
         "bundles": bundles,
+        # One focus list per daemon, shared by every harness and every client.
+        "focus": focus_store.Focus(),
     })
     server = ThreadingHTTPServer((config.bind, int(config.port)), handler)
     cert = str(getattr(config, "tls_cert", "") or "")

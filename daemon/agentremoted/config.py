@@ -10,12 +10,15 @@ process, every harness). A lone ``"provider"`` string still works as a
 fallback when ``providers`` is empty.
 """
 
+import hashlib
 import json
 import logging
 import os
 import platform
 import secrets
 import stat
+import subprocess
+import threading
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -31,6 +34,121 @@ def _resolve_config_dir() -> Path:
 
 
 CONFIG_DIR = _resolve_config_dir()
+
+
+def tmux_socket() -> str:
+    """`tmux -L` socket for this daemon's interactive TUI fleet.
+
+    tmux's default socket is keyed by UID alone, so *any* process on the
+    machine sees every session — including the reaper in each interactive
+    manager's ``_adopt_or_reap``, which kills the sessions its own
+    ``tuis.json`` does not list. A test points AGENTREMOTED_HOME at a temp
+    dir, so its registry is empty while its tmux view is the real one: it
+    reaped every live TUI, killing the very host that was running it
+    ("claude TUI exited mid-turn" mid-tool-call).
+
+    Naming the socket after CONFIG_DIR ties the fleet to the registry that
+    describes it: a different AGENTREMOTED_HOME gets a different, empty
+    server it cannot see past. It also keeps the daemon's panes out of the
+    user's own ``tmux ls``.
+    """
+    digest = hashlib.sha1(
+        os.path.realpath(str(CONFIG_DIR)).encode("utf-8")).hexdigest()[:8]
+    return "agentremoted-%s" % digest
+
+
+_TMUX_HELPER = """#!/bin/sh
+# agentremoted fleet tmux — GENERATED, rewritten on every daemon start.
+#
+# The daemon's TUIs run on their own tmux socket, named after this config dir
+# (see config.tmux_socket), so a plain `tmux ls` shows nothing. This wrapper
+# carries the -L for you.
+#
+#   %(self)s                 list the fleet
+#   %(self)s peek <name>     print a pane, read-only, no attach  <- safest
+#   %(self)s attach <name>   attach without resizing the TUI
+#   %(self)s <any tmux command ...>
+#
+# Why "attach" is special: attaching a client makes tmux resize the window to
+# YOUR terminal. The daemon launches panes at 220x50, and a smaller terminal
+# reflows the running CLI's screen — which is also what the daemon scrapes for
+# busy/ready state. So attach pins the window size first, and you see a
+# viewport onto the big pane instead of squashing it.
+SOCK=%(sock)s
+TMUX=%(tmux)s
+
+case "${1:-ls}" in
+  ls|list|"")
+    exec "$TMUX" -L "$SOCK" ls
+    ;;
+  peek)
+    [ -n "$2" ] || { echo "usage: $0 peek <session>" >&2; exit 2; }
+    exec "$TMUX" -L "$SOCK" capture-pane -p -e -t "$2"
+    ;;
+  attach)
+    [ -n "$2" ] || { echo "usage: $0 attach <session>" >&2; exit 2; }
+    "$TMUX" -L "$SOCK" set-option -t "$2" window-size manual >/dev/null 2>&1
+    echo "attached read-only; detach with ctrl-b d" >&2
+    exec "$TMUX" -L "$SOCK" attach-session -r -t "$2"
+    ;;
+  *)
+    exec "$TMUX" -L "$SOCK" "$@"
+    ;;
+esac
+"""
+
+
+def write_tmux_helper() -> str:
+    """Drop a `tmux` wrapper beside the config so the socket name — a hash
+    nobody should have to memorise — never has to be typed.
+
+    Rewritten at every start so it always matches the live socket and the
+    tmux currently on PATH.
+    """
+    import shutil
+
+    path = CONFIG_DIR / "tmux"
+    body = _TMUX_HELPER % {
+        "self": path,
+        "sock": tmux_socket(),
+        "tmux": shutil.which("tmux") or "/opt/homebrew/bin/tmux",
+    }
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        os.chmod(str(path), 0o755)
+    except OSError as e:
+        log.warning("could not write tmux helper %s: %s", path, e)
+        return ""
+    return str(path)
+
+
+_server_lock = threading.Lock()
+
+
+def ensure_tmux_server(tmux_bin: str) -> None:
+    """Bring the fleet's tmux server up before anyone runs `new-session`.
+
+    Two turns starting at once (a phone continue and a web continue land
+    milliseconds apart) each ran `new-session` against a socket with no
+    server yet, so both tmux clients raced to *create* one. The loser's
+    server is torn down — and it takes every session on that socket with
+    it, killing unrelated turns mid-flight with nothing in the daemon log,
+    because the daemon never issued a kill.
+
+    `start-server` is idempotent and returns immediately, so holding a lock
+    across it costs nothing and leaves exactly one creator. All three
+    harnesses share the socket, hence a module-level lock rather than one
+    per manager.
+    """
+    with _server_lock:
+        try:
+            subprocess.run([tmux_bin, "-L", tmux_socket(), "start-server"],
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass  # new-session will surface the real error
+
 
 DEFAULTS = {
     # Fallback when "providers" is empty / missing.

@@ -96,12 +96,23 @@ class JobWatcher(
         _state.value = JobState()
     }
 
-    /** After the user answers/cancels a question, drop the sheet immediately. */
-    fun clearPendingQuestion() {
-        _state.value.pendingQuestion?.requestId?.takeIf { it.isNotBlank() }
+    /**
+     * After the user **answers or cancels** on the daemon, drop the sheet and
+     * ignore lagging polls for that request_id. Do **not** call this when the
+     * user only dismisses the sheet — that must keep `pendingQuestion` so the
+     * banner can reopen it (web parity).
+     */
+    fun clearPendingQuestion(suppressPolls: Boolean = true) {
+        _state.value.pendingQuestion?.requestId?.takeIf { it.isNotBlank() && suppressPolls }
             ?.let { dismissedQuestionIds += it }
         if (_state.value.pendingQuestion == null) return
         _state.value = _state.value.copy(pendingQuestion = null)
+    }
+
+    /** Un-suppress a request_id so a still-pending daemon ask can surface again. */
+    fun restorePendingQuestion(requestId: String) {
+        if (requestId.isBlank()) return
+        dismissedQuestionIds.remove(requestId)
     }
 
     fun clearPendingPermission() {

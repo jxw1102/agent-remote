@@ -154,6 +154,12 @@ const PAGE = 60;
 const POLL_IDLE_MS = 6000;   // stream healthy: timer is only a safety net
 const POLL_ACTIVE_MS = 1500; // no usable stream: this is the real rate
 const MAX_UPLOAD_BYTES = 16 * 1024 * 1024; // matches daemon max_upload_mb default
+// Phone photos are often 1.5–4 MB; the slow path is usually CF tunnel +
+// cellular, not the daemon (localhost 4 MB lands in ~3 ms). Downscale +
+// re-encode before POST so a typical shot is a few hundred KB.
+const IMAGE_UPLOAD_MAX_EDGE = 1920;
+const IMAGE_UPLOAD_JPEG_QUALITY = 0.82;
+const IMAGE_UPLOAD_COMPRESS_MIN = 400 * 1024; // leave small screenshots alone
 
 /**
  * crypto.randomUUID exists only in a secure context (https, localhost,
@@ -231,6 +237,7 @@ const state = {
   profiles: [],          // [{id, name, baseUrl, token, …, model, effort, modelByHarness, effortByHarness}]
   settings: {},
   rows: [],              // merged session list
+  rowsFocus: false,      // true when `rows` came from a Focus fetch
   feeds: {},             // profileId -> {error, count}
   loading: false,
   query: "",
@@ -253,7 +260,8 @@ const state = {
   askedQuestion: null,   // request_id already auto-opened (reopen via banner)
   askedPermission: null, // request_id already auto-opened (reopen via banner)
   answeredQuestions: new Set(), // request_ids the user already submitted
-  gen: 0,                // fan-out generation guard
+  gen: 0,                // fan-out generation guard (session list / search)
+  openGen: 0,            // transcript generation — drops stale loadTail/poll paint
 };
 
 const profileById = (id) => state.profiles.find((p) => p.id === id) || null;
@@ -455,10 +463,34 @@ async function chimeJobEnded(profileId, jobId, meta = {}) {
     // empty/unknown status are treated as success.
     if (st === "error") playChime("error");
     else playChime("done");
+    // The stream cannot say failed-vs-finished, so let the daemon re-decide
+    // now that the job is over. Without this the tag needed a manual refresh.
+    refreshSessions();
   } catch {
     // 404 after prune of a finished job → success cue, not failure.
     playChime("done");
+    refreshSessions();
   }
+}
+
+// ---- process view -------------------------------------------------------
+//
+// The default transcript is the result: what was asked, what was answered.
+// Process view additionally asks the daemon for `steps` — the tool calls,
+// their output and the thinking that happened between those messages.
+// Per session and off by default, so nobody who liked the old view is moved.
+
+function processViewOn(sessionId) {
+  const map = state.settings.processView || {};
+  return !!map[sessionId || (state.open && state.open.sessionId) || ""];
+}
+
+function setProcessView(sessionId, on) {
+  const map = state.settings.processView || {};
+  if (on) map[sessionId] = true;
+  else delete map[sessionId];
+  state.settings.processView = map;
+  store.save();
 }
 
 function setSoundCues(on) {
@@ -711,6 +743,9 @@ async function pingProfile(profile) {
     profile.multi = !!ping.multi;
     profile.providers = Array.isArray(ping.providers) ? ping.providers : [];
     profile.providerDetails = ping.provider_details || {};
+    // Focus list (agentremoted ≥ 2.6): absent on older daemons, which then
+    // contribute nothing to Focus mode rather than dumping every session in.
+    profile.focus = !!ping.focus;
     store.save();
     return true;
   } catch {
@@ -762,10 +797,18 @@ const modelsOf = (profile, harness = null) => {
     return profile.providerDetails[harness].models || [];
   return (profile && profile.models) || [];
 };
+/** Always allow these even if an older daemon omits them from /api/ping. */
+const ALWAYS_SLASH = ["/rewind", "/goal"];
 const slashOf = (profile, harness = null) => {
+  let list = [];
   if (harness && profile && profile.providerDetails && profile.providerDetails[harness])
-    return profile.providerDetails[harness].slash_commands || [];
-  return (profile && profile.slashCommands) || [];
+    list = profile.providerDetails[harness].slash_commands || [];
+  else
+    list = (profile && profile.slashCommands) || [];
+  // De-dupe while keeping daemon order first.
+  const seen = new Set(list);
+  for (const c of ALWAYS_SLASH) if (!seen.has(c)) { list = list.concat([c]); seen.add(c); }
+  return list;
 };
 const effortsOf = (profile, harness = null) => {
   if (harness && profile && profile.providerDetails && profile.providerDetails[harness])
@@ -912,7 +955,10 @@ async function refreshSessions() {
   }
 
   const query = state.query.trim();
-  const all = state.settings.showAll ? "&all=1" : "";
+  // Agent-spawned sessions are always filtered out: subagent transcripts and
+  // shells that never got a turn are not work you started, and no setting
+  // brings them back. `?all=1` still exists on the daemon for debugging.
+  const all = "";
 
   // Search: progressive NDJSON stream — paint each hit as it arrives.
   if (query) {
@@ -986,7 +1032,19 @@ async function refreshSessions() {
 
   const collected = [];
   await Promise.all(targets.map(async (profile) => {
-    const path = `/api/sessions?limit=40${all}`;
+    // Focus mode asks the daemon for the rows directly rather than filtering
+    // /api/sessions here: a project you have not touched in weeks falls
+    // outside the recency window, and that is exactly the row you must not
+    // lose. /api/focus is membership-scoped, so it cannot be truncated away.
+    if (focusMode() && !focusCapable(profile)) {
+      // Contributing its whole session list instead would silently fill the
+      // list with sessions the human never enrolled.
+      state.feeds[profile.id] = { count: 0, note: "no focus support" };
+      return;
+    }
+    const path = focusMode()
+      ? "/api/focus"
+      : `/api/sessions?limit=40${all}`;
     try {
       const data = await call(profile, path, { timeout: 45000 });
       const list = data.sessions || [];
@@ -1006,9 +1064,42 @@ async function refreshSessions() {
 
   if (gen !== state.gen) return; // a newer refresh already owns the list
   state.rows = finalizeSessionRows(collected);
+  // Which mode these rows came from. Without this the Focus chip briefly
+  // showed the All list's count (e.g. "Focus · 120") between the click and
+  // the fetch landing.
+  state.rowsFocus = focusMode();
+  syncOpenFocusFlag();
   state.loading = false;
   renderSessions();
   renderStatus();
+}
+
+/**
+ * Adopt the freshly fetched focus flag for the open session, so the row
+ * button stops lying after the card changed on another device.
+ */
+function syncOpenFocusFlag() {
+  const open = state.open;
+  if (!open) return;
+  const row = state.rows.find((r) => r.session && r.session.id === open.sessionId);
+  if (!row || typeof row.session.focus !== "boolean") return;
+  open.session = { ...open.session, focus: row.session.focus };
+}
+
+/**
+ * Prefer the better of two rows for the same session id (running > richer meta).
+ */
+function preferSessionRow(a, b) {
+  const score = (r) => {
+    let n = 0;
+    if (r.session && r.session.running) n += 100;
+    if (r.session && r.session.job_id) n += 10;
+    if (r.session && (r.session.title || r.session.last_text)) n += 5;
+    if (r.session && r.session.cwd) n += 2;
+    n += (r.sortKey || 0) / 1e15; // tiny recency tie-break
+    return n;
+  };
+  return score(a) >= score(b) ? a : b;
 }
 
 /**
@@ -1016,11 +1107,22 @@ async function refreshSessions() {
  * Injects a row when the list API omitted them (round-robin starvation,
  * stale last_active, multi-host flood) so the session you're in never
  * "vanishes" from the left column.
+ *
+ * Dedupe is by session **id** (not profileId/id): two web profiles pointed at
+ * the same daemon used to list every session twice.
  */
 function finalizeSessionRows(collected) {
-  const rows = collected.slice();
-  const seen = new Set(rows.map((r) => `${r.profileId}/${r.session.id}`));
+  const byId = new Map(); // sessionId -> row
   const now = Date.now();
+
+  const put = (row) => {
+    const sid = (row.session && row.session.id) || "";
+    if (!sid) return;
+    const prev = byId.get(sid);
+    byId.set(sid, prev ? preferSessionRow(prev, row) : row);
+  };
+
+  collected.forEach(put);
 
   // Inject sessions known from the live status stream but missing in /api/sessions.
   for (const [pid, jobs] of Object.entries(state.active || {})) {
@@ -1028,11 +1130,20 @@ function finalizeSessionRows(collected) {
     for (const job of jobs || []) {
       const sid = (job.new_session_id || job.session_id || "").trim();
       if (!sid) continue;
-      const key = `${pid}/${sid}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
+      if (byId.has(sid)) {
+        // Mark existing row as running without cloning a second entry.
+        const row = byId.get(sid);
+        row.session = { ...row.session, running: true,
+          job_id: job.job_id || job.id || row.session.job_id || "" };
+        row.sortKey = Math.max(row.sortKey || 0, now);
+        continue;
+      }
+      // Focus mode: membership is the daemon's call, so a running session that
+      // is not a card must not be conjured into the list. Upgrading rows we
+      // already have (above) is fine; inventing new ones is not.
+      if (focusMode()) continue;
       const prompt = String(job.prompt || "").replace(/\s+/g, " ").trim();
-      rows.push({
+      put({
         profileId: pid,
         profileName: (profile && (profile.name || profile.baseUrl)) || "Daemon",
         provider: job.provider || (profile && profile.provider) || "",
@@ -1051,31 +1162,37 @@ function finalizeSessionRows(collected) {
   }
 
   // Inject the open session if still missing (idle open, or list starved it).
-  if (state.open && state.open.sessionId && state.open.profileId) {
-    const key = `${state.open.profileId}/${state.open.sessionId}`;
-    if (!seen.has(key)) {
+  // Not in Focus mode: reading a session you have marked done must not quietly
+  // put it back on the list.
+  if (state.open && state.open.sessionId && state.open.profileId
+      && !focusMode()) {
+    const sid = state.open.sessionId;
+    if (!byId.has(sid)) {
       const profile = profileById(state.open.profileId);
-      const s = state.open.session || { id: state.open.sessionId };
-      rows.push({
+      const s = state.open.session || { id: sid };
+      put({
         profileId: state.open.profileId,
         profileName: (profile && (profile.name || profile.baseUrl)) || "Daemon",
         provider: (s.provider || state.open.provider
           || (profile && profile.provider) || ""),
-        session: { ...s, id: state.open.sessionId },
+        session: { ...s, id: sid },
         sortKey: epochOf(s.last_active) || now,
       });
     }
   }
 
+  const rows = [...byId.values()];
   const working = workingKeys();
   const openKey = state.open
     ? `${state.open.profileId}/${state.open.sessionId}` : "";
+  const openSid = (state.open && state.open.sessionId) || "";
   for (const row of rows) {
     const key = `${row.profileId}/${row.session.id}`;
     let sk = row.sortKey || epochOf(row.session.last_active)
       || epochOf(row.session.started) || 0;
     // Pin working / open / daemon-flagged running to "now" so they stay first.
-    if (row.session.running || working.has(key) || key === openKey) {
+    if (row.session.running || working.has(key)
+        || row.session.id === openSid || key === openKey) {
       sk = Math.max(sk, now);
     }
     row.sortKey = sk;
@@ -1161,6 +1278,92 @@ function visibleRows() {
   return state.rows.filter((r) => !state.filter || r.profileId === state.filter);
 }
 
+// ------------------------------------------------------------------- focus
+// The focus list is a *filter* over this same session list: rows keep their
+// layout and gain one state tag. Membership lives on the daemon (so every
+// client agrees), and the daemon derives the tag from live job state.
+
+const FOCUS_STATES = ["needs_answer", "failed", "working", "turn_finished"];
+const FOCUS_LABELS = {
+  needs_answer: "needs answer",
+  failed: "failed",
+  working: "working",
+  turn_finished: "turn finished",
+};
+// Why each tag is showing, for the row's tooltip.
+const FOCUS_HINTS = {
+  needs_answer: "Blocked on you — a question, a plan to approve, or a tool permission",
+  failed: "The last turn ended in an error",
+  working: "The agent is running",
+  turn_finished: "The turn ended; it is waiting on your next instruction",
+};
+
+/**
+ * The focus tag as of *now*, not as of the last list fetch.
+ *
+ * The SSE stream carries only in-flight jobs, so it can prove two of the four
+ * states outright and refute a third:
+ *
+ *   - a job in the stream and blocked  -> needs_answer
+ *   - a job in the stream              -> working
+ *   - NO job in the stream             -> whatever the row says, it is not
+ *                                         running any more
+ *
+ * It cannot tell `failed` from `turn_finished` (both are absent from the
+ * stream), so those keep the daemon's value; chimeJobEnded refreshes the list
+ * when a turn ends, which is what promotes a finished turn to `failed`.
+ */
+function liveFocusState(session, key, working, blocked) {
+  if (blocked.has(key)) return "needs_answer";
+  if (working.has(key)) return "working";
+  const said = String((session && session.focus_state) || "");
+  // Stale "still running" from the fetch: the stream has moved on.
+  if (said === "working" || said === "needs_answer") return "turn_finished";
+  return said;
+}
+
+const focusMode = () => !!state.settings.focusMode;
+const focusCapable = (profile) => profile && profile.focus !== false;
+
+function setFocusMode(on) {
+  state.settings.focusMode = !!on;
+  store.save();
+  renderFilters();
+  refreshSessions();
+}
+
+/**
+ * Tell the daemon this session has been looked at.
+ *
+ * Purely cosmetic: it dims a finished turn's tag, it does not change any
+ * state. Best-effort — an older daemon 404s and the tag simply stays lit.
+ */
+async function markSeen(profile, sessionId) {
+  if (!profile || !sessionId || !focusCapable(profile)) return;
+  try {
+    await focusCall(profile, `/api/focus/${encodeURIComponent(sessionId)}/seen`);
+  } catch { return; /* older daemon, or not in focus — leave the tag lit */ }
+  // The cursor moved on the daemon, so dim the tag now instead of making the
+  // reader refresh to see their own click take effect. `focus_seen_local`
+  // also overrides the "was working" clause below, which would otherwise keep
+  // the row lit until the next list fetch. It lives on the row object, so the
+  // next fetch replaces it and the server's value rules again.
+  let touched = false;
+  (state.rows || []).forEach((row) => {
+    if (row.profileId !== profile.id) return;
+    if (!row.session || row.session.id !== sessionId) return;
+    row.session.focus_unread = false;
+    row.session.focus_seen_local = true;
+    touched = true;
+  });
+  if (touched) renderSessions();
+}
+
+/** POST a focus/title action to the daemon that owns the session. */
+async function focusCall(profile, path, body) {
+  return call(profile, path, { method: "POST", body: body || {} });
+}
+
 /** List title: never echo a bare attachment filename (transcript shows the chip). */
 function listTitle(session) {
   const t = String((session && session.title) || "").trim();
@@ -1239,12 +1442,26 @@ function blockedKeys() {
 }
 
 function renderStatus() {
+  renderFilters();   // the Focus chip carries the row count
   const box = $("list-status");
   box.textContent = "";
   const problems = Object.entries(state.feeds).filter(([, f]) => f.error);
   if (state.loading) {
     box.appendChild(el("span", "spinner"));
     box.appendChild(document.createTextNode(" Loading…"));
+  } else if (focusMode()) {
+    // Focus mode counts by state — "3 sessions" says nothing about what to do
+    // next, whereas "1 needs you" does.
+    const rows = visibleRows();
+    const tally = {};
+    rows.forEach((r) => {
+      const s = r.session.focus_state;
+      if (s) tally[s] = (tally[s] || 0) + 1;
+    });
+    const bits = FOCUS_STATES.filter((s) => tally[s])
+      .map((s) => `${tally[s]} ${FOCUS_LABELS[s]}`);
+    box.appendChild(document.createTextNode(
+      rows.length ? bits.join(" · ") : "Nothing in focus"));
   } else {
     const working = workingKeys().size;
     const bits = [`${visibleRows().length} sessions`];
@@ -1259,9 +1476,36 @@ function renderStatus() {
   });
 }
 
+/**
+ * One chip row: the Focus toggle, then the per-daemon filters.
+ *
+ * Focus rides in the same row rather than getting its own control — it is one
+ * more way to narrow the same list, and a full-width switch above the row made
+ * it look like a different screen.
+ */
 function renderFilters() {
   const box = $("filters");
   box.textContent = "";
+
+  // Focus toggle. Always present (a single-daemon setup still wants it), and
+  // the count only shows while Focus is on, where it means "rows below".
+  if (state.profiles.some((p) => focusCapable(p))) {
+    const n = (focusMode() && state.rowsFocus && !state.loading)
+      ? visibleRows().length : 0;
+    const chip = el("button", "chip chip-focus");
+    chip.type = "button";
+    chip.setAttribute("aria-pressed", String(focusMode()));
+    chip.title = focusMode()
+      ? "Showing only the projects you are carrying"
+      : "Show only the projects you are carrying";
+    chip.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none"'
+      + ' stroke="currentColor" stroke-width="2.2" stroke-linecap="round"'
+      + ' stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg>';
+    chip.appendChild(document.createTextNode(n ? `Focus · ${n}` : "Focus"));
+    chip.addEventListener("click", () => setFocusMode(!focusMode()));
+    box.appendChild(chip);
+  }
+
   if (state.profiles.length < 2) return;
   const mk = (label, id, accent) => {
     const b = el("button", "chip", label);
@@ -1336,6 +1580,30 @@ function renderSessions() {
       btn.setAttribute("aria-current", "true");
     }
 
+    // Done, revealed on hover (CSS) so idle rows stay clean. Only on rows that
+    // are actually in Focus — there is no "Track" counterpart because joining
+    // is automatic: acting on a session through the daemon enrols it. Nested
+    // inside the row button like .session-id-tag, and it stops propagation so
+    // the click never also opens the session.
+    if (row.session.focus === true && focusCapable(profileById(row.profileId))) {
+      const done = el("button", "row-done");
+      done.type = "button";
+      // Circled check, drawn inline: an icon floats over the row content
+      // without needing a text slot the layout would have to reserve.
+      done.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none"'
+        + ' stroke="currentColor" stroke-width="1.9" stroke-linecap="round"'
+        + ' stroke-linejoin="round"><circle cx="12" cy="12" r="9"/>'
+        + '<path d="M8 12.5l2.5 2.5L16 9.5"/></svg>';
+      done.title = "Done — take it off Focus";
+      done.setAttribute("aria-label", done.title);
+      done.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setRowFocus(row, false);
+      });
+      btn.appendChild(done);
+    }
+
     const top = el("div", "row-top");
     // Working = breathing dot; permission/question = blinking "?" in that spot.
     if (blocked.has(key)) {
@@ -1365,6 +1633,23 @@ function renderSessions() {
     if (folder) meta.appendChild(el("span", "tag", folder));
     if (row.session.git_branch) meta.appendChild(el("span", "tag", "⑂ " + row.session.git_branch));
     if (blocked.has(key)) meta.appendChild(el("span", "tag waiting", "waiting for you"));
+    // Focus state tag. Same row layout as any other session — one more chip.
+    // Focus mode only: in All mode it is noise on rows the human never
+    // enrolled, and it duplicates the working dot. Suppressed when the row
+    // already says "waiting for you", the same fact in stronger words.
+    const bstate = liveFocusState(row.session, key, working, blocked);
+    if (focusMode() && bstate && FOCUS_LABELS[bstate] && !blocked.has(key)) {
+      const cls = `tag focus focus-${bstate.replace(/_/g, "-")}`;
+      const unread = bstate === "turn_finished"
+        && !row.session.focus_seen_local
+        && (row.session.focus_unread !== false
+            || row.session.focus_state === "working");
+      const tag = el("span", unread ? `${cls} focus-unread` : cls,
+                     FOCUS_LABELS[bstate]);
+      tag.title = (FOCUS_HINTS[bstate] || "")
+        + (unread ? " — you have not opened it since" : "");
+      meta.appendChild(tag);
+    }
     if (row.session.id) {
       // Full id when space allows (CSS ellipsis); click copies without opening.
       const idTag = el("button", "tag session-id-tag", row.session.id);
@@ -1426,9 +1711,14 @@ function applyAccent(provider) {
 async function openSession(row) {
   stopJobWatch();
   closeLiveTui();
+  // Bump openGen BEFORE any await so an in-flight loadTail/pollJob from the
+  // previous session can never paint into this transcript (two running jobs
+  // used to cross-wire session A text into session B).
+  const gen = ++state.openGen;
+  const sessionId = row.session.id;
   state.open = {
     profileId: row.profileId,
-    sessionId: row.session.id,
+    sessionId,
     session: row.session,
     profileName: row.profileName,
   };
@@ -1446,19 +1736,173 @@ async function openSession(row) {
   renderChatSub();
   updateLiveTuiButton();
   renderSessions();
+  // Opening it is the only honest signal the output was read — dims the tag.
+  markSeen(profileById(row.profileId), sessionId);
 
   $("transcript").innerHTML = "";
   const loading = el("div", "empty");
   loading.appendChild(el("span", "spinner"));
   $("transcript").appendChild(loading);
 
-  await loadTail();
+  await loadTail(gen);
+  if (!isOpenStill(gen, row.profileId, sessionId)) return;
   // Adopt whatever is already running for this session (started here, from
-  // the desktop TUI, or on another device).
-  const running = (state.active[row.profileId] || []).find(
-    (j) => j.session_id === row.session.id || j.new_session_id === row.session.id);
-  if (running) attachJob(running.job_id);
+  // the desktop TUI, or on another device). Prefer a job blocked on the human
+  // so Answer/Respond can reappear after a dismissed modal.
+  const frames = state.active[row.profileId] || [];
+  const match = (j) => j.session_id === sessionId || j.new_session_id === sessionId;
+  const blocked = frames.find((j) => match(j) && !isSyntheticJobId(j.job_id)
+    && (j.pending_question || j.pending_permission));
+  const running = frames.find((j) => match(j) && !isSyntheticJobId(j.job_id));
+  if (blocked || running) attachJob((blocked || running).job_id, sessionId);
   updateLiveTuiButton();
+}
+
+/**
+ * Take one row out of Focus.
+ *
+ * The gesture lives on the row rather than the chat header: you decide a
+ * project is finished while scanning the list, not after opening it, and a
+ * header button could only ever act on the one session already open.
+ *
+ * There is no inverse here — a session rejoins Focus by being worked on, which
+ * the daemon notices for itself.
+ */
+async function setRowFocus(row, member) {
+  const profile = profileById(row.profileId);
+  if (!focusCapable(profile) || member) return;
+  const key = encodeURIComponent(row.session.id);
+  try {
+    const res = await focusCall(profile, `/api/focus/${key}/done`);
+    const now = !!res.focus;
+    row.session = { ...row.session, focus: now };
+    if (state.open && state.open.sessionId === row.session.id) {
+      state.open.session = { ...state.open.session, focus: now };
+    }
+    refreshSessions();
+  } catch (e) {
+    toast(`Focus: ${e.message}`);
+  }
+}
+
+/**
+ * Rename the open session: type a title, or ask the daemon to derive one from
+ * the transcript. Default names are often unrecognisable across a dozen
+ * parallel projects, which is the whole reason this exists.
+ */
+function openRename() {
+  const open = state.open;
+  if (!open) return;
+  const profile = profileById(open.profileId);
+  if (!focusCapable(profile)) {
+    toast("This daemon is too old to rename sessions");
+    return;
+  }
+  const key = encodeURIComponent(open.sessionId);
+  let input;
+  let note;
+
+  const apply = (title) => {
+    open.session = { ...open.session, title };
+    $("chat-title").textContent = title || "Session";
+    // Keep the list row in step without a full refetch.
+    const row = state.rows.find((r) => r.session && r.session.id === open.sessionId);
+    if (row) row.session = { ...row.session, title };
+    renderSessions();
+  };
+
+  const { foot } = modal({
+    title: "Rename session",
+    build(body) {
+      const f = el("div", "field");
+      f.appendChild(el("label", null, "Title"));
+      input = el("input");
+      input.type = "text";
+      input.value = String((open.session && open.session.title) || "");
+      input.placeholder = "e.g. BB10 pager chime";
+      input.maxLength = 120;
+      f.appendChild(input);
+      note = el("div", "help",
+        "Leave it empty to go back to the name the agent derived.");
+      f.appendChild(note);
+      body.appendChild(f);
+      setTimeout(() => { input.focus(); input.select(); }, 0);
+    },
+    actions: [
+      {
+        label: "Regenerate",
+        close: false,
+        async run() {
+          note.textContent = "Asking the model for a title…";
+          try {
+            const res = await call(profile,
+              `/api/sessions/${key}/title/regenerate`,
+              { method: "POST", body: {}, timeout: 45000 });
+            input.value = res.title || "";
+            note.textContent = "Generated from the transcript. Save to keep it.";
+          } catch (e) {
+            note.textContent = e.message || "Could not generate a title";
+          }
+        },
+      },
+      {
+        label: "Save",
+        primary: true,
+        async run() {
+          try {
+            const res = await call(profile, `/api/sessions/${key}/title`,
+              { method: "POST", body: { title: input.value } });
+            apply(res.title || "");
+            if (!res.title) refreshSessions(); // provider title comes back
+          } catch (e) {
+            toast(`Rename: ${e.message}`);
+          }
+        },
+      },
+      { label: "Cancel" },
+    ],
+  });
+  // Enter saves, so a rename is two keystrokes from the header button.
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const save = [...foot.querySelectorAll("button")]
+        .find((b) => b.textContent === "Save");
+      if (save) save.click();
+    }
+  });
+}
+
+/** True when this transcript generation still owns the open pane. */
+function isOpenStill(gen, profileId, sessionId) {
+  return gen === state.openGen
+    && state.open
+    && state.open.profileId === profileId
+    && state.open.sessionId === sessionId;
+}
+
+/** Synthetic status rows for busy host TUIs (no /api/jobs/<id> to poll). */
+function isSyntheticJobId(id) {
+  return !id || String(id).startsWith("tui-");
+}
+
+/**
+ * Is state.job safe to use for the currently open transcript?
+ * Mid-turn send used to POST /api/jobs/<id>/input without this check — so a
+ * job left attached from session B received prompts typed while viewing A.
+ */
+function jobBelongsToOpen(job = state.job) {
+  if (!job || !job.id || isSyntheticJobId(job.id) || !state.open) return false;
+  if (job.profileId && job.profileId !== state.open.profileId) return false;
+  if (typeof job.openGen === "number" && job.openGen !== state.openGen) return false;
+  // Require an explicit pin: never guess from a stale attachment.
+  if (!job.sessionId || job.sessionId !== state.open.sessionId) return false;
+  return true;
+}
+
+/** Drop a job watch that no longer matches the open session (wrong pin). */
+function dropJobIfNotForOpen() {
+  if (state.job && !jobBelongsToOpen(state.job)) stopJobWatch();
 }
 
 // ---------------------------------------------------------------- live TUI
@@ -1534,15 +1978,19 @@ function closeLiveTui() {
 
 async function pollLiveTui(force) {
   if (!state.liveTui || !state.open) return;
-  const profile = profileById(state.open.profileId);
+  const gen = state.openGen;
+  const profileId = state.open.profileId;
+  const sessionId = state.open.sessionId;
+  const profile = profileById(profileId);
   if (!profile) return;
   try {
     // Colour clients opt in; default daemon payload is plain for BB.
     const frame = await call(
       profile,
-      `/api/sessions/${encodeURIComponent(state.open.sessionId)}/tui?ansi=1`,
+      `/api/sessions/${encodeURIComponent(sessionId)}/tui?ansi=1`,
     );
-    if (!state.liveTui) return;
+    // Drop the frame if the user switched sessions (or left Live TUI).
+    if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) return;
     const status = $("live-tui-status");
     const pane = $("live-tui-pane");
     if (!frame || frame.attached === false) {
@@ -1574,7 +2022,7 @@ async function pollLiveTui(force) {
       : "Host TUI · live";
     status.classList.add("live");
   } catch (e) {
-    if (!state.liveTui) return;
+    if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) return;
     $("live-tui-status").textContent = e.message || "Live TUI error";
     $("live-tui-status").classList.remove("live");
   }
@@ -1660,19 +2108,41 @@ function renderChatSub() {
   }
 }
 
-async function loadTail() {
+async function loadTail(gen = state.openGen, { keepLive = false } = {}) {
   const open = state.open;
-  const profile = profileById(open.profileId);
+  if (!open) return;
+  const profileId = open.profileId;
+  const sessionId = open.sessionId;
+  const profile = profileById(profileId);
   if (!profile) return;
+  // Mid-turn reloads: keep live echoes the journal has not caught up with
+  // (Android loadTail(keepLive) parity). End-of-turn reloads leave this false
+  // so disk fully replaces the stream.
+  if (!keepLive && state.job && !["done", "error", "stopped"].includes(state.job.status || "")) {
+    keepLive = true;
+  }
   try {
     const page = await call(profile,
-      `/api/sessions/${encodeURIComponent(open.sessionId)}/messages?limit=${PAGE}`,
+      `/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=${PAGE}`
+        + (processViewOn(sessionId) ? "&detail=steps" : ""),
       { timeout: 60000 });
+    // Another session may have been opened while this request was in flight.
+    if (!isOpenStill(gen, profileId, sessionId)) return;
     state.total = page.total || 0;
     state.earliest = page.offset || 0;
-    state.items = expandMessages(page.messages || [], page.offset || 0);
+    const fetched = expandMessages(page.messages || [], page.offset || 0);
+    if (keepLive) {
+      const settled = new Set(
+        fetched.map((it) => `${it.role}\0${String(it.text || "").trim()}`));
+      const live = state.items.filter((it) => it.live
+        && !settled.has(`${it.role}\0${String(it.text || "").trim()}`));
+      state.items = fetched.concat(live);
+    } else {
+      state.items = fetched;
+    }
     renderTranscript(true);
   } catch (e) {
+    if (!isOpenStill(gen, profileId, sessionId)) return;
     $("transcript").innerHTML = "";
     const box = el("div", "empty");
     box.appendChild(el("h2", null, "Could not load this session"));
@@ -1683,7 +2153,11 @@ async function loadTail() {
 
 async function loadOlder(btn) {
   const open = state.open;
-  const profile = profileById(open.profileId);
+  const gen = state.openGen;
+  if (!open) return;
+  const profileId = open.profileId;
+  const sessionId = open.sessionId;
+  const profile = profileById(profileId);
   if (!profile || state.earliest <= 0) return;
   const from = Math.max(0, state.earliest - PAGE);
   const count = state.earliest - from;
@@ -1691,8 +2165,10 @@ async function loadOlder(btn) {
   btn.textContent = "Loading…";
   try {
     const page = await call(profile,
-      `/api/sessions/${encodeURIComponent(open.sessionId)}/messages?offset=${from}&limit=${count}`,
+      `/api/sessions/${encodeURIComponent(sessionId)}/messages?offset=${from}&limit=${count}`
+        + (processViewOn(sessionId) ? "&detail=steps" : ""),
       { timeout: 60000 });
+    if (!isOpenStill(gen, profileId, sessionId)) return;
     state.earliest = page.offset || 0;
     // Keep the reader where they were: measure, prepend, restore.
     const view = $("transcript");
@@ -1701,6 +2177,7 @@ async function loadOlder(btn) {
     renderTranscript(false);
     view.scrollTop = view.scrollHeight - before;
   } catch (e) {
+    if (!isOpenStill(gen, profileId, sessionId)) return;
     toast(e.message);
     btn.disabled = false;
     btn.textContent = "Load earlier messages";
@@ -1722,11 +2199,12 @@ function expandMessages(messages, offset) {
     if (m.role === "user" && text.startsWith("[shell] ! ") && text.includes("\n[output]\n")) {
       const command = text.split("\n[output]\n")[0].replace(/^\[shell\] /, "").trim();
       const body = text.split("\n[output]\n")[1].split("\n[silent]")[0].trim();
-      out.push({ id, role: "user", text: command, ts });
+      out.push({ id, role: "user", text: command, ts, steps: m.steps || null });
       if (body) out.push({ id: id + ":out", role: "assistant", text: body, ts });
       return;
     }
-    out.push({ id, role: m.role, text, metaKind: m.metaKind || "", ts });
+    out.push({ id, role: m.role, text, metaKind: m.metaKind || "", ts,
+               steps: m.steps || null });
   });
   return out;
 }
@@ -1743,7 +2221,12 @@ function renderTranscript(toBottom) {
     thread.appendChild(btn);
   }
 
-  state.items.forEach((item) => thread.appendChild(renderMessage(item)));
+  state.items.forEach((item) => {
+    thread.appendChild(renderMessage(item));
+    // Steps are siblings of the bubble, not contents of it — the bubble keeps
+    // its own width and styling whether or not the process view is on.
+    if (item.steps && item.steps.length) thread.appendChild(renderSteps(item));
+  });
   view.appendChild(thread);
   if (toBottom) view.scrollTop = view.scrollHeight;
 }
@@ -1765,6 +2248,60 @@ function messageToolsRow(item, extraButtons, { showTime = false } = {}) {
     }
   }
   return tools;
+}
+
+const STEP_LABEL = { tool_use: "▸", tool_result: "↳", thinking: "✻" };
+
+function renderSteps(item) {
+  // Rows sit BELOW the bubble they belong to: the daemon attaches each step
+  // to the message it followed, so top-to-bottom is the order it happened.
+  const box = el("div", "steps");
+  (item.steps || []).forEach((s) => {
+    const row = el("div",
+      `step step-${s.kind}${s.ok === false ? " step-err" : ""}`);
+    const head = el("button", "step-head");
+    head.type = "button";
+    let title;
+    if (s.kind === "tool_use") title = s.name || "tool";
+    else if (s.kind === "tool_result") title = s.ok === false ? "error" : "result";
+    else title = "thinking";
+    head.appendChild(el("span", "step-mark", STEP_LABEL[s.kind] || "·"));
+    head.appendChild(el("span", "step-title", title));
+    if (s.kind === "thinking" && s.recorded === false) {
+      head.appendChild(el("span", "step-note", "not recorded by this CLI"));
+      head.disabled = true;
+      row.appendChild(head);
+      box.appendChild(row);
+      return;
+    }
+    head.appendChild(el("span", "step-detail",
+      s.detail || (s.preview || "").split("\n")[0].slice(0, 120)));
+    if (s.bytes) head.appendChild(el("span", "step-size", humanSize(s.bytes)));
+    const body = el("pre", "step-body");
+    body.textContent = s.preview || "";
+    body.hidden = true;
+    head.addEventListener("click", async () => {
+      body.hidden = !body.hidden;
+      // Fetch the rest only on first expand — that is what keeps a 200KB
+      // tool result out of every window fetch.
+      if (body.hidden || !s.truncated || s.loaded) return;
+      s.loaded = true;
+      const profile = profileById(state.open && state.open.profileId);
+      try {
+        const full = await call(profile,
+          `/api/sessions/${encodeURIComponent(state.open.sessionId)}`
+          + `/steps/${encodeURIComponent(s.ref)}`, { timeout: 60000 });
+        body.textContent = full.text || body.textContent;
+      } catch (e) {
+        s.loaded = false;
+        toast(e.message);
+      }
+    });
+    row.appendChild(head);
+    row.appendChild(body);
+    box.appendChild(row);
+  });
+  return box;
 }
 
 function renderMessage(item) {
@@ -1867,10 +2404,18 @@ function composerNote(text, isError) {
 async function send(text) {
   const raw = String(text || "").trim();
   if (!raw || !state.open) return;
-  const profile = profileById(state.open.profileId);
-  if (!profile) return;
+  // Snapshot the open session BEFORE any await — a mid-send row switch must
+  // not re-route this prompt or re-pin the job to the wrong transcript.
+  const openProfileId = state.open.profileId;
+  const openSessionId = state.open.sessionId;
+  const openGen = state.openGen;
+  const profile = profileById(openProfileId);
+  if (!profile || !openSessionId) return;
+
+  dropJobIfNotForOpen();
 
   if (raw.startsWith("!")) return runShell(raw.slice(1).trim());
+
 
   if (/^\/[A-Za-z][A-Za-z0-9_-]*$/.test(raw.split(" ")[0])) {
     const cmd = raw.split(" ")[0];
@@ -1896,25 +2441,34 @@ async function send(text) {
     }
   }
 
-  const running = !!(state.job && state.job.id);
-  appendLive({ role: "user", text: raw });
+  // Only type/queue into a job that is pinned to THIS open session.
+  const job = (state.job && jobBelongsToOpen(state.job)) ? state.job : null;
+  const paint = { gen: openGen, profileId: openProfileId, sessionId: openSessionId };
+  appendLive({ role: "user", text: raw }, paint);
 
-  if (running) {
+  if (job) {
     const interactive = execModeOf(profile) === "interactive";
+    const jobId = job.id;
     try {
-      await call(profile, `/api/jobs/${state.job.id}/${interactive ? "input" : "queue"}`,
+      await call(profile, `/api/jobs/${jobId}/${interactive ? "input" : "queue"}`,
         { method: "POST", body: { prompt: raw } });
-      composerNote(interactive ? "Typed into the session" : "Queued");
+      // Still note only if this transcript is open (delivery already targeted jobId).
+      if (isOpenStill(openGen, openProfileId, openSessionId)) {
+        composerNote(interactive ? "Typed into the session" : "Queued");
+      }
     } catch (e) {
-      composerNote(e.message, true);
+      if (isOpenStill(openGen, openProfileId, openSessionId)) {
+        composerNote(e.message, true);
+      }
     }
     return;
   }
 
   try {
     const harness = sessionProvider(state.open && state.open.session, profile);
+    // Always address the snapshotted session id — never state.open after await.
     const res = await call(profile,
-      `/api/sessions/${encodeURIComponent(state.open.sessionId)}/continue`,
+      `/api/sessions/${encodeURIComponent(openSessionId)}/continue`,
       {
         method: "POST",
         body: {
@@ -1924,16 +2478,30 @@ async function send(text) {
           effort: effortOf(profile, harness),
         },
       });
-    if (res && res.job_id) attachJob(res.job_id);
+    if (res && res.job_id && isOpenStill(openGen, openProfileId, openSessionId)) {
+      attachJob(res.job_id, openSessionId);
+    }
   } catch (e) {
-    appendLive({ role: "notice", text: e.message, severity: "error" });
+    appendLive({ role: "notice", text: e.message, severity: "error" }, paint);
   }
 }
 
+// Directive appended to a `!` shell result. The old wording ended with
+// "wait for the next user instruction" — which the model simply echoed back
+// ("yes, I'll wait for your next instruction"). Nothing to parrot, no reply.
+const SHELL_SILENT =
+  "[silent] Shell result for context only. Do not reply or acknowledge this message.";
+
 async function runShell(command) {
-  if (!command) return;
-  const profile = profileById(state.open.profileId);
-  appendLive({ role: "user", text: "! " + command });
+  if (!command || !state.open) return;
+  const openProfileId = state.open.profileId;
+  const openSessionId = state.open.sessionId;
+  const openGen = state.openGen;
+  const profile = profileById(openProfileId);
+  if (!profile || !openSessionId) return;
+  const paint = { gen: openGen, profileId: openProfileId, sessionId: openSessionId };
+  const cwd = (state.open.session && state.open.session.cwd) || "";
+  appendLive({ role: "user", text: "! " + command }, paint);
   composerNote("Running…");
   try {
     const res = await call(profile, "/api/shell", {
@@ -1941,30 +2509,41 @@ async function runShell(command) {
       timeout: 40000,
       body: {
         command,
-        session_id: state.open.sessionId,
-        cwd: (state.open.session && state.open.session.cwd) || "",
+        session_id: openSessionId,
+        cwd,
       },
     });
+    if (!isOpenStill(openGen, openProfileId, openSessionId)) return;
     const body = (res.output || "").replace(/\s+$/, "") || "(no output)";
-    appendLive({ role: "assistant", text: "```\n" + body + "\n```" });
+    appendLive({ role: "assistant", text: "```\n" + body + "\n```" }, paint);
     composerNote("");
     // Hand it to the agent as context, with a directive not to reply.
     const prompt = `[shell] ! ${command}\n[output]\n\`\`\`\n${body.slice(0, 8000)}`
       + (res.exit_code ? `\n(exit code ${res.exit_code})` : "")
-      + "\n```\n[silent] Shell result for context only. Do not reply or acknowledge"
-      + " this message - wait for the next user instruction.";
+      + "\n```\n" + SHELL_SILENT;
+    const harness = sessionProvider(state.open && state.open.session, profile);
     const started = await call(profile,
-      `/api/sessions/${encodeURIComponent(state.open.sessionId)}/continue`,
+      `/api/sessions/${encodeURIComponent(openSessionId)}/continue`,
       { method: "POST", body: { prompt, permission_mode: wireExecMode(execModeOf(profile)),
-                                model: modelOf(profile, sessionProvider(state.open && state.open.session, profile)),
-                                effort: effortOf(profile, sessionProvider(state.open && state.open.session, profile)) } });
-    if (started && started.job_id) attachJob(started.job_id);
+                                model: modelOf(profile, harness),
+                                effort: effortOf(profile, harness) } });
+    if (started && started.job_id && isOpenStill(openGen, openProfileId, openSessionId)) {
+      attachJob(started.job_id, openSessionId);
+    }
   } catch (e) {
-    composerNote(e.message, true);
+    if (isOpenStill(openGen, openProfileId, openSessionId)) {
+      composerNote(e.message, true);
+    }
   }
 }
 
-function appendLive(item) {
+function appendLive(item, { gen = state.openGen, profileId = null, sessionId = null } = {}) {
+  // Never paint live rows into a transcript that is no longer open.
+  if (profileId != null && sessionId != null) {
+    if (!isOpenStill(gen, profileId, sessionId)) return;
+  } else if (gen !== state.openGen || !state.open) {
+    return;
+  }
   const row = {
     id: `live-${state.items.length}-${Date.now()}`,
     live: true,
@@ -1983,11 +2562,61 @@ function appendLive(item) {
   }
 }
 
+/**
+ * True when this assistant text is already on screen (journal loadTail and/or
+ * an earlier live paint). Opening a mid-turn session loads updates.jsonl first,
+ * then job events since=0 re-stream the same flushes — without this the user
+ * sees every bubble twice.
+ */
+function assistantTextAlreadyShown(text) {
+  const t = String(text || "").trim();
+  if (!t) return true;
+  // Prefer a recent-window scan (cheap) over scanning the full transcript.
+  const start = Math.max(0, state.items.length - 40);
+  for (let i = state.items.length - 1; i >= start; i--) {
+    const it = state.items[i];
+    if (it.role === "assistant" && String(it.text || "").trim() === t) return true;
+  }
+  return false;
+}
+
 // -------------------------------------------------------------- job watch
 
-function attachJob(jobId) {
+function attachJob(jobId, sessionId = null) {
+  if (isSyntheticJobId(jobId)) return;
+  const open = state.open;
+  // Prefer explicit pin; fall back to open only when attaching for the
+  // currently visible transcript.
+  const pinnedSid = sessionId
+    || (open && open.sessionId)
+    || "";
+  if (!pinnedSid) return;
+  // Already watching this turn — do not reset since=0 (that would re-paint
+  // every text event on top of the journal rows already on screen).
+  if (state.job && state.job.id === jobId && state.jobTimer) {
+    // Correct a wrong/empty pin (never leave session B's job labeled as A).
+    state.job.sessionId = pinnedSid;
+    state.job.profileId = open ? open.profileId : state.job.profileId;
+    state.job.openGen = state.openGen;
+    return;
+  }
   stopJobWatch();
-  state.job = { id: jobId, status: "starting", queued: [], startedAt: Date.now(), toolLine: "" };
+  // Pin the job to the session that owned it when we attached — never to
+  // whatever happens to be open later if the user switches rows mid-turn.
+  state.job = {
+    id: jobId,
+    sessionId: pinnedSid,
+    profileId: open ? open.profileId : null,
+    openGen: state.openGen,
+    status: "starting",
+    queued: [],
+    startedAt: Date.now(),
+    toolLine: "",
+    pendingQuestion: null,
+    pendingPermission: null,
+    lastPendingQuestion: null,
+    lastPendingPermission: null,
+  };
   state.jobSince = 0;
   state.jobFails = 0;
   // Allow an immediate status blip for the new turn (global gap timer).
@@ -2014,14 +2643,47 @@ function stopJobWatch() {
  * only fires when that cursor moves. The timer is the fallback for when the
  * stream is down.
  */
+/**
+ * Does this job snapshot belong to the transcript currently open?
+ * Rejects cross-session bleed when two jobs run and the user switches rows.
+ */
+function jobSnapBelongsToOpen(job, snap) {
+  if (!job || !state.open) return false;
+  if (job.profileId && state.open.profileId !== job.profileId) return false;
+  // openGen moved (user opened another session) — even if ids briefly match.
+  if (typeof job.openGen === "number" && job.openGen !== state.openGen) return false;
+  const openSid = state.open.sessionId || "";
+  const pinned = job.sessionId || "";
+  const snapSid = (snap && snap.session_id) || "";
+  const snapNew = (snap && snap.new_session_id) || "";
+  const reported = [snapSid, snapNew].filter(Boolean);
+  if (reported.length) {
+    // Open row is already this job's session (or its fork target).
+    if (reported.includes(openSid)) return true;
+    // Still viewing the pinned parent while the daemon only reports the fork.
+    if (pinned && openSid === pinned) return true;
+    // Wrong session entirely (e.g. job for A while open is B).
+    return false;
+  }
+  // No session ids on snap yet — trust the pin from attach time.
+  if (pinned) return openSid === pinned;
+  return true;
+}
+
 async function pollJob() {
   const job = state.job;
   if (!job || !state.open) return;
+  // Job was attached for a different open session — drop it (never paint
+  // session B's stream into A, and never keep it as the send target).
+  if (!jobBelongsToOpen(job)) {
+    stopJobWatch();
+    return;
+  }
   renderBanner();
 
-  const profile = profileById(state.open.profileId);
+  const profile = profileById(job.profileId || state.open.profileId);
   if (!profile) return;
-  const frame = (state.active[profile.id] || []).find((j) => j.job_id === job.id);
+  let frame = (state.active[profile.id] || []).find((j) => j.job_id === job.id);
   const now = Date.now();
   let due = false;
 
@@ -2041,13 +2703,18 @@ async function pollJob() {
 
   job.inFlight = true;
   state.jobLastFetch = now;
+  const paintCtx = {
+    gen: job.openGen != null ? job.openGen : state.openGen,
+    profileId: job.profileId || (state.open && state.open.profileId),
+    sessionId: job.sessionId || (state.open && state.open.sessionId),
+  };
   let snap;
   try {
     snap = await call(profile, `/api/jobs/${job.id}?since=${state.jobSince}`);
     state.jobFails = 0;
   } catch {
     if (++state.jobFails >= 5) {
-      appendLive({ role: "notice", text: "Lost contact with the daemon", severity: "error" });
+      appendLive({ role: "notice", text: "Lost contact with the daemon", severity: "error" }, paintCtx);
       stopJobWatch();
     }
     return;
@@ -2055,18 +2722,57 @@ async function pollJob() {
     job.inFlight = false;
   }
   if (state.job !== job) return; // detached while the request was in flight
+  if (!jobSnapBelongsToOpen(job, snap)) {
+    // User switched sessions (or this job is for another row) — do not paint.
+    stopJobWatch();
+    return;
+  }
 
   state.jobSince = snap.next_seq || 0;
   (snap.events || []).forEach((ev) => {
-    if (ev.kind === "text" && ev.text) appendLive({ role: "assistant", text: ev.text });
-    else if (ev.kind === "tool") {
+    if (ev.kind === "text" && ev.text) {
+      // Journal messages for the open session already include flushed assistant
+      // chunks; skip live echoes that would double-paint (see screenshot of
+      // identical back-to-back assistant bubbles on working main sessions).
+      if (!assistantTextAlreadyShown(ev.text)) {
+        appendLive({ role: "assistant", text: ev.text }, paintCtx);
+      }
+    } else if (ev.kind === "tool") {
       job.toolLine = [ev.name, ev.detail].filter(Boolean).join("  ");
     }
   });
   job.status = snap.status || "";
   job.queued = snap.queued || [];
-  job.pendingPermission = snap.pending_permission || null;
-  job.pendingQuestion = snap.pending_question || null;
+
+  // Keep last known ask/permission payloads so dismiss → Answer can reopen
+  // even if a lagging poll briefly omits pending_* while the SSE flag is still
+  // true (or the user closed the modal without cancelling on the daemon).
+  // Re-read after await — stream may have moved while the job fetch ran.
+  frame = (state.active[profile.id] || []).find((j) => j.job_id === job.id);
+  if (snap.pending_permission) {
+    job.pendingPermission = snap.pending_permission;
+    job.lastPendingPermission = snap.pending_permission;
+  } else if (!(frame && frame.pending_permission)) {
+    job.pendingPermission = null;
+  } else {
+    job.pendingPermission = job.lastPendingPermission || job.pendingPermission;
+  }
+  if (snap.pending_question) {
+    job.pendingQuestion = snap.pending_question;
+    job.lastPendingQuestion = snap.pending_question;
+  } else if (!(frame && frame.pending_question)) {
+    // Only drop when the stream also says the gate is gone — and not while
+    // this request_id is still the one we optimistically cleared after Submit.
+    const held = job.lastPendingQuestion && job.lastPendingQuestion.request_id;
+    if (!held || state.answeredQuestions.has(held)) {
+      job.pendingQuestion = null;
+      if (state.answeredQuestions.has(held)) job.lastPendingQuestion = null;
+    } else {
+      job.pendingQuestion = job.lastPendingQuestion;
+    }
+  } else {
+    job.pendingQuestion = job.lastPendingQuestion || job.pendingQuestion;
+  }
 
   // Auto-open once per request_id. Dismissing the modal does NOT cancel the
   // ask on the daemon — renderBanner keeps an "Answer" / "Respond" CTA so
@@ -2075,7 +2781,8 @@ async function pollJob() {
   // daemon applies picks) — that reopened the same panel after Submit.
   if (!job.pendingPermission) state.askedPermission = null;
   if (job.pendingPermission
-      && job.pendingPermission.request_id !== state.askedPermission) {
+      && job.pendingPermission.request_id !== state.askedPermission
+      && !state.answeredQuestions.has(job.pendingPermission.request_id)) {
     state.askedPermission = job.pendingPermission.request_id;
     showPermission(job.pendingPermission);
   }
@@ -2088,10 +2795,17 @@ async function pollJob() {
     showQuestion(job.pendingQuestion);
   }
 
-  // A headless resume forks the session; follow the fork.
-  if (snap.new_session_id && snap.new_session_id !== state.open.sessionId) {
+  // A headless resume forks the session; follow the fork — only if we still
+  // own this open transcript (never rewrite another row's open id).
+  if (snap.new_session_id && state.open && snap.new_session_id !== state.open.sessionId
+      && jobSnapBelongsToOpen(job, snap)
+      && (state.open.sessionId === job.sessionId
+        || state.open.sessionId === snap.session_id
+        || !job.sessionId)) {
     state.open.sessionId = snap.new_session_id;
     if (state.open.session) state.open.session.id = snap.new_session_id;
+    job.sessionId = snap.new_session_id;
+    paintCtx.sessionId = snap.new_session_id;
     renderChatSub();
   }
   // The daemon chains queued prompts: follow the chain, don't tear down.
@@ -2114,11 +2828,21 @@ async function pollJob() {
     if (snap.status === "done" || snap.status === "error") {
       chimeJobEnded(profile.id, job.id, { nextSeq: state.jobSince });
     }
+    const endGen = paintCtx.gen;
+    const endProfile = paintCtx.profileId;
+    const endSid = job.sessionId || paintCtx.sessionId;
     stopJobWatch();
-    // Replace the live echoes with what the daemon actually persisted.
-    await loadTail();
-    if (notes.length) appendLive({ role: "notice", text: notes.join(" · "),
-                                  severity: snap.status === "error" ? "error" : "" });
+    // Replace the live echoes with what the daemon actually persisted —
+    // only if this session is still the open one. keepLive:false so disk
+    // fully replaces mid-turn stream rows (no double bubbles).
+    if (isOpenStill(endGen, endProfile, endSid)
+        || (state.open && state.open.sessionId === endSid && state.open.profileId === endProfile)) {
+      await loadTail(state.openGen, { keepLive: false });
+      if (notes.length && state.open && state.open.sessionId === endSid) {
+        appendLive({ role: "notice", text: notes.join(" · "),
+                     severity: snap.status === "error" ? "error" : "" });
+      }
+    }
     refreshSessions();
   }
   renderBanner();
@@ -2126,44 +2850,89 @@ async function pollJob() {
 
 function renderBanner() {
   const box = $("banner");
-  const job = state.job;
-  if (!job) {
+  if (!state.open) {
     box.classList.add("hidden");
     box.classList.remove("needs-answer");
     return;
   }
   const profile = profileById(state.open.profileId);
-  const frame = (state.active[profile.id] || []).find((j) => j.job_id === job.id);
+  if (!profile) {
+    box.classList.add("hidden");
+    box.classList.remove("needs-answer");
+    return;
+  }
+  const sid = state.open.sessionId;
+  const frames = state.active[profile.id] || [];
+  // Never drive the banner from a job pinned to another session.
+  dropJobIfNotForOpen();
+  // Match by watched job only if it belongs here; else any frame for this sid.
+  let frame = jobBelongsToOpen(state.job)
+    ? frames.find((j) => j.job_id === state.job.id)
+    : null;
+  if (!frame && sid) {
+    frame = frames.find((j) =>
+      !isSyntheticJobId(j.job_id)
+      && (j.session_id === sid || j.new_session_id === sid)) || null;
+  }
+  // If the stream says this session is blocked but we are not watching the
+  // real job (dismissed, refreshed, synthetic tui row, …), attach it so Answer
+  // has a job id and a pending payload to reopen.
+  if (frame && !isSyntheticJobId(frame.job_id)
+      && (frame.pending_question || frame.pending_permission)
+      && (!jobBelongsToOpen(state.job) || state.job.id !== frame.job_id)) {
+    // Pin to the open session id so a concurrent job for another row cannot
+    // stream into this transcript.
+    attachJob(frame.job_id, sid);
+    return; // attachJob → pollJob will re-render
+  }
+
+  const job = jobBelongsToOpen(state.job) ? state.job : null;
+  if (!job) {
+    box.classList.add("hidden");
+    box.classList.remove("needs-answer");
+    return;
+  }
   const pal = providerOf(sessionProvider(state.open && state.open.session, profile));
   // Sound cues are driven by chimeFromActive (every profile's SSE list), not
   // only this open-session banner — so a question/done on another session
   // still beeps while you are reading this one.
 
+  // Prefer full pending payload; fall back to last seen + SSE boolean flag so
+  // a dismissed modal never strands the user without an Answer button.
+  const pendingQ = job.pendingQuestion || job.lastPendingQuestion || null;
+  const pendingP = job.pendingPermission || job.lastPendingPermission || null;
+  const needsQ = !!(pendingQ || (frame && frame.pending_question));
+  const needsP = !!(pendingP || (frame && frame.pending_permission));
+  // Don't show Answer for a request_id we already submitted/cancelled.
+  const qAnswered = pendingQ && pendingQ.request_id
+    && state.answeredQuestions.has(pendingQ.request_id);
+  const showQ = needsQ && !qAnswered;
+
   box.textContent = "";
   box.classList.remove("hidden");
-  box.classList.toggle("needs-answer", !!(job.pendingQuestion || job.pendingPermission));
+  box.classList.toggle("needs-answer", !!(showQ || needsP));
   box.appendChild(el("span", "pulse"));
 
   // Blocking human gates: keep a re-open control even after the modal is
   // dismissed (✕ / backdrop / Escape). Cancel and Send answer still go
   // through the modal itself.
-  if (job.pendingQuestion) {
+  if (showQ) {
     box.appendChild(el("span", "banner-line", "A question is waiting for your answer"));
     const btn = el("button", "banner-action primary", "Answer");
     btn.type = "button";
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      showQuestion(job.pendingQuestion);
+      reopenQuestion();
     });
     box.appendChild(btn);
-  } else if (job.pendingPermission) {
-    const tool = job.pendingPermission.tool_name || "a tool";
+  } else if (needsP) {
+    const tool = (pendingP && (pendingP.tool_name || pendingP.toolName)) || "a tool";
     box.appendChild(el("span", "banner-line", `Permission needed · ${tool}`));
     const btn = el("button", "banner-action primary", "Respond");
     btn.type = "button";
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      showPermission(job.pendingPermission, { force: true });
+      reopenPermission();
     });
     box.appendChild(btn);
   } else {
@@ -2171,6 +2940,64 @@ function renderBanner() {
     // baked into the string (not a separate gray column).
     box.appendChild(el("span", "banner-line", liveStatusLine(frame, job, pal)));
   }
+}
+
+/** Banner Answer: re-fetch pending payload if needed, then open the modal. */
+async function reopenQuestion() {
+  const job = state.job;
+  const profile = state.open && profileById(state.open.profileId);
+  if (!job || !profile) return;
+  let pending = job.pendingQuestion || job.lastPendingQuestion;
+  if (!pending || !(pending.questions && pending.questions.length)) {
+    try {
+      // Full snapshot (since=0) so we always get pending_question even if our
+      // event cursor is already past the question event.
+      const snap = await call(profile, `/api/jobs/${job.id}?since=0`);
+      if (snap.pending_question) {
+        pending = snap.pending_question;
+        job.pendingQuestion = pending;
+        job.lastPendingQuestion = pending;
+      }
+      if (typeof snap.next_seq === "number") state.jobSince = snap.next_seq;
+    } catch (e) {
+      toast(e.message || "Could not reload the question");
+      return;
+    }
+  }
+  if (!pending || !(pending.questions && pending.questions.length)) {
+    toast("No pending question on the daemon");
+    renderBanner();
+    return;
+  }
+  // Allow reopen after a prior dismiss (askedQuestion already equals this id).
+  showQuestion(pending, { force: true });
+}
+
+async function reopenPermission() {
+  const job = state.job;
+  const profile = state.open && profileById(state.open.profileId);
+  if (!job || !profile) return;
+  let pending = job.pendingPermission || job.lastPendingPermission;
+  if (!pending) {
+    try {
+      const snap = await call(profile, `/api/jobs/${job.id}?since=0`);
+      if (snap.pending_permission) {
+        pending = snap.pending_permission;
+        job.pendingPermission = pending;
+        job.lastPendingPermission = pending;
+      }
+      if (typeof snap.next_seq === "number") state.jobSince = snap.next_seq;
+    } catch (e) {
+      toast(e.message || "Could not reload the permission prompt");
+      return;
+    }
+  }
+  if (!pending) {
+    toast("No pending permission on the daemon");
+    renderBanner();
+    return;
+  }
+  showPermission(pending, { force: true });
 }
 
 // ---------------------------------------------------------------- streams
@@ -2728,7 +3555,9 @@ async function pendingNewJob(profile, jobId, prompt) {
       const row = state.rows.find((r) => r.profileId === profile.id && r.session.id === sid);
       if (row) {
         await openSession(row);
-        attachJob(jobId);
+        // openSession already adopts a matching active job; re-pin explicitly
+        // with this session id so live events cannot land on another open row.
+        attachJob(jobId, sid);
       }
       return;
     }
@@ -2773,25 +3602,57 @@ function showPermission(pending, { force = false } = {}) {
   });
 }
 
-function showQuestion(pending) {
+function showQuestion(pending, { force = false } = {}) {
   if (!pending) return;
   const questions = pending.questions || [];
   if (!questions.length) return;
+  // Plan approval and AskUserQuestion share this modal. Suppress re-paint
+  // when either is already open (poll ticks); force=true is banner Answer.
+  const openTitle = ($("modal-title").textContent || "");
+  if (!force && !$("modal").classList.contains("hidden")
+      && (openTitle.startsWith("The agent is asking")
+          || openTitle === "Plan approval"
+          || openTitle.startsWith("Review plan"))) {
+    return;
+  }
   const picks = questions.map(() => []);
   const notes = questions.map(() => "");
+  const isPlan = questions.some((q) =>
+    (q.header || "").toLowerCase().includes("plan")
+    || (q.question || "").length > 800);
 
-  const render = () => modal({
-    title: questions.length === 1 ? "The agent is asking"
-                                  : `The agent is asking ${questions.length} things`,
+  const render = () => {
+    modal({
+    title: isPlan
+      ? (questions[0].header || "Review plan")
+      : (questions.length === 1 ? "The agent is asking"
+                                : `The agent is asking ${questions.length} things`),
     wide: true,
     build(body) {
-      body.appendChild(el("div", "help",
-        "The turn is paused until you answer or cancel. Closing this dialog does not cancel — use Answer in the banner to reopen."));
+      if (isPlan) {
+        body.classList.add("plan-review");
+        body.appendChild(el("div", "help",
+          "Read the plan below, then choose Approve / Request changes / Quit. Closing this dialog does not cancel — use Answer in the banner to reopen. Live TUI also has the host pane."));
+      } else {
+        body.appendChild(el("div", "help",
+          "The turn is paused until you answer or cancel. Closing this dialog does not cancel — use Answer in the banner to reopen."));
+      }
       questions.forEach((q, qi) => {
-        const block = el("div", "q-block");
-        if (q.header) block.appendChild(el("div", "q-head", q.header));
-        if (q.question) block.appendChild(renderMarkdown(q.question));
+        const block = el("div", "q-block" + (isPlan ? " q-plan" : ""));
+        if (q.header && !isPlan) block.appendChild(el("div", "q-head", q.header));
+        // Plan body first (scrollable), options sticky below.
+        const bodyBox = el("div", isPlan ? "q-plan-body md" : null);
+        if (q.question) {
+          bodyBox.appendChild(renderMarkdown(q.question));
+          const t = q.question.trimEnd();
+          if (t.endsWith("…") || t.endsWith("...")) {
+            bodyBox.appendChild(el("div", "help",
+              "Plan text may be truncated here — open Live TUI (terminal icon) for the full host pane, or re-ask after the daemon upgrade that raises the plan size limit."));
+          }
+        }
+        block.appendChild(bodyBox);
         if (q.multi_select) block.appendChild(el("div", "help", "Pick as many as apply"));
+        const opts = el("div", isPlan ? "q-plan-opts" : null);
         (q.options || []).forEach((opt) => {
           const active = picks[qi].includes(opt.label);
           const b = el("button", "q-opt");
@@ -2812,7 +3673,7 @@ function showQuestion(pending) {
             }
             render();
           });
-          block.appendChild(b);
+          opts.appendChild(b);
           // Some options take free text with the pick (grok's "Request
           // changes" becomes the revision note it then waits for).
           if (q.note_for && q.note_for === opt.label && active) {
@@ -2820,9 +3681,10 @@ function showQuestion(pending) {
             input.placeholder = q.note_hint || "Your answer";
             input.value = notes[qi];
             input.addEventListener("input", () => { notes[qi] = input.value; });
-            block.appendChild(input);
+            opts.appendChild(input);
           }
         });
+        block.appendChild(opts);
         body.appendChild(block);
       });
     },
@@ -2835,7 +3697,10 @@ function showQuestion(pending) {
               { method: "POST", body: { request_id: pending.request_id, cancel: true } });
             state.answeredQuestions.add(pending.request_id);
             state.askedQuestion = pending.request_id;
-            if (state.job) state.job.pendingQuestion = null;
+            if (state.job) {
+              state.job.pendingQuestion = null;
+              state.job.lastPendingQuestion = null;
+            }
             renderBanner();
           } catch (e) { toast(e.message); }
         },
@@ -2853,19 +3718,121 @@ function showQuestion(pending) {
             // Optimistically dismiss so a lagging poll cannot re-open this id.
             state.answeredQuestions.add(pending.request_id);
             state.askedQuestion = pending.request_id;
-            if (state.job) state.job.pendingQuestion = null;
+            if (state.job) {
+              state.job.pendingQuestion = null;
+              state.job.lastPendingQuestion = null;
+            }
             renderBanner();
           } catch (e) { toast(e.message); }
         },
       },
     ],
   });
+    // Wider card for plan review so markdown tables stay readable.
+    if (isPlan) {
+      const card = $("modal") && $("modal").querySelector(".modal-card");
+      if (card) card.style.width = "min(960px, 100%)";
+    }
+  };
   render();
 }
 
 // ------------------------------------------------------------- attachments
 // Same contract as the phone apps: POST the raw bytes to /api/attachments,
 // then reference the host path in the prompt so the agent can open the file.
+
+/**
+ * Shrink large camera photos before upload. Returns { blob, name, note }.
+ * Non-images and small images pass through unchanged.
+ */
+async function prepareUploadBlob(file) {
+  const type = (file.type || "").toLowerCase();
+  const isImage = type.startsWith("image/")
+    || /\.(jpe?g|png|webp|heic|heif|gif|bmp)$/i.test(file.name || "");
+  if (!isImage || file.size < IMAGE_UPLOAD_COMPRESS_MIN) {
+    return { blob: file, name: file.name || "file", note: "" };
+  }
+  // HEIC often cannot decode in browser canvas — fall through raw.
+  if (type.includes("heic") || type.includes("heif")
+      || /\.heic$/i.test(file.name || "") || /\.heif$/i.test(file.name || "")) {
+    return { blob: file, name: file.name || "file", note: "" };
+  }
+  try {
+    const bmp = await createImageBitmap(file);
+    let w = bmp.width;
+    let h = bmp.height;
+    const edge = Math.max(w, h);
+    if (edge > IMAGE_UPLOAD_MAX_EDGE) {
+      const scale = IMAGE_UPLOAD_MAX_EDGE / edge;
+      w = Math.max(1, Math.round(w * scale));
+      h = Math.max(1, Math.round(h * scale));
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      bmp.close();
+      return { blob: file, name: file.name || "file", note: "" };
+    }
+    ctx.drawImage(bmp, 0, 0, w, h);
+    bmp.close();
+    const blob = await new Promise((resolve) => {
+      canvas.toBlob(
+        (b) => resolve(b),
+        "image/jpeg",
+        IMAGE_UPLOAD_JPEG_QUALITY,
+      );
+    });
+    if (!blob || blob.size <= 0 || blob.size >= file.size * 0.95) {
+      // Compression did not help (tiny PNG icon, already-small JPEG).
+      return { blob: file, name: file.name || "file", note: "" };
+    }
+    const base = (file.name || "image").replace(/\.[^.]+$/, "") || "image";
+    return {
+      blob,
+      name: base + ".jpg",
+      note: `compressed ${humanSize(file.size)} → ${humanSize(blob.size)}`,
+    };
+  } catch {
+    return { blob: file, name: file.name || "file", note: "" };
+  }
+}
+
+/**
+ * POST with upload progress (fetch has no upload progress events).
+ */
+function postAttachment(url, token, blob, onProgress, signal) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("X-Auth-Token", token);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.responseType = "text";
+    xhr.timeout = 180000;
+    if (signal) {
+      if (signal.aborted) {
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        return;
+      }
+      signal.addEventListener("abort", () => xhr.abort(), { once: true });
+    }
+    xhr.upload.onprogress = (ev) => {
+      if (onProgress && ev.lengthComputable) {
+        onProgress(ev.loaded, ev.total);
+      }
+    };
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText || "{}"); } catch { /* */ }
+      resolve({ status: xhr.status, data });
+    };
+    xhr.onerror = () => reject(new Error("Network error during upload"));
+    xhr.ontimeout = () => reject(Object.assign(new Error("Upload timed out"), { name: "AbortError" }));
+    xhr.onabort = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    xhr.send(blob);
+  });
+}
 
 async function uploadAttachment(file) {
   if (!state.open || !file) return;
@@ -2876,30 +3843,35 @@ async function uploadAttachment(file) {
     toast(`${file.name} is too large (max ${humanSize(MAX_UPLOAD_BYTES)})`);
     return;
   }
-  const name = file.name || "file";
-  composerNote(`Uploading ${name}…`);
+  const originalName = file.name || "file";
+  composerNote(`Preparing ${originalName}…`);
+  const prepared = await prepareUploadBlob(file);
+  if (prepared.blob.size > MAX_UPLOAD_BYTES) {
+    toast(`${originalName} is too large after prepare (max ${humanSize(MAX_UPLOAD_BYTES)})`);
+    return;
+  }
+  const name = prepared.name;
   const url = profile.baseUrl.replace(/\/+$/, "")
     + "/api/attachments?name=" + encodeURIComponent(name);
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 120000);
+  const timer = setTimeout(() => ctrl.abort(), 180000);
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "X-Auth-Token": profile.token,
-        "Content-Type": "application/octet-stream",
+    if (prepared.note) composerNote(`Uploading ${name} (${prepared.note})…`);
+    else composerNote(`Uploading ${name} (${humanSize(prepared.blob.size)})…`);
+    const { status, data } = await postAttachment(
+      url,
+      profile.token,
+      prepared.blob,
+      (loaded, total) => {
+        const pct = total ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
+        composerNote(`Uploading ${name}… ${pct}%`);
       },
-      body: file,
-      signal: ctrl.signal,
-      credentials: "omit",
-      cache: "no-store",
-    });
-    let data = null;
-    try { data = await res.json(); } catch { /* non-JSON */ }
-    if (!res.ok) {
-      throw new DaemonError(res.status,
-        (data && data.error) || (res.status === 413
-          ? "Attachment too large" : `HTTP ${res.status}`));
+      ctrl.signal,
+    );
+    if (status < 200 || status >= 300) {
+      throw new DaemonError(status,
+        (data && data.error) || (status === 413
+          ? "Attachment too large" : `HTTP ${status}`));
     }
     const path = data && data.path;
     if (!path) throw new DaemonError(0, "Daemon did not return a path");
@@ -2909,7 +3881,10 @@ async function uploadAttachment(file) {
     prompt.value = prompt.value + sep + "[attached: " + path + "]";
     prompt.dispatchEvent(new Event("input"));
     prompt.focus();
-    composerNote(`Attached ${name} (${humanSize(data.size || file.size)})`);
+    const saved = humanSize(data.size || prepared.blob.size);
+    composerNote(prepared.note
+      ? `Attached ${name} (${saved}, ${prepared.note})`
+      : `Attached ${name} (${saved})`);
   } catch (e) {
     if (e.name === "AbortError") composerNote("Upload timed out", true);
     else composerNote(e.message || "Upload failed", true);
@@ -2920,6 +3895,8 @@ async function uploadAttachment(file) {
 
 async function uploadFiles(fileList) {
   const files = [...(fileList || [])].filter(Boolean);
+  // Sequential: CF tunnel + phone radio prefer one stream; also keeps
+  // composer notes readable. Parallel would thrash bandwidth.
   for (const f of files) await uploadAttachment(f);
 }
 
@@ -2984,12 +3961,20 @@ async function openInbox() {
         const col = el("div");
         col.style.flex = "1";
         col.style.minWidth = "0";
-        col.appendChild(el("div", "fname", row.file.name));
+        const isDir = row.file.type === "dir";
+        col.appendChild(el("div", "fname", (isDir ? "📁 " : "") + row.file.name));
         const meta = el("div", "fmeta");
         const pal = providerOf(row.profile.provider);
         const tag = el("span", "tag provider", row.profile.name);
         tag.style.setProperty("--tag", pal.accent);
         meta.appendChild(tag);
+        if (isDir) {
+          // Folder size is what it weighs on the host; the zip that arrives
+          // is smaller, so label it rather than passing it off as a filesize.
+          const n = row.file.entries || 0;
+          meta.appendChild(el("span", "tag",
+            `${n}${row.file.partial ? "+" : ""} file${n === 1 ? "" : "s"}`));
+        }
         meta.appendChild(el("span", "tag", humanSize(row.file.size)));
         meta.appendChild(el("span", "tag", stamp((row.file.mtime || 0) * 1000)));
         col.appendChild(meta);
@@ -2998,43 +3983,50 @@ async function openInbox() {
         }
         line.appendChild(col);
 
-        const dl = el("button", null, "Download");
+        const dlLabel = isDir ? "Download zip" : "Download";
+        const dl = el("button", null, dlLabel);
         dl.type = "button";
         dl.addEventListener("click", async () => {
           dl.disabled = true;
-          dl.textContent = "…";
+          // Zipping happens host-side before a byte moves, so a big folder
+          // sits on "…" with no progress — say what it is doing.
+          dl.textContent = isDir ? "Zipping…" : "…";
           try {
             const blob = await call(row.profile,
               `/api/drop/${encodeURIComponent(row.file.name)}`,
-              { raw: true, timeout: 180000 });
+              { raw: true, timeout: 600000 });
             const url = URL.createObjectURL(blob);
             const a = el("a");
             a.href = url;
-            a.download = row.file.name;
+            a.download = isDir ? `${row.file.name}.zip` : row.file.name;
             a.click();
             setTimeout(() => URL.revokeObjectURL(url), 10000);
             dl.textContent = "Saved";
           } catch (e) {
             toast(e.message);
-            dl.textContent = "Download";
+            dl.textContent = dlLabel;
           }
           dl.disabled = false;
         });
         line.appendChild(dl);
 
-        const del = el("button", "danger", "Delete");
-        del.type = "button";
-        del.addEventListener("click", async () => {
-          try {
-            await call(row.profile,
-              `/api/drop/${encodeURIComponent(row.file.name)}/delete`, { method: "POST" });
-            const owner = results.find((r) => r.profile.id === row.profile.id);
-            owner.files = owner.files.filter((f) => f.name !== row.file.name);
-            render();
-            toast(`Deleted ${row.file.name} on ${row.profile.name}`);
-          } catch (e) { toast(e.message); }
-        });
-        line.appendChild(del);
+        // No delete for folders: the daemon refuses recursive delete, so
+        // offering the button would only ever produce an error toast.
+        if (!isDir) {
+          const del = el("button", "danger", "Delete");
+          del.type = "button";
+          del.addEventListener("click", async () => {
+            try {
+              await call(row.profile,
+                `/api/drop/${encodeURIComponent(row.file.name)}/delete`, { method: "POST" });
+              const owner = results.find((r) => r.profile.id === row.profile.id);
+              owner.files = owner.files.filter((f) => f.name !== row.file.name);
+              render();
+              toast(`Deleted ${row.file.name} on ${row.profile.name}`);
+            } catch (e) { toast(e.message); }
+          });
+          line.appendChild(del);
+        }
         body.appendChild(line);
       });
     },
@@ -3363,14 +4355,23 @@ function openOptions() {
         f.appendChild(cb);
         body.appendChild(f);
       };
-      toggle("Include agent-spawned sessions in the list", !!state.settings.showAll, (on) => {
-        state.settings.showAll = on;
-        store.save();
-        refreshSessions();
-      });
       toggle("Sound cues (status, done, error, attention)", soundCuesOn(), (on) => {
         setSoundCues(on);
       });
+      // Per session, unlike everything above it — one session you are
+      // debugging wants the detail; the rest stay clean.
+      if (state.open.sessionId) {
+        toggle("Process view — show tool calls, results and thinking",
+               processViewOn(state.open.sessionId), (on) => {
+          setProcessView(state.open.sessionId, on);
+          // Refetch: steps only arrive with ?detail=steps. Default gen —
+          // loadTail's first arg is the open generation, not a flag.
+          loadTail();
+        });
+        body.appendChild(el("div", "help",
+          "This session only. Adds the agent's working steps under each "
+          + "message; the transcript is larger to load."));
+      }
     },
     actions: [{ label: "Done", close: true }],
   });
@@ -3394,13 +4395,17 @@ function wire() {
   $("btn-inbox").addEventListener("click", openInbox);
   $("btn-usage").addEventListener("click", openUsage);
   $("btn-options").addEventListener("click", openOptions);
+  $("btn-rename").addEventListener("click", openRename);
   $("btn-refresh").addEventListener("click", () => {
     loadTail();
     refreshSessions();
     // Transcript reload used to leave a dismissed ask stranded; re-surface it.
-    if (state.job && state.job.pendingQuestion) showQuestion(state.job.pendingQuestion);
-    else if (state.job && state.job.pendingPermission) {
-      showPermission(state.job.pendingPermission, { force: true });
+    if (state.job && (state.job.pendingQuestion || state.job.lastPendingQuestion
+        || state.job.pendingPermission || state.job.lastPendingPermission)) {
+      if (state.job.pendingQuestion || state.job.lastPendingQuestion) reopenQuestion();
+      else reopenPermission();
+    } else {
+      renderBanner();
     }
   });
   $("btn-live-tui")?.addEventListener("click", () => {

@@ -12,6 +12,12 @@ struct SessionRow {
   bool working = false;
   uint8_t daemon = 0;   // which configured daemon owns this session
   String lastActive;    // ISO timestamp — lexicographic sort works
+  // Focus: is this a project the human enrolled, and what does it want.
+  // focusState is "" outside Focus, else one of the four focus states.
+  bool focus = false;
+  String focusState;
+  // Cosmetic: a finished turn is only worth flagging until you have opened it.
+  bool focusUnread = false;
 };
 
 struct UsageBucket {
@@ -42,6 +48,13 @@ void configure(int idx, const String &baseUrl, const String &token);
 bool ping(int daemon, String *versionOut = nullptr, String *errOut = nullptr);
 bool fetchSessions(int daemon, std::vector<SessionRow> *out,
                    String *errOut = nullptr);
+// Focus rows only (GET /api/focus), most urgent first. The pager shows
+// one or two rows, so asking the daemon to filter and rank beats fetching the
+// recent list and hoping the forgotten project is in it.
+bool fetchFocus(int daemon, std::vector<SessionRow> *out,
+                String *errOut = nullptr);
+// Short tag for a focus state, or "" when it has none.
+const char *focusStateLabel(const String &state);
 bool sendPrompt(int daemon, const String &sessionId, const String &prompt,
                 String *errOut = nullptr);
 bool newSession(int daemon, const String &cwd, const String &prompt,

@@ -49,6 +49,10 @@ struct AppConfig {
 
   bool soundCues = true;
   bool hapticCues = true;
+  // Focus mode: list only the projects the human enrolled through a daemon.
+  // On a pager this is usually what you want — the recent list is mostly
+  // sessions you are not carrying.
+  bool focusMode = false;
   uint8_t volume = 50;   // chime volume %, 0–100
   bool bleMode = false;  // claude-desktop-buddy BLE bridge
   uint8_t backlight = 180;
@@ -90,6 +94,7 @@ struct AppConfig {
       }
     }
     soundCues = p.getBool("sound", true);
+    focusMode = p.getBool("focus", false);
     hapticCues = p.getBool("haptic", true);
     volume = p.getUChar("vol", 50);
     bleMode = p.getBool("ble", false);
@@ -114,6 +119,7 @@ struct AppConfig {
       p.putBool(("e" + String(i)).c_str(), daemons[i].enabled);
     }
     p.putBool("sound", soundCues);
+    p.putBool("focus", focusMode);
     p.putBool("haptic", hapticCues);
     p.putUChar("vol", volume);
     p.putBool("ble", bleMode);

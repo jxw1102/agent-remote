@@ -50,6 +50,8 @@ prompts, and stop work without sitting at the desk.
 - Multi-host profiles and multi-agent sessions (Claude · Grok · Codex)
 - Live status (SSE / WebSocket), queues, stop, capability discovery (`GET /api/ping`)
 - Auth / login health on `/api/ping` (daemon ≥ 2.5.3)
+- Focus mode: filter the list to the projects you are carrying, tagged *needs
+  answer · failed · working · turn finished*; rename or re-derive session titles
 - Permission Allow/Deny and `AskUserQuestion` where the harness supports them
 - Attachments, slash commands, host→device file drop, session rewind
 - Interactive and headless execution modes

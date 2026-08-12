@@ -32,8 +32,10 @@ import urllib.request
 from pathlib import Path
 
 from .. import providers
+from .. import steps as steps_mod
 from ..render_blocks import inline_to_rich, markdown_to_blocks
 from .. import search_util
+from .. import titles
 
 log = logging.getLogger(__name__)
 
@@ -842,8 +844,9 @@ def _event_tool(ev: dict):
             args = payload.get("arguments") if payload.get("arguments") is not None \
                 else payload.get("input")
             if isinstance(args, dict):
-                detail = str(args.get("cmd") or args.get("command")
-                             or args.get("path") or args)[:200]
+                detail = str(args.get("description") or args.get("cmd")
+                             or args.get("command") or args.get("path")
+                             or args)[:200]
             else:
                 detail = str(args or "")[:200]
             if name in ("exec", "shell", "Bash"):
@@ -883,6 +886,8 @@ class CodexStore:
     def __init__(self, home: Path, config=None):
         self.home = Path(home).expanduser()
         self.config = config
+        # Set by providers.build_one to this harness's own generator.
+        self.titler = None
 
     # -- discovery ------------------------------------------------------
 
@@ -926,6 +931,10 @@ class CodexStore:
                 clauses.append("(COALESCE(has_user_event, 1) = 1 "
                                "OR length(COALESCE(first_user_message,'')) > 0 "
                                "OR length(COALESCE(preview,'')) > 0)")
+                # The throwaway turns the title generator runs are not the
+                # human's sessions; they are identified by their cwd.
+                clauses.append("COALESCE(cwd, '') <> ?")
+                args.append(str(titles.titler_cwd()))
             if project_cwd:
                 clauses.append("cwd = ?")
                 args.append(project_cwd)
@@ -1062,7 +1071,68 @@ class CodexStore:
         finally:
             con.close()
 
-    def get_messages(self, session_id: str, offset: int = None, limit: int = 50):
+    supports_steps = True     # `?detail=steps` (see agentremoted.steps)
+
+    def get_step(self, session_id: str, ref: str):
+        """Full text behind one truncated step — re-read the rollout line."""
+        if not ref or len(ref) < 3:
+            return None
+        kind, num = ref[:2], ref[2:]
+        try:
+            want = int(num)
+        except ValueError:
+            return None
+        path = self._rollout_path(session_id)
+        if not path:
+            return None
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for ln, line in enumerate(f):
+                    if ln != want:
+                        continue
+                    ev = _safe_json(line)
+                    p = (ev or {}).get("payload") or {}
+                    if kind == "cu":
+                        # Same arguments/input split as _codex_step.
+                        args = p.get("arguments")
+                        if args is None:
+                            args = p.get("input")
+                        text = steps_mod.format_tool_use(
+                            p.get("name") or "tool", args)
+                    elif kind == "cr":
+                        out = p.get("output")
+                        if not isinstance(out, str):
+                            try:
+                                out = json.dumps(out, indent=1,
+                                                 ensure_ascii=False)
+                            except (TypeError, ValueError):
+                                out = str(out)
+                        text = steps_mod.format_tool_result(out or "")
+                    elif kind == "ct":
+                        text = _codex_reasoning(p)
+                    else:
+                        return None
+                    return {"ref": ref, "text": text or "",
+                            "bytes": len(text or "")}
+        except (OSError, TypeError, ValueError):
+            return None
+        return None
+
+    def _rollout_path(self, session_id: str) -> str:
+        con = self._connect()
+        if con is None:
+            return ""
+        try:
+            r = con.execute("SELECT rollout_path FROM threads WHERE id = ?",
+                            (session_id,)).fetchone()
+            return (r["rollout_path"] if r else "") or ""
+        except sqlite3.Error:
+            return ""
+        finally:
+            con.close()
+
+    def get_messages(self, session_id: str, offset: int = None, limit: int = 50,
+                     steps: bool = False):
         sess = self.get_session(session_id)
         if sess is None:
             return None
@@ -1080,7 +1150,12 @@ class CodexStore:
             finally:
                 con.close()
         t0 = time.perf_counter()
-        messages = _build_transcript(Path(path) if path else None)
+        step_rows = []
+        if steps:
+            messages, step_rows = _build_transcript(
+                Path(path) if path else None, want_steps=True)
+        else:
+            messages = _build_transcript(Path(path) if path else None)
         t1 = time.perf_counter()
         total = len(messages)
         if offset is None:
@@ -1089,6 +1164,10 @@ class CodexStore:
         window = messages[offset: offset + limit]
         for msg in window:
             _render_codex_message(msg)
+        if steps:
+            steps_mod.attach(window, step_rows)
+            for msg in messages:
+                msg.pop("_pos", None)
         t2 = time.perf_counter()
         try:
             file_bytes = Path(path).stat().st_size if path else 0
@@ -1112,11 +1191,28 @@ class CodexStore:
     def known_session_ids(self) -> set:
         return {r["id"] for r in self._rows(user_only=False) if r["id"]}
 
+    def _derived_title(self, session_id: str, first: str) -> str:
+        """Cached AI title for a session Codex never named itself."""
+        if self.config is None or not session_id or not first:
+            return ""
+        cache = titles.shared_cache(self.config)
+        sig = titles.sig_for(first)
+        got = cache.get(session_id, sig)
+        if got:
+            return got
+        cache.request(session_id, sig, first, self.titler)
+        return ""
+
     def _summary(self, row) -> dict:
         cwd = (row["cwd"] or "").strip()
         title = " ".join(str(row["title"] or "").split())
-        if not title or title.lower() in ("", "new session", "untitled"):
-            title = " ".join(str(row["first_user_message"] or row["preview"] or "").split())
+        if titles.looks_blank(title):
+            # Codex usually stores no title, so the fallback is a raw opening
+            # message. Derive one instead; the raw text shows once while the
+            # first call is in flight.
+            first = " ".join(
+                str(row["first_user_message"] or row["preview"] or "").split())
+            title = self._derived_title(row["id"] or "", first) or first
         if not title:
             title = "Session %s" % (row["id"] or "")[:8]
         last = row["preview"] or row["first_user_message"] or ""
@@ -1167,37 +1263,121 @@ class CodexStore:
         return None
 
 
-def _build_transcript(path: Path | None) -> list:
+def _build_transcript(path: Path | None, want_steps: bool = False):
     """Coalesce rollout JSONL into [{role, text, ts}] for the phone.
 
-    Conversation only (user + assistant). Tool activity is live job state —
-    the banner/ticker — same as Claude/Grok; tool rows are not persisted in
-    the transcript.
+    Conversation only (user + assistant) by default. With ``want_steps`` the
+    turn's working records are collected too — function calls, their output
+    and the reasoning — and returned alongside, tagged with the rollout line
+    they came from so they can be attached to the message they followed.
     """
     if path is None or not path.is_file():
-        return []
+        return ([], []) if want_steps else []
     messages = []
+    step_rows = []
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
+            for ln, line in enumerate(f):
                 ev = _safe_json(line)
                 if not isinstance(ev, dict):
                     continue
+                if want_steps:
+                    st = _codex_step(ev, ln)
+                    if st is not None:
+                        step_rows.append((ln, st))
                 hit = _event_chat_message(ev)
                 if not hit:
                     continue
                 role, text = hit
                 ts = str(ev.get("timestamp") or "")
                 prefix = "u" if role == "user" else "a"
-                messages.append({
+                msg = {
                     "uuid": "%s%d" % (prefix, len(messages)),
                     "role": role,
                     "ts": ts,
                     "text": text,
-                })
+                }
+                if want_steps:
+                    msg["_pos"] = ln
+                messages.append(msg)
     except OSError:
-        return messages
-    return messages
+        return (messages, step_rows) if want_steps else messages
+    return (messages, step_rows) if want_steps else messages
+
+
+def _codex_step(ev: dict, ln: int):
+    """One process step from a rollout line, or None.
+
+    Codex records the work as `response_item`s: function_call /
+    custom_tool_call carry the arguments, their *_output twins carry the
+    result, and `reasoning` carries the thinking (plaintext in `summary`,
+    with `encrypted_content` as the fallback shape).
+    """
+    if str(ev.get("type") or "") != "response_item":
+        return None
+    p = ev.get("payload")
+    if not isinstance(p, dict):
+        return None
+    ptype = str(p.get("type") or "")
+    ts = str(ev.get("timestamp") or "")
+    if ptype in ("function_call", "custom_tool_call"):
+        # function_call carries `arguments`; custom_tool_call (apply_patch and
+        # friends) carries `input` instead — reading only the former showed
+        # every patch as "null".
+        args = p.get("arguments")
+        if args is None:
+            args = p.get("input")
+        name = p.get("name") or "tool"
+        body = steps_mod.format_tool_use(name, args)
+        return steps_mod.tool_use("cu%d" % ln, ts, name,
+                                  _codex_call_detail(args), body)
+    if ptype in ("function_call_output", "custom_tool_call_output"):
+        out = p.get("output")
+        if not isinstance(out, str):
+            try:
+                out = json.dumps(out, indent=1, ensure_ascii=False)
+            except (TypeError, ValueError):
+                out = str(out)
+        body = steps_mod.format_tool_result(out or "")
+        # Codex reports shell failures as "Process exited with code N". Only
+        # that is treated as failure — sniffing for the word "error" flagged
+        # every grep for the string "error" as a failed call.
+        ok = not re.search(r"exited with code [1-9]", body or "")
+        return steps_mod.tool_result("cr%d" % ln, ts, ok, body or "")
+    if ptype == "reasoning":
+        return steps_mod.thinking("ct%d" % ln, ts, _codex_reasoning(p))
+    return None
+
+
+def _codex_reasoning(p: dict) -> str:
+    parts = []
+    for item in p.get("summary") or []:
+        if isinstance(item, dict) and item.get("text"):
+            parts.append(item["text"])
+    if parts:
+        return "\n".join(parts)
+    enc = p.get("encrypted_content")
+    # Only readable when Codex stored it in the clear; base64 ciphertext is
+    # not something to render, so let the marker path handle it.
+    return enc if isinstance(enc, str) and " " in enc[:120] else ""
+
+
+def _codex_call_detail(args: str) -> str:
+    """Short line naming what a call is about — prefer description, else cmd."""
+    try:
+        obj = json.loads(args) if isinstance(args, str) else args
+    except (TypeError, ValueError):
+        return " ".join((args or "").split())[:200]
+    if not isinstance(obj, dict):
+        return ""
+    for key in ("description", "cmd", "command", "path", "file_path",
+                "query", "pattern"):
+        val = obj.get(key)
+        if isinstance(val, list):
+            val = " ".join(str(v) for v in val)
+        if isinstance(val, str) and val.strip():
+            return " ".join(val.split())[:200]
+    return ""
 
 
 def _render_codex_message(msg: dict) -> None:
@@ -1428,7 +1608,8 @@ class CodexRunner:
     # Verified in codex's own TUI command list: /compact and /exit are
     # there. /rewind is served by the DAEMON (rollout truncation in
     # jobs.py), so it works on headless turns too.
-    _BUILTIN_SLASH = ["/compact", "/exit", "/rewind"]
+    # /goal is always advertised so phone/web clients do not refuse it.
+    _BUILTIN_SLASH = ["/compact", "/exit", "/goal", "/rewind"]
 
     def slash_commands(self):
         out = list(self._BUILTIN_SLASH)
@@ -1465,6 +1646,28 @@ class CodexRunner:
 
     def efforts(self):
         return list(getattr(self.config, "efforts", None) or [])
+
+    def title_for(self, text: str) -> str:
+        """Name a Codex session using Codex itself.
+
+        One `codex exec` in the titler's scratch directory. Costs real tokens
+        (~11.5k measured, since the CLI loads its instructions first), so it is
+        cached hard and only ever run from the background titler.
+        """
+        cwd = str(titles.titler_cwd())
+        cmd = [_codex_bin(self.config), "exec", "--skip-git-repo-check",
+               "-C", cwd, titles.prompt_for(text)]
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(
+            Path(getattr(self.config, "codex_home_path", None)
+                 or (Path.home() / ".codex")).expanduser())
+        env.setdefault("RUST_LOG", "error")
+        try:
+            out = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True,
+                                 text=True, timeout=180).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return titles.title_from_output(out)
 
     def prepare(self, job, mode):
         # `mode` is claude vocabulary; codex uses sandbox / bypass flags.

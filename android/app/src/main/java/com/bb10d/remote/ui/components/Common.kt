@@ -209,4 +209,25 @@ fun MetaPill(text: String, modifier: Modifier = Modifier, tint: Color? = null) {
     )
 }
 
+/**
+ * Focus state tag. Colour carries urgency: amber wants you now, green is busy,
+ * neutral can wait. Same pill shape as every other row chip — Focus is a
+ * filter over the session list, not a different layout.
+ */
+@Composable
+fun FocusPill(state: String, modifier: Modifier = Modifier, unread: Boolean = false) {
+    val pal = palette
+    val (label, tint) = when (state) {
+        "needs_answer" -> "needs answer" to pal.warn
+        "failed" -> "failed" to pal.danger
+        "working" -> "working" to pal.ok
+        // Lit until opened, dim afterwards: an unread result should stand out
+        // in the list, a read one is just waiting on you.
+        "turn_finished" -> "turn finished" to
+            (if (unread) MaterialTheme.colorScheme.onSurface else pal.dim)
+        else -> return
+    }
+    MetaPill(label, modifier, tint)
+}
+
 val ScreenPadding = PaddingValues(horizontal = 16.dp)

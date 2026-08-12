@@ -15,7 +15,6 @@ class SettingsViewModel(private val repo: AgentRepository) : ViewModel() {
     fun setNotifyTurnDone(v: Boolean) = edit { repo.settingsStore.setNotifyTurnDone(v) }
     fun setSoundCues(v: Boolean) = edit { repo.settingsStore.setSoundCues(v) }
     fun setHapticCues(v: Boolean) = edit { repo.settingsStore.setHapticCues(v) }
-    fun setShowAllSessions(v: Boolean) = edit { repo.settingsStore.setShowAllSessions(v) }
 
     private fun edit(block: suspend () -> Unit) {
         viewModelScope.launch { block() }
