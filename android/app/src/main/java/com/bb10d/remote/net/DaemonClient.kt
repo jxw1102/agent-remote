@@ -26,6 +26,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -50,6 +51,9 @@ class DaemonException(
     /** Daemon refused because the job moved on (queue closed, TUI gone). */
     val conflict: Boolean get() = status == 409
 }
+
+/** One downloaded drop entry: its bytes plus the name the daemon served it as. */
+class DropPayload(val name: String, val bytes: ByteArray)
 
 /**
  * HTTP access to one agentremoted host.
@@ -157,7 +161,13 @@ class DaemonClient(
         req: Request,
         timeoutSeconds: Int = 0,
         writeTimeoutSeconds: Int = -1,
-    ): ByteArray =
+    ): ByteArray = rawResponse(req, timeoutSeconds, writeTimeoutSeconds).second
+
+    private suspend fun rawResponse(
+        req: Request,
+        timeoutSeconds: Int = 0,
+        writeTimeoutSeconds: Int = -1,
+    ): Pair<Headers, ByteArray> =
         withContext(Dispatchers.IO) {
             val response: Response = try {
                 clientFor(timeoutSeconds, writeTimeoutSeconds).newCall(req).execute()
@@ -180,7 +190,7 @@ class DaemonClient(
                 if (it.code !in 200..299) {
                     throw DaemonException(it.code, errorText(it.code, bytes))
                 }
-                bytes
+                it.headers to bytes
             }
         }
 
@@ -595,8 +605,17 @@ class DaemonClient(
     suspend fun dropList(): DropListDto =
         call(request(url("api/drop")).get().build(), DropListDto.serializer())
 
-    suspend fun dropDownload(name: String): ByteArray =
-        raw(request(url("api/drop/$name")).get().build(), timeoutSeconds = 180)
+    /**
+     * The daemon names what it actually served in X-Drop-Name — a folder
+     * arrives zipped as `<name>.zip` — so the caller saves under that, not
+     * under the entry name it asked for.
+     */
+    suspend fun dropDownload(name: String): DropPayload {
+        val (headers, bytes) =
+            rawResponse(request(url("api/drop/$name")).get().build(), timeoutSeconds = 180)
+        val served = headers["X-Drop-Name"]?.takeIf { it.isNotBlank() } ?: name
+        return DropPayload(served, bytes)
+    }
 
     suspend fun dropDelete(name: String) {
         raw(request(url("api/drop/$name/delete")).post(jsonBody(buildJsonObject {})).build())

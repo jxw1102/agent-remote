@@ -140,8 +140,10 @@ class DropViewModel(private val repo: AgentRepository) : ViewModel() {
         downloading = downloading + key
         viewModelScope.launch {
             runCatching {
-                val bytes = client.dropDownload(name)
-                withContext(Dispatchers.IO) { save(context, name, bytes) }
+                // Save under the name the daemon served, not the entry name:
+                // a folder arrives zipped, so its download is "<name>.zip".
+                val payload = client.dropDownload(name)
+                withContext(Dispatchers.IO) { save(context, payload.name, payload.bytes) }
             }
                 .onSuccess { _message.value = "Saved to $it" }
                 .onFailure { _message.value = repo.reason(it) }
@@ -153,7 +155,14 @@ class DropViewModel(private val repo: AgentRepository) : ViewModel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, name)
-                put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+                // application/zip, so tapping the finished download opens the
+                // archive instead of the "can't open this file" dialog.
+                val mime = if (name.endsWith(".zip", ignoreCase = true)) {
+                    "application/zip"
+                } else {
+                    "application/octet-stream"
+                }
+                put(MediaStore.Downloads.MIME_TYPE, mime)
                 put(MediaStore.Downloads.IS_PENDING, 1)
             }
             val resolver = context.contentResolver
