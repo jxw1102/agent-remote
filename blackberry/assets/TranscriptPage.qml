@@ -83,6 +83,35 @@ Page {
             questionSheet.show();
     }
 
+    // Process-view step expanded/collapsed: apply the ONE row edit in place.
+    // A full rebuild() clears the model, which snaps the ListView back to
+    // the top of the transcript — the whole reason this pin exists. The C++
+    // index counts m_messages only; the model has an extra "older" row on
+    // top whenever canLoadOlder.
+    property int stepEditPin: transcriptPage.api
+                              ? transcriptPage.api.stepEditRev : -1
+    property int seenStepEditRev: -1
+    onStepEditPinChanged: {
+        if (seenStepEditRev < 0 || ! transcriptPage.api) {
+            seenStepEditRev = stepEditPin;
+            return;
+        }
+        if (stepEditPin == seenStepEditRev)
+            return;
+        seenStepEditRev = stepEditPin;
+        var a = transcriptPage.api;
+        var idx = a.stepEditIndex + (a.canLoadOlder ? 1 : 0);
+        if (idx < 0 || idx > messagesModel.size())
+            return;
+        var act = "" + a.stepEditAction;
+        if (act == "insert")
+            messagesModel.insert(idx, a.stepEditItem);
+        else if (act == "remove" && idx < messagesModel.size())
+            messagesModel.removeAt(idx);
+        else if (act == "replace" && idx < messagesModel.size())
+            messagesModel.replace(idx, a.stepEditItem);
+    }
+
     // The pusher sets `api` after creation completes.
     onApiChanged: {
         if (ready && transcriptPage.api)

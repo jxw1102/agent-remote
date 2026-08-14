@@ -333,6 +333,8 @@ ApiClient::ApiClient(QObject *parent)
     , m_renamePrompt(0)
     , m_renameProfileIndex(-1)
     , m_renameSessionId()
+    , m_stepEditRev(0)
+    , m_stepEditIndex(-1)
 {
     s_modelApi = this;
     // Classic/Q20 = 720; Passport = 1440. Same insets as the proven Classic
@@ -3051,6 +3053,19 @@ void ApiClient::setProcessView(bool on)
     fetchMessages(-1, INITIAL_PAGE_SIZE, false);
 }
 
+// One in-place model edit, mirrored to QML through the stepEdit pin. Never
+// bump messageRev here: the full rebuild it triggers clears the ListView's
+// model and snaps the reader back to the top of the transcript.
+void ApiClient::publishStepEdit(const QString &action, int index,
+                                const QVariantMap &item)
+{
+    m_stepEditAction = action;
+    m_stepEditIndex = index;
+    m_stepEditItem = item;
+    m_stepEditRev++;
+    emit stepEditChanged();
+}
+
 void ApiClient::toggleStep(const QString &ref)
 {
     if (ref.isEmpty())
@@ -3066,7 +3081,7 @@ void ApiClient::toggleStep(const QString &ref)
             if (next.value("kind").toString() == QLatin1String("stepbody")
                     && next.value("stepRef").toString() == ref) {
                 m_messages.removeAt(i + 1);
-                bumpMessages(false);
+                publishStepEdit(QLatin1String("remove"), i + 1, QVariantMap());
                 return;
             }
         }
@@ -3077,7 +3092,7 @@ void ApiClient::toggleStep(const QString &ref)
                                      QString(), false);
         body["stepRef"] = ref;
         m_messages.insert(i + 1, body);
-        bumpMessages(false);
+        publishStepEdit(QLatin1String("insert"), i + 1, body);
         // Only the head of a big body travels with the window; the rest is
         // fetched on this first expand.
         if (item.value("stepTruncated").toBool()
@@ -3108,7 +3123,7 @@ void ApiClient::handleStepFull(QNetworkReply *reply, const QVariant &data)
                 && item.value("stepRef").toString() == ref) {
             item["text"] = text;
             m_messages.replace(i, item);
-            bumpMessages(false);
+            publishStepEdit(QLatin1String("replace"), i, item);
             return;
         }
     }

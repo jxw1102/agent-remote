@@ -193,6 +193,15 @@ class ApiClient : public QObject
     // (tool calls, results, thinking) under each message. Per session,
     // persisted, off by default — web/Android/iOS parity.
     Q_PROPERTY(bool processView READ processView NOTIFY processViewChanged)
+    // Step expand/collapse edits ONE row in place. A messageRev rebuild
+    // clears the QML model, which snaps the ListView back to the top — so
+    // the edit travels on its own pin and QML mutates its model in place.
+    // action: insert | remove | replace; index is the C++ m_messages index
+    // (QML adds 1 when its model is showing the "older" row on top).
+    Q_PROPERTY(int stepEditRev READ stepEditRev NOTIFY stepEditChanged)
+    Q_PROPERTY(QString stepEditAction READ stepEditAction NOTIFY stepEditChanged)
+    Q_PROPERTY(int stepEditIndex READ stepEditIndex NOTIFY stepEditChanged)
+    Q_PROPERTY(QVariantMap stepEditItem READ stepEditItem NOTIFY stepEditChanged)
     // Job of the OPEN session only.
     Q_PROPERTY(bool jobRunning READ jobRunning NOTIFY jobRunningChanged)
     // Live "<Agent> is working... 12s" line while a job runs ("" otherwise).
@@ -503,6 +512,10 @@ public:
 
     // ---- Process view ----
     bool processView() const;
+    int stepEditRev() const { return m_stepEditRev; }
+    QString stepEditAction() const { return m_stepEditAction; }
+    int stepEditIndex() const { return m_stepEditIndex; }
+    QVariantMap stepEditItem() const { return m_stepEditItem; }
     // Toggles it for the OPEN session and refetches (steps only arrive with
     // ?detail=steps, so toggling off drops them too).
     Q_INVOKABLE void setProcessView(bool on);
@@ -536,6 +549,7 @@ Q_SIGNALS:
     void questionChanged();
     void queueChanged();
     void processViewChanged();
+    void stepEditChanged();
     void newSessionRequestChanged();
     void attachChanged();
     void dropChanged();
@@ -862,6 +876,12 @@ private:
     QSet<QString> m_processViewSessions;
     void appendStepItems(QVariantList &out, const QVariantList &steps);
     void handleStepFull(QNetworkReply *reply, const QVariant &data);
+    void publishStepEdit(const QString &action, int index,
+                         const QVariantMap &item);
+    int m_stepEditRev;
+    QString m_stepEditAction;
+    int m_stepEditIndex;
+    QVariantMap m_stepEditItem;
     QString m_errorLog;
 };
 
