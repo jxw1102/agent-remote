@@ -211,11 +211,20 @@ public struct AgentRemoteClient: Sendable {
         try await send("GET", "/api/sessions/\(id)")
     }
 
-    public func messages(sessionId: String, offset: Int? = nil, limit: Int? = nil) async throws -> MessagesResponse {
+    public func messages(sessionId: String, offset: Int? = nil, limit: Int? = nil, steps: Bool = false) async throws -> MessagesResponse {
         try await send("GET", "/api/sessions/\(sessionId)/messages", query: [
             "offset": offset.map(String.init),
             "limit": limit.map(String.init),
+            // Process view: attach tool_use/tool_result/thinking steps to each
+            // message. Off = byte-identical to the pre-steps response.
+            "detail": steps ? "steps" : nil,
         ], timeout: 60)
+    }
+
+    /// Full text behind a truncated process step — fetched only on expand, which is what keeps
+    /// a 200KB tool result out of every transcript window fetch.
+    public func stepText(sessionId: String, ref: String) async throws -> StepTextResponse {
+        try await send("GET", "/api/sessions/\(sessionId)/steps/\(ref)", timeout: 60)
     }
 
     // MARK: - Focus / titles

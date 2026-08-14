@@ -96,7 +96,18 @@ struct SessionsListView: View {
                 Section {
                     ForEach(rows) { row in
                         Button {
-                            onOpen(row)
+                            // Opening from search: the push is swallowed both
+                            // while the search overlay is presented AND while
+                            // it is dismissing — so dismiss first and open once
+                            // the transition has settled.
+                            if searching {
+                                searching = false
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                                    onOpen(row)
+                                }
+                            } else {
+                                onOpen(row)
+                            }
                         } label: {
                             SessionRowView(
                                 row: row,

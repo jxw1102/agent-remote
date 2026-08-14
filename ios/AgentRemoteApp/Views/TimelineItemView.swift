@@ -1,8 +1,12 @@
+import AgentRemoteKit
 import SwiftUI
 
 struct TimelineItemView: View {
     let item: TimelineItem
     var accent: ProviderAccent = .claude
+    /// Process view: expanded step bodies (ref → full text; "" = preview only).
+    var openSteps: [String: String] = [:]
+    var onToggleStep: ((ProcessStep) -> Void)?
 
     /// Render inline markdown (bold, italic, `code`, links) while preserving the message's own line
     /// breaks. Parsing is done one line at a time so an inline span — especially an unbalanced or
@@ -62,7 +66,100 @@ struct TimelineItemView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.vertical, 2)
+
+        case .step(_, let step):
+            ProcessStepRow(
+                step: step,
+                accent: accent,
+                openBody: openSteps[step.ref],
+                onToggle: { onToggleStep?(step) }
+            )
         }
+    }
+}
+
+/// One process-view step: ▸ tool call, ↳ result, ✻ thinking. Tapping the head expands the
+/// preview; a truncated body is fetched from the daemon on first expand (see ChatViewModel).
+struct ProcessStepRow: View {
+    let step: ProcessStep
+    var accent: ProviderAccent = .claude
+    /// nil = collapsed; "" = expanded showing the preview; else the fetched full body.
+    var openBody: String?
+    var onToggle: () -> Void = {}
+
+    private var isError: Bool { step.kind == "tool_result" && !step.ok }
+    private var silent: Bool { step.kind == "thinking" && !step.recorded }
+
+    private var mark: String {
+        switch step.kind {
+        case "tool_use": return "▸"
+        case "tool_result": return "↳"
+        case "thinking": return "✻"
+        default: return "·"
+        }
+    }
+
+    private var title: String {
+        switch step.kind {
+        case "tool_use": return step.name.isEmpty ? "tool" : step.name
+        case "tool_result": return isError ? "error" : "result"
+        case "thinking": return "thinking"
+        default: return step.kind
+        }
+    }
+
+    private var detailLine: String {
+        if silent { return "not recorded by this CLI" }
+        if !step.detail.isEmpty { return step.detail }
+        return String(step.preview.split(separator: "\n", maxSplits: 1)[0].prefix(120))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Button(action: onToggle) {
+                HStack(alignment: .top, spacing: 6) {
+                    Text(mark)
+                        .font(.caption2)
+                        .foregroundStyle(isError ? Color.orange : accent.tint.opacity(0.8))
+                    Text(title)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(isError ? Color.orange : Color.secondary)
+                    Text(detailLine)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if step.bytes > 0 {
+                        Text(Self.humanSize(step.bytes))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(silent)
+
+            if let body = openBody {
+                let text = body.isEmpty ? step.preview : body
+                let pending = body.isEmpty && step.truncated
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(text + (pending ? "\n…" : ""))
+                        .font(.system(size: 12, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(8)
+                }
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .padding(.leading, 16)
+            }
+        }
+        .padding(.leading, 4)
+    }
+
+    private static func humanSize(_ bytes: Int) -> String {
+        if bytes >= 1024 * 1024 { return String(format: "%.1f MB", Double(bytes) / 1048576.0) }
+        if bytes >= 1024 { return String(format: "%.1f KB", Double(bytes) / 1024.0) }
+        return "\(bytes) B"
     }
 }
 

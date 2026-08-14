@@ -31,9 +31,14 @@ struct ChatView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: Theme.Space.row) {
                         ForEach(viewModel.items) { item in
-                            TimelineItemView(item: item, accent: accent)
-                                .id(item.id)
-                                .contextMenu { contextMenu(for: item) }
+                            TimelineItemView(
+                                item: item,
+                                accent: accent,
+                                openSteps: viewModel.openSteps,
+                                onToggleStep: { viewModel.toggleStep($0) }
+                            )
+                            .id(item.id)
+                            .contextMenu { contextMenu(for: item) }
                         }
                         if viewModel.isBusy {
                             HStack(spacing: 7) {
@@ -113,6 +118,18 @@ struct ChatView: View {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
                     .disabled(viewModel.isBusy || viewModel.sessionId.isEmpty)
+                    // Adds the agent's working steps (tool calls, results,
+                    // thinking) under each message. This session only.
+                    Button {
+                        viewModel.setProcessView(!viewModel.processView)
+                    } label: {
+                        if viewModel.processView {
+                            Label("Process view", systemImage: "checkmark")
+                        } else {
+                            Text("Process view")
+                        }
+                    }
+                    .disabled(viewModel.sessionId.isEmpty)
                     Divider()
                     Button {
                         UIPasteboard.general.string = viewModel.plainTranscript
@@ -128,6 +145,7 @@ struct ChatView: View {
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
+                .accessibilityIdentifier("chat.more")
             }
         }
         // Attach to a turn started elsewhere (desktop TUI, queued chain, or an orphaned

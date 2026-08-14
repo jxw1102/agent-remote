@@ -141,13 +141,15 @@ public struct SessionSearchResponse: Codable, Sendable, Equatable {
 }
 
 /// One turn from `GET /api/sessions/<id>/messages`. `role` is `"user"`, `"assistant"`, or
-/// occasionally `"status"` (grok thought/worked lines). Tool activity is not persisted.
+/// occasionally `"status"` (grok thought/worked lines). With `?detail=steps` (process view)
+/// each message additionally carries the working `steps` that happened after it.
 public struct SessionMessage: Codable, Sendable, Equatable, Identifiable {
     public let uuid: String
     public let role: String
     public let ts: FlexibleDate
     public let text: String
     public let metaKind: String?
+    public let steps: [ProcessStep]
 
     public var id: String { uuid }
 
@@ -158,11 +160,64 @@ public struct SessionMessage: Codable, Sendable, Equatable, Identifiable {
         ts = try c.decodeIfPresent(FlexibleDate.self, forKey: .ts) ?? FlexibleDate(.distantPast)
         text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
         metaKind = try c.decodeIfPresent(String.self, forKey: .metaKind)
+        steps = try c.decodeIfPresent([ProcessStep].self, forKey: .steps) ?? []
     }
 
     private enum CodingKeys: String, CodingKey {
-        case uuid, role, ts, text, metaKind
+        case uuid, role, ts, text, metaKind, steps
     }
+}
+
+/// One process-view step, hung off the message it followed. Kinds: `tool_use` (name/detail),
+/// `tool_result` (ok), `thinking` (`recorded: false` = the CLI stored ciphertext only).
+/// Previews cap at ~512 bytes daemon-side; a `truncated` step fetches its full body from
+/// `GET /api/sessions/<id>/steps/<ref>` only when expanded.
+public struct ProcessStep: Codable, Sendable, Equatable, Identifiable {
+    public let kind: String
+    public let ref: String
+    public let ts: String
+    public let name: String
+    public let detail: String
+    public let ok: Bool
+    public let recorded: Bool
+    public let preview: String
+    public let bytes: Int
+    public let truncated: Bool
+    /// Syntax-highlight hint (python/diff/…); empty = plain text.
+    public let lang: String
+
+    public var id: String { ref }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? ""
+        ref = try c.decodeIfPresent(String.self, forKey: .ref) ?? ""
+        ts = try c.decodeIfPresent(String.self, forKey: .ts) ?? ""
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
+        ok = try c.decodeIfPresent(Bool.self, forKey: .ok) ?? true
+        recorded = try c.decodeIfPresent(Bool.self, forKey: .recorded) ?? true
+        preview = try c.decodeIfPresent(String.self, forKey: .preview) ?? ""
+        bytes = try c.decodeIfPresent(Int.self, forKey: .bytes) ?? 0
+        truncated = try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
+        lang = try c.decodeIfPresent(String.self, forKey: .lang) ?? ""
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, ref, ts, name, detail, ok, recorded, preview, bytes, truncated, lang
+    }
+}
+
+/// `GET /api/sessions/<id>/steps/<ref>` — the full text behind one truncated step.
+public struct StepTextResponse: Codable, Sendable, Equatable {
+    public let text: String
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+    }
+
+    private enum CodingKeys: String, CodingKey { case text }
 }
 
 public struct MessagesResponse: Codable, Sendable, Equatable {

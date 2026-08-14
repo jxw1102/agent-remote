@@ -72,6 +72,9 @@ drop / settings live in the toolbar menu and sheets.
 - Orphaned gates survive turn end (daemon 2.6.5 keeps them in the status feed)
 - Model + effort pickers (session harness catalogues)
 - Live TUI sheet (when `caps.live_tui`, or `interactive` implies one)
+- Process view (chat menu, per session): the agent's working steps — tool calls (▸),
+  results (↳), thinking (✻) — under each message via `?detail=steps`; tap to expand,
+  truncated bodies fetched from `/steps/<ref>` on first expand
 - Merged host drop inbox across daemons (folders download as `<name>.zip`, delete
   works on folders, dedup across profiles) + per-account merged usage
 - Profile editor with test connection (ping + authenticated `/api/projects` call)

@@ -52,6 +52,11 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
     /// One-line acknowledgement under the composer ("Queued", "Stopping…"); self-explanatory
     /// problems stick until the next action replaces them.
     @Published var statusLine: String?
+    /// Process view: show the agent's working steps under each message (this session only,
+    /// persisted, off by default — web/Android parity).
+    @Published private(set) var processView = false
+    /// Expanded steps: ref → full body once fetched ("" while only the preview is available).
+    @Published private(set) var openSteps: [String: String] = [:]
 
     private(set) var sessionId: String
     @Published private(set) var model: String = ""
@@ -119,9 +124,48 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
             selectedModel = s.modelOverride
             selectedEffort = s.effortOverride
             permissionMode = s.permissionMode == "interactive" ? "interactive" : ""
+            processView = resume.map { s.processViewSessions.contains($0) } ?? false
         }
         if resume != nil {
             loadHistory()
+        }
+    }
+
+    // MARK: - Process view
+
+    func setProcessView(_ on: Bool) {
+        guard !sessionId.isEmpty else { return }
+        processView = on
+        if on {
+            settings?.settings.processViewSessions.insert(sessionId)
+        } else {
+            settings?.settings.processViewSessions.remove(sessionId)
+            openSteps = [:]
+        }
+        // Steps only arrive with ?detail=steps — refetch either way so toggling
+        // off also drops them.
+        if phase != .running { loadHistory() }
+    }
+
+    /// Expand/collapse one step. First expand of a truncated step fetches the full body —
+    /// that is what keeps a 200KB tool result out of every window fetch.
+    func toggleStep(_ step: ProcessStep) {
+        if openSteps[step.ref] != nil {
+            openSteps.removeValue(forKey: step.ref)
+            return
+        }
+        openSteps[step.ref] = ""
+        guard step.truncated, let agentClient = client.agentClient, !sessionId.isEmpty else { return }
+        let sid = sessionId
+        Task {
+            do {
+                let full = try await agentClient.stepText(sessionId: sid, ref: step.ref)
+                if openSteps[step.ref] != nil, !full.text.isEmpty {
+                    openSteps[step.ref] = full.text
+                }
+            } catch {
+                statusLine = DaemonClient.describe(error)
+            }
         }
     }
 
@@ -550,7 +594,7 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                 return
             }
             do {
-                let response = try await agentClient.messages(sessionId: resumeId)
+                let response = try await agentClient.messages(sessionId: resumeId, steps: processView)
                 var loaded: [TimelineItem] = []
                 if response.total > response.messages.count {
                     loaded.append(.systemNotice(
@@ -566,6 +610,11 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                         loaded.append(.systemNotice(id: message.id, text: message.text))
                     default:
                         loaded.append(.assistantText(id: message.id, text: message.text))
+                    }
+                    // Steps hang under the message they FOLLOWED — the daemon
+                    // attaches after, so top-to-bottom is the order it happened.
+                    for step in message.steps where !step.ref.isEmpty {
+                        loaded.append(.step(id: "step-\(step.ref)", step: step))
                     }
                 }
                 items = loaded
@@ -722,8 +771,10 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         }
         if statusLine == "Stopping…" { statusLine = nil }
         phase = .idle
-        // An attached watch skipped this turn's earlier events — swap in the durable transcript.
-        if attachedMidTurn {
+        // An attached watch skipped this turn's earlier events — swap in the durable
+        // transcript. Process view reloads too: the finished turn's steps live in the
+        // journal, which only `?detail=steps` carries.
+        if attachedMidTurn || processView {
             attachedMidTurn = false
             loadHistory()
         }

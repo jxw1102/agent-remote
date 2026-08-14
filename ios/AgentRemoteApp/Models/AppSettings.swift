@@ -14,6 +14,9 @@ struct AppSettings: Codable, Equatable {
     var theme: String = "system"
     /// Sessions list shows only the daemon-side Focus list (toggled from the filter row).
     var focusMode: Bool = false
+    /// Sessions with process view on: the transcript additionally shows the agent's working
+    /// steps (tool calls, results, thinking) under each message. Per session, off by default.
+    var processViewSessions: Set<String> = []
 
     init() {}
 
@@ -28,11 +31,12 @@ struct AppSettings: Codable, Equatable {
         showAllSessions = try c.decodeIfPresent(Bool.self, forKey: .showAllSessions) ?? false
         theme = try c.decodeIfPresent(String.self, forKey: .theme) ?? "system"
         focusMode = try c.decodeIfPresent(Bool.self, forKey: .focusMode) ?? false
+        processViewSessions = try c.decodeIfPresent(Set<String>.self, forKey: .processViewSessions) ?? []
     }
 
     private enum CodingKeys: String, CodingKey {
         case modelOverride, effortOverride, permissionMode, soundCues
-        case showAllSessions, theme, focusMode
+        case showAllSessions, theme, focusMode, processViewSessions
     }
 }
 

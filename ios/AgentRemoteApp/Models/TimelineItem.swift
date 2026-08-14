@@ -13,11 +13,14 @@ enum TimelineItem: Identifiable, Equatable {
     case permissionRequest(id: String, toolName: String, detail: String, resolution: PermissionResolution?)
     case turnResult(id: String, summary: String, isError: Bool)
     case systemNotice(id: String, text: String)
+    /// Process view: one working step (tool call / result / thinking) under its message.
+    case step(id: String, step: ProcessStep)
 
     var id: String {
         switch self {
         case .userText(let id, _), .assistantText(let id, _), .toolCall(let id, _, _),
-             .permissionRequest(let id, _, _, _), .turnResult(let id, _, _), .systemNotice(let id, _):
+             .permissionRequest(let id, _, _, _), .turnResult(let id, _, _), .systemNotice(let id, _),
+             .step(let id, _):
             return id
         }
     }

@@ -110,6 +110,56 @@ final class SmokeUITests: XCTestCase {
         XCTAssertTrue(anyMessage.waitForExistence(timeout: 20), "transcript looks empty")
     }
 
+    /// Process view: toggling it paints step rows from `?detail=steps`, and toggling it
+    /// off drops them again. Uses the idle live-turn scratch session (a running session
+    /// defers its reload to turn end, and this test must not depend on turn timing).
+    func testProcessViewShowsSteps() {
+        let app = launch()
+        _ = firstSessionRow(app).waitForExistence(timeout: 20)
+        // The scratch session ages down the list — scroll until its row is
+        // tappable. (Search-open is exercised manually; XCUITest fights the
+        // searchable overlay's duplicate element tree.)
+        let query = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS 'agent-remote-uitest'")
+        )
+        var row: XCUIElement?
+        for _ in 0..<12 {
+            if let hit = query.allElementsBoundByIndex.first(where: { $0.isHittable }) {
+                row = hit
+                break
+            }
+            app.swipeUp()
+        }
+        guard let row else {
+            XCTFail("no scratch session row — run testLiveHeadlessTurn first")
+            return
+        }
+        row.tap()
+        XCTAssertNotNil(waitForChatInput(app, timeout: 15))
+
+        let more = app.buttons["chat.more"]
+        XCTAssertTrue(more.waitForExistence(timeout: 10))
+        more.tap()
+        let toggle = app.buttons["Process view"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        toggle.tap()
+
+        // A step row is one Button whose flattened label starts with its mark
+        // (▸ tool, ↳ result, ✻ thinking) — SwiftUI merges the child Texts.
+        let stepRow = app.buttons.matching(NSPredicate(
+            format: "label BEGINSWITH '▸' OR label BEGINSWITH '↳' OR label BEGINSWITH '✻'"
+        )).firstMatch
+        XCTAssertTrue(stepRow.waitForExistence(timeout: 30), "no step rows painted")
+
+        // Cleanup: off again — steps must leave the transcript.
+        more.tap()
+        app.buttons["Process view"].tap()
+        let gone = NSPredicate(format: "exists == false")
+        let expectation = XCTNSPredicateExpectation(predicate: gone, object: stepRow)
+        XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 30), .completed,
+                       "step rows survived toggling process view off")
+    }
+
     /// End-to-end proof: new headless session in /tmp → one real turn → reply renders.
     func testLiveHeadlessTurn() {
         let app = launch()

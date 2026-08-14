@@ -397,6 +397,37 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(job.phase, "asking")
     }
 
+    func testDecodeMessagesWithProcessSteps() throws {
+        let json = """
+        {"session_id": "s1", "total": 1, "offset": 0, "messages": [
+          {"uuid": "m1", "role": "assistant", "ts": 1755150000, "text": "Done.",
+           "steps": [
+             {"kind": "tool_use", "ref": "u1:0", "ts": "", "name": "Bash",
+              "detail": "ls -la", "preview": "ls -la", "bytes": 6, "truncated": false,
+              "lang": "bash"},
+             {"kind": "tool_result", "ref": "u2:0", "ts": "", "ok": false,
+              "preview": "boom", "bytes": 20000, "truncated": true},
+             {"kind": "thinking", "ref": "u3:0", "ts": "", "recorded": false}
+           ]}
+        ]}
+        """
+        let response = try decoder().decode(MessagesResponse.self, from: Data(json.utf8))
+        let steps = try XCTUnwrap(response.messages.first?.steps)
+        XCTAssertEqual(steps.count, 3)
+        XCTAssertEqual(steps[0].name, "Bash")
+        XCTAssertEqual(steps[0].lang, "bash")
+        XCTAssertFalse(steps[1].ok)
+        XCTAssertTrue(steps[1].truncated)
+        XCTAssertFalse(steps[2].recorded)
+        // Without ?detail=steps the field is simply absent — decode must not care.
+        let bare = """
+        {"session_id": "s1", "total": 1, "offset": 0, "messages": [
+          {"uuid": "m1", "role": "assistant", "ts": 1755150000, "text": "Done."}]}
+        """
+        let plain = try decoder().decode(MessagesResponse.self, from: Data(bare.utf8))
+        XCTAssertEqual(plain.messages.first?.steps.isEmpty, true)
+    }
+
     func testDecodeShellResult() throws {
         let json = """
         {"ok": true, "output": "hello\\n", "exit_code": 0, "cwd": "/repo"}
