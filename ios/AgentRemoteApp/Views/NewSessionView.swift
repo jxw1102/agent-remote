@@ -118,14 +118,28 @@ struct NewSessionView: View {
                             }
                         }
                     }
-                    TextField(cwdRequired ? "/path/to/project (required)" : "/path/to/project (optional)", text: $cwd)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.subheadline.monospaced())
+                    HStack {
+                        TextField(cwdRequired ? "/path/to/project (required)" : "/path/to/project (optional)", text: $cwd)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.subheadline.monospaced())
+                            .accessibilityIdentifier("newsession.cwd")
+                        if !cwd.isEmpty {
+                            Button {
+                                cwd = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("newsession.cwd.clear")
+                        }
+                    }
                 }
 
                 Section("Execution") {
                     Toggle("Interactive (host TUI)", isOn: $interactive)
+                        .accessibilityIdentifier("newsession.interactive")
                     Text(interactive
                          ? "Runs in a tmux TUI on the host. Tools auto-run."
                          : "One-shot CLI turn. Tools auto-run.")

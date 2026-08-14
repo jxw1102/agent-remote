@@ -6,6 +6,18 @@ options:
 packages:
   AgentRemoteKit:
     path: AgentRemoteKit
+schemes:
+  AgentRemote:
+    build:
+      targets:
+        AgentRemote: all
+        AgentRemoteUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - AgentRemoteUITests
 targets:
   AgentRemote:
     type: application
@@ -33,3 +45,19 @@ targets:
         CODE_SIGNING_ALLOWED: YES
         CODE_SIGNING_REQUIRED: NO
         AD_HOC_CODE_SIGNING_ALLOWED: YES
+  AgentRemoteUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: AgentRemoteUITests
+    dependencies:
+      - target: AgentRemote
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.agentremote.uitests
+        SWIFT_VERSION: "5.9"
+        TEST_TARGET_NAME: AgentRemote
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_ALLOWED: YES
+        CODE_SIGNING_REQUIRED: NO

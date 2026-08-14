@@ -15,32 +15,11 @@ struct RootView: View {
     @State private var showDrop = false
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            SessionsListView(
-                onOpen: { row in
-                    _ = appModel.open(row: row)
-                    if sizeClass == .compact {
-                        columnVisibility = .detailOnly
-                    }
-                },
-                onNewSession: { showNewSession = true },
-                onProfiles: { showProfiles = true },
-                onSettings: { showSettings = true },
-                onUsage: { showUsage = true },
-                onDrop: { showDrop = true }
-            )
-            .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
-        } detail: {
-            detailColumn
-        }
-        .navigationSplitViewStyle(.balanced)
+        navigationShell
         .sheet(isPresented: $showNewSession) {
             NewSessionView { profileId, cwd, provider in
                 showNewSession = false
                 _ = appModel.openNew(profileId: profileId, cwd: cwd, provider: provider)
-                if sizeClass == .compact {
-                    columnVisibility = .detailOnly
-                }
             }
         }
         .sheet(isPresented: $showProfiles) {
@@ -55,6 +34,49 @@ struct RootView: View {
         .sheet(isPresented: $showDrop) {
             DropView()
         }
+    }
+
+    /// iPad (regular width): two-column split view. iPhone (compact): a plain NavigationStack —
+    /// NavigationSplitView ignores programmatic `columnVisibility` in compact width, so the
+    /// split-view variant could show a session ONLY on iPad; the push has to be a real
+    /// `navigationDestination` driven by the selected chat.
+    @ViewBuilder
+    private var navigationShell: some View {
+        if sizeClass == .compact {
+            NavigationStack {
+                sessionsList
+                    .navigationDestination(isPresented: Binding(
+                        get: { appModel.selectedChat != nil },
+                        set: { if !$0 { appModel.selectChat(key: nil) } }
+                    )) {
+                        if let chat = appModel.selectedChat {
+                            ChatView(viewModel: chat)
+                                .id(chat.id)
+                        }
+                    }
+            }
+        } else {
+            NavigationSplitView(columnVisibility: $columnVisibility) {
+                sessionsList
+                    .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
+            } detail: {
+                detailColumn
+            }
+            .navigationSplitViewStyle(.balanced)
+        }
+    }
+
+    private var sessionsList: some View {
+        SessionsListView(
+            onOpen: { row in
+                _ = appModel.open(row: row)
+            },
+            onNewSession: { showNewSession = true },
+            onProfiles: { showProfiles = true },
+            onSettings: { showSettings = true },
+            onUsage: { showUsage = true },
+            onDrop: { showDrop = true }
+        )
     }
 
     @ViewBuilder

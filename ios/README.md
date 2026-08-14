@@ -94,5 +94,28 @@ cd ios/AgentRemoteKit && swift build    # always
 cd ios/AgentRemoteKit && swift test    # needs full Xcode
 ```
 
+### UI smoke test (simulator, against a LIVE daemon)
+
+`AgentRemoteUITests/SmokeUITests` drives the real app on a simulator: sessions list + Focus
+toggle, drop inbox (folder rules), merged usage, transcript history, and one real headless
+turn end-to-end. It needs a daemon at `http://127.0.0.1:8473` and a seeded profile:
+
+```bash
+UDID=<booted simulator udid>
+PUUID=$(uuidgen); TOKEN=$(cat ~/.agentremoted/token)
+JSON="[{\"id\":\"$PUUID\",\"name\":\"Mac\",\"serverURLString\":\"http://127.0.0.1:8473\"}]"
+xcrun simctl spawn $UDID defaults write com.agentremote.app com.claudereremote.profiles \
+    -data "$(printf '%s' "$JSON" | xxd -p | tr -d '\n')"
+xcrun simctl spawn $UDID defaults write com.agentremote.app com.agentremote.simTokens \
+    -dict "$PUUID.authToken" "$TOKEN"
+mkdir -p /tmp/agent-remote-uitest   # scratch cwd for the live-turn test
+
+xcodebuild -project AgentRemote.xcodeproj -scheme AgentRemote \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
+```
+
+`testLiveHeadlessTurn` runs one real (tiny) agent turn on the host — skip it with
+`-skip-testing:AgentRemoteUITests/SmokeUITests/testLiveHeadlessTurn`.
+
 Manual smoke: add server → sessions list fills → open Claude/Grok row → send message →
 permission prompt if needed → New session with harness picker on multi daemon.

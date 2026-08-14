@@ -157,6 +157,7 @@ struct SessionsListView: View {
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
+                .accessibilityIdentifier("sessions.more")
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -171,6 +172,7 @@ struct SessionsListView: View {
                             .background(ProviderAccent.neutral.tint, in: Capsule())
                             .foregroundStyle(.white)
                     }
+                    .accessibilityIdentifier("sessions.new")
                     .padding()
                 }
             }

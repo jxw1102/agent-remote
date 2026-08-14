@@ -455,6 +455,7 @@ struct ChatView: View {
                 .padding(.vertical, 9)
                 .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .onSubmit { viewModel.send() }
+                .accessibilityIdentifier("chat.input")
 
             let canSend = !viewModel.draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if viewModel.isBusy {
@@ -476,6 +477,7 @@ struct ChatView: View {
                     .foregroundStyle(canSend ? accent.tint : Color.secondary.opacity(0.5))
             }
             .disabled(!canSend)
+            .accessibilityIdentifier("chat.send")
             .animation(.easeInOut(duration: 0.15), value: viewModel.isBusy)
         }
         .readableColumn()
