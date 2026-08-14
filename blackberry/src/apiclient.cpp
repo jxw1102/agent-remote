@@ -335,6 +335,7 @@ ApiClient::ApiClient(QObject *parent)
     , m_renameSessionId()
     , m_stepEditRev(0)
     , m_stepEditIndex(-1)
+    , m_scrollAnchor(-1)
 {
     s_modelApi = this;
     // Classic/Q20 = 720; Passport = 1440. Same insets as the proven Classic
@@ -4446,11 +4447,15 @@ void ApiClient::handleMessages(QNetworkReply *reply, const QVariant &data)
     const qint64 buildMs = QDateTime::currentMSecsSinceEpoch() - tBuild;
 
     if (older) {
+        const int prepended = items.size();
         QVariantList merged = items;
         merged += m_messages;
         m_messages = merged;
         m_earliestOffset = payload["offset"].toInt();
-        bumpMessages(false);
+        // Keep the reader's place: anchor the rebuild on the row that was
+        // first before the prepend (QML index — the "older" row, when it is
+        // still offered, sits at 0).
+        bumpMessages(false, prepended + (canLoadOlder() ? 1 : 0));
     } else {
         m_messages = items;
         m_earliestOffset = payload["offset"].toInt();
@@ -4978,9 +4983,12 @@ void ApiClient::clearPendingQuestion()
     emit questionChanged();
 }
 
-void ApiClient::bumpMessages(bool scrollToEnd)
+void ApiClient::bumpMessages(bool scrollToEnd, int anchorIndex)
 {
     m_scrollToEnd = scrollToEnd;
+    // Only a "load older" prepend sets an anchor; every other rebuild either
+    // scrolls to the end or accepts the model reset.
+    m_scrollAnchor = anchorIndex;
     m_messageRev++;
     emit messagesChanged();
 }

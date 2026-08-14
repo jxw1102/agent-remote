@@ -126,7 +126,13 @@ Page {
         if (a.canLoadOlder)
             messagesModel.append({ kind: "older", text: "", rich: "", live: false });
         messagesModel.append(a.messages);
-        if (a.scrollToEndHint)
+        // Clearing the model reset the list to the top. A "load older"
+        // prepend carries the index of the row the reader was on — scroll
+        // it back into view so their place survives the paging.
+        if (a.scrollAnchorHint >= 0 && a.scrollAnchorHint < messagesModel.size())
+            messagesList.scrollToItem([ a.scrollAnchorHint ],
+                                      ScrollAnimation.None);
+        else if (a.scrollToEndHint)
             messagesList.scrollToPosition(ScrollPosition.End, ScrollAnimation.None);
     }
 

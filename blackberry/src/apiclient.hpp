@@ -187,6 +187,11 @@ class ApiClient : public QObject
     Q_PROPERTY(bool canLoadOlder READ canLoadOlder NOTIFY messagesChanged)
     Q_PROPERTY(bool loadingOlder READ loadingOlder NOTIFY loadingOlderChanged)
     Q_PROPERTY(bool scrollToEndHint READ scrollToEndHint NOTIFY messagesChanged)
+    // After a "load older" prepend the rebuild must not leave the reader at
+    // the top: this is the QML model index (older row included) of the row
+    // that was first BEFORE the prepend — rebuild() scrolls it back into
+    // view. -1 on every other rebuild.
+    Q_PROPERTY(int scrollAnchorHint READ scrollAnchorHint NOTIFY messagesChanged)
     Q_PROPERTY(QString transcriptStatus READ transcriptStatus NOTIFY transcriptStatusChanged)
     Q_PROPERTY(QString currentSessionId READ currentSessionId NOTIFY currentSessionChanged)
     // Process view: the OPEN session also shows the agent's working steps
@@ -336,6 +341,7 @@ public:
     bool canLoadOlder() const { return m_earliestOffset > 0; }
     bool loadingOlder() const { return m_loadingOlder; }
     bool scrollToEndHint() const { return m_scrollToEnd; }
+    int scrollAnchorHint() const { return m_scrollAnchor; }
     QString transcriptStatus() const { return m_transcriptStatus; }
     QString currentSessionId() const { return m_currentSessionId; }
 
@@ -607,7 +613,7 @@ private:
     void clearPendingPermission();
     void updatePendingQuestion(const QVariantMap &snap);
     void clearPendingQuestion();
-    void bumpMessages(bool scrollToEnd);
+    void bumpMessages(bool scrollToEnd, int anchorIndex = -1);
     void recomputeLiveStatus();
     // Beep + blue LED when the agent's phase/tool actually changes (status
     // frames arrive ~1/s; only a new signature is a "new status").
@@ -791,6 +797,7 @@ private:
     int m_earliestOffset;
     bool m_loadingOlder;
     bool m_scrollToEnd;
+    int m_scrollAnchor;
     QString m_transcriptStatus;
     QString m_jobEndStatus;
     QString m_currentSessionId;
