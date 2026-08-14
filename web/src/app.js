@@ -8,7 +8,7 @@
 // are reached cross-origin, which is why the daemon sends CORS headers. Auth
 // is the token header, kept in localStorage — never a cookie.
 
-import { renderMarkdown, inlineInto } from "./md.js";
+import { renderMarkdown, inlineInto, paintCode } from "./md.js";
 
 const PROVIDERS = {
   claude: { label: "Claude", accent: "#d97757", heading: "#e08a5c", inline: "#e0a183" },
@@ -396,6 +396,8 @@ function chimeFromActive(profileId, jobs) {
     next.set(key, {
       sig,
       nextSeq: typeof j.next_seq === "number" ? j.next_seq : 0,
+      sessionId: j.session_id || "",
+      newSessionId: j.new_session_id || "",
     });
     const prev = chimeJobs.get(key);
     if (!prev) {
@@ -405,7 +407,13 @@ function chimeFromActive(profileId, jobs) {
       if (sig === "permission" || sig === "question") playChime("attention");
     } else if (prev.sig !== sig) {
       if (sig === "permission" || sig === "question") playChime("attention");
-      else playChime("status");
+      else {
+        playChime("status");
+        // Status blip means a new tool/phase — process view steps live on the
+        // journal, not the SSE frame. Pull them in so the strip does not lag
+        // a full second (or the end-of-turn load) behind the sound.
+        scheduleProcessRefresh(profileId, j);
+      }
     }
   });
 
@@ -434,6 +442,10 @@ function chimeForgetProfile(profileId) {
 /**
  * Done / error for a finished job. Deduped so the open-session poll and the
  * global SSE watcher don't both play when the same turn ends.
+ *
+ * When the finished job belongs to the open transcript, paint the journal
+ * (process steps included) *before* the end chime — otherwise the sound
+ * lands while the strip still shows the previous turn's tools.
  */
 async function chimeJobEnded(profileId, jobId, meta = {}) {
   const key = `${profileId}/${jobId}`;
@@ -458,7 +470,20 @@ async function chimeJobEnded(profileId, jobId, meta = {}) {
       return;
     }
     // User-initiated stop is silent (Android parity).
-    if (st === "stopped") return;
+    if (st === "stopped") {
+      // Still refresh the open transcript so a mid-turn stop settles the UI
+      // when SSE notices the drop before the open-session poll does.
+      if (!meta.alreadyPainted) {
+        await paintOpenAfterJob(profileId, jobId, snap, meta);
+      }
+      return;
+    }
+    // Final answer + process steps before the bi-bi, when this is the open
+    // row. pollJob passes alreadyPainted after its own loadTail so we only
+    // play the sound here and do not fetch twice.
+    if (!meta.alreadyPainted) {
+      await paintOpenAfterJob(profileId, jobId, snap, meta);
+    }
     // Only explicit error is a failure; pruned jobs (404 handled below) and
     // empty/unknown status are treated as success.
     if (st === "error") playChime("error");
@@ -468,9 +493,105 @@ async function chimeJobEnded(profileId, jobId, meta = {}) {
     refreshSessions();
   } catch {
     // 404 after prune of a finished job → success cue, not failure.
+    if (!meta.alreadyPainted) {
+      await paintOpenAfterJob(profileId, jobId, null, meta);
+    }
     playChime("done");
     refreshSessions();
   }
+}
+
+/** True when a finished job is the transcript currently on screen. */
+function jobMatchesOpen(profileId, jobId, snap, meta = {}) {
+  const open = state.open;
+  if (!open || open.profileId !== profileId) return false;
+  if (state.job && state.job.id === jobId) return true;
+  const openSid = open.sessionId || "";
+  if (!openSid) return false;
+  const candidates = [
+    snap && snap.session_id,
+    snap && snap.new_session_id,
+    meta.sessionId,
+    meta.newSessionId,
+  ].filter(Boolean);
+  return candidates.includes(openSid);
+}
+
+/**
+ * Reload the open transcript after a job ends (or is stopped) so process
+ * steps and the final answer land before the end chime. No-op when another
+ * session is open. Single-flight so pollJob + SSE do not double-fetch.
+ */
+let paintAfterJobInFlight = null;
+async function paintOpenAfterJob(profileId, jobId, snap, meta = {}) {
+  if (!jobMatchesOpen(profileId, jobId, snap, meta)) return;
+  if (!state.open) return;
+  // Process view is the common lag case; always reload on end so the answer
+  // bubble is not delayed either.
+  const gen = state.openGen;
+  const sid = state.open.sessionId;
+  const pid = state.open.profileId;
+  if (paintAfterJobInFlight) {
+    try { await paintAfterJobInFlight; } catch { /* ignore */ }
+    return;
+  }
+  paintAfterJobInFlight = loadTail(gen, { keepLive: false })
+    .catch(() => {})
+    .finally(() => { paintAfterJobInFlight = null; });
+  await paintAfterJobInFlight;
+  // Drop if the user switched away mid-fetch.
+  if (!isOpenStill(gen, pid, sid)) return;
+  // They watched the turn finish on this page — same as opening the row
+  // afterwards: dim the Focus "turn finished" unread styling.
+  markSeen(profileById(pid), sid);
+}
+
+// ---- process view live refresh ------------------------------------------
+// Process steps arrive from the journal (`?detail=steps`), not the status
+// SSE. Status chimes fire as soon as phase/tool flips; without a pull the
+// strip trails the sound by up to a poll cycle (or until turn end).
+
+const PROCESS_REFRESH_MIN_MS = 900;
+let processRefreshTimer = null;
+let processRefreshLast = 0;
+let processRefreshInFlight = null;
+
+function frameMatchesOpen(profileId, frame) {
+  const open = state.open;
+  if (!open || !frame || open.profileId !== profileId) return false;
+  if (state.job && state.job.id === frame.job_id) return true;
+  const openSid = open.sessionId || "";
+  if (!openSid) return false;
+  return frame.session_id === openSid || frame.new_session_id === openSid;
+}
+
+/** Throttled journal reload when process view is on for the open session. */
+function scheduleProcessRefresh(profileId, frame) {
+  if (!state.open || !processViewOn(state.open.sessionId)) return;
+  if (!frameMatchesOpen(profileId, frame)) return;
+  const now = Date.now();
+  const wait = Math.max(0, PROCESS_REFRESH_MIN_MS - (now - processRefreshLast));
+  if (processRefreshTimer) return;
+  processRefreshTimer = setTimeout(() => {
+    processRefreshTimer = null;
+    processRefreshLast = Date.now();
+    runProcessRefresh();
+  }, wait);
+}
+
+function runProcessRefresh() {
+  if (!state.open || !processViewOn(state.open.sessionId)) return;
+  if (processRefreshInFlight) return;
+  const gen = state.openGen;
+  const sid = state.open.sessionId;
+  const pid = state.open.profileId;
+  processRefreshInFlight = loadTail(gen, { keepLive: true })
+    .catch(() => {})
+    .finally(() => { processRefreshInFlight = null; });
+  // Fire-and-forget; openGen guard inside loadTail drops stale paints.
+  void processRefreshInFlight.then(() => {
+    if (!isOpenStill(gen, pid, sid)) return;
+  });
 }
 
 // ---- process view -------------------------------------------------------
@@ -667,49 +788,75 @@ function shortDetail(s, maxLen = 48) {
 }
 
 /**
- * Human phrase for what the agent is doing — port of ApiClient::phaseLine.
- * One string only (no secondary gray tool column); the banner wraps it to
- * two lines, same as TranscriptPage's multiline maxLineCount: 2.
+ * Human phrase for what the agent is doing — banner line 1 (description).
+ * Daemon puts the human tool description in phase_detail and the raw
+ * command/path in tool_detail (line 2).
  */
 function phaseLine(frame, job, pal) {
   const agent = (pal && pal.label) || "Agent";
   if (!frame) return shortDetail(job && job.toolLine) || `${agent} is working…`;
   const phase = frame.phase || "";
-  const detail = shortDetail(frame.phase_detail || "");
+  // Description line — do not middle-ellipsis paths here; shortDetail only
+  // for long free text. Prefer full phase_detail up to ~100 chars.
+  const detail = shortDetail(frame.phase_detail || "", 100);
   if (phase === "thinking") return `${agent} is thinking…`;
   if (phase === "writing") return `${agent} is writing…`;
-  if (phase === "editing") return detail ? `Editing ${detail}` : "Editing files…";
-  if (phase === "reading") return detail ? `Reading ${detail}` : "Reading files…";
-  if (phase === "searching") return "Searching the code…";
-  if (phase === "running") return detail ? `Running: ${detail}` : "Running a command…";
-  if (phase === "browsing") return detail ? `Browsing ${detail}` : "Browsing the web…";
+  if (phase === "editing") return detail ? `Editing · ${detail}` : "Editing files…";
+  if (phase === "reading") return detail ? `Reading · ${detail}` : "Reading files…";
+  if (phase === "searching") return detail ? `Searching · ${detail}` : "Searching the code…";
+  if (phase === "running") return detail ? `Running · ${detail}` : "Running a command…";
+  if (phase === "browsing") return detail ? `Browsing · ${detail}` : "Browsing the web…";
   if (phase === "delegating") return "Delegating to a subagent…";
+  if (phase === "asking") return detail ? `Asking · ${detail}` : "Waiting for your answer…";
   if (phase && detail) return `${phase} · ${detail}`;
   if (phase) return phase;
-  // Fallback: last tool line (⚙ name  detail), same as the phone.
+  // Fallback: last tool name only (command goes on line 2).
   const tool = shortDetail(frame.tool || "", 32);
-  const toolDetail = shortDetail(frame.tool_detail || "");
-  if (tool && toolDetail) return `⚙ ${tool}  ${toolDetail}`;
   if (tool) return `⚙ ${tool}`;
-  if (toolDetail) return toolDetail;
-  return shortDetail(job && job.toolLine) || `${agent} is working…`;
+  return shortDetail(job && job.toolLine, 100) || `${agent} is working…`;
 }
 
 /**
- * Full live-status string the phone puts in one Label: phaseLine + · Ns
- * (+ · N queued). CSS clamps the block to two lines.
+ * Banner line 2: the raw command / path / pattern from tool_detail.
+ * Empty when the daemon only has a description (same string on both would
+ * just repeat). Includes things like
+ * `[attached: ~/.agentremoted/uploads/….png]`.
  */
-function liveStatusLine(frame, job, pal) {
-  let line = phaseLine(frame, job, pal);
+function commandLine(frame, job) {
+  if (!frame && !(job && job.toolLine)) return "";
+  const cmd = (frame && (frame.tool_detail || ""))
+    || (job && job.toolLine)
+    || "";
+  const desc = (frame && (frame.phase_detail || "")) || "";
+  const t = String(cmd).replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  // Don't repeat the description on line 2.
+  if (desc && t === String(desc).replace(/\s+/g, " ").trim()) return "";
+  // Longer clip so attachment paths stay readable.
+  return shortDetail(t, 160);
+}
+
+/**
+ * Live status for the banner: { line1, line2 }.
+ * line1 = description + elapsed (+ queued); line2 = command when present.
+ */
+function liveStatusParts(frame, job, pal) {
+  let line1 = phaseLine(frame, job, pal);
   const secs = frame && typeof frame.elapsed_s === "number"
     ? frame.elapsed_s
     : Math.max(0, Math.round((Date.now() - (job.startedAt || Date.now())) / 1000));
-  line += `  ·  ${elapsed(secs)}`;
+  line1 += `  ·  ${elapsed(secs)}`;
   const queued = (job.queued && job.queued.length)
     || (frame && frame.queued_count)
     || 0;
-  if (queued) line += `  ·  ${queued} queued`;
-  return line;
+  if (queued) line1 += `  ·  ${queued} queued`;
+  return { line1, line2: commandLine(frame, job) };
+}
+
+/** @deprecated single-string form kept for any call sites / debug */
+function liveStatusLine(frame, job, pal) {
+  const { line1, line2 } = liveStatusParts(frame, job, pal);
+  return line2 ? `${line1}\n${line2}` : line1;
 }
 function humanSize(n) {
   if (!n) return "0 B";
@@ -1337,6 +1484,10 @@ function setFocusMode(on) {
  *
  * Purely cosmetic: it dims a finished turn's tag, it does not change any
  * state. Best-effort — an older daemon 404s and the tag simply stays lit.
+ *
+ * Called when the human opens the session from the list, and when a turn
+ * finishes while they already have that transcript on screen (watching the
+ * result is as good as opening it afterwards).
  */
 async function markSeen(profile, sessionId) {
   if (!profile || !sessionId || !focusCapable(profile)) return;
@@ -1754,8 +1905,51 @@ async function openSession(row) {
   const blocked = frames.find((j) => match(j) && !isSyntheticJobId(j.job_id)
     && (j.pending_question || j.pending_permission));
   const running = frames.find((j) => match(j) && !isSyntheticJobId(j.job_id));
-  if (blocked || running) attachJob((blocked || running).job_id, sessionId);
+  if (blocked || running) {
+    attachJob((blocked || running).job_id, sessionId);
+  } else {
+    // SSE only lists in-flight turns. A finished job can still hold an
+    // unanswered AskUserQuestion (Stop + panel race) — recover via /api/jobs.
+    recoverPendingGate(row.profileId, sessionId, gen);
+  }
   updateLiveTuiButton();
+}
+
+/**
+ * Open-session recovery: find a recent job for this session that still has a
+ * pending question/permission and attach it so the Answer banner appears.
+ */
+async function recoverPendingGate(profileId, sessionId, gen) {
+  const profile = profileById(profileId);
+  if (!profile || !sessionId) return;
+  try {
+    const data = await call(profile, "/api/jobs");
+    const jobs = (data && data.jobs) || [];
+    const candidates = jobs.filter((j) =>
+      j && (j.session_id === sessionId || j.new_session_id === sessionId)
+      && !isSyntheticJobId(j.id));
+    // Prefer explicit pending flags (daemon ≥ 2.6.4), then newest first.
+    candidates.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+    let hit = candidates.find((j) => j.pending_question || j.pending_permission);
+    if (!hit) {
+      // Older daemons omit the flags — probe the newest few snapshots.
+      for (const j of candidates.slice(0, 4)) {
+        if (!isOpenStill(gen, profileId, sessionId)) return;
+        try {
+          const snap = await call(profile, `/api/jobs/${j.id}?since=0`);
+          if (snap && (snap.pending_question || snap.pending_permission)) {
+            hit = j;
+            break;
+          }
+        } catch { /* try next */ }
+      }
+    }
+    if (!hit) return;
+    if (!isOpenStill(gen, profileId, sessionId)) return;
+    attachJob(hit.id, sessionId);
+  } catch {
+    // Best-effort — banner stays empty if the daemon is unreachable.
+  }
 }
 
 /**
@@ -2252,6 +2446,15 @@ function messageToolsRow(item, extraButtons, { showTime = false } = {}) {
 
 const STEP_LABEL = { tool_use: "▸", tool_result: "↳", thinking: "✻" };
 
+/** Fill a process-view step <code> with optional syntax highlight. */
+function paintStepBody(codeEl, text, lang) {
+  if (lang) paintCode(codeEl, text, lang);
+  else {
+    codeEl.replaceChildren();
+    codeEl.textContent = text || "";
+  }
+}
+
 function renderSteps(item) {
   // Rows sit BELOW the bubble they belong to: the daemon attaches each step
   // to the message it followed, so top-to-bottom is the order it happened.
@@ -2277,8 +2480,13 @@ function renderSteps(item) {
     head.appendChild(el("span", "step-detail",
       s.detail || (s.preview || "").split("\n")[0].slice(0, 120)));
     if (s.bytes) head.appendChild(el("span", "step-size", humanSize(s.bytes)));
+    // step-body is a <pre>; when the daemon knows a language (path → py/js/…
+    // or body is a unified diff), fill a <code> child via the same tokeniser
+    // fenced markdown blocks use.
     const body = el("pre", "step-body");
-    body.textContent = s.preview || "";
+    const codeEl = el("code");
+    paintStepBody(codeEl, s.preview || "", s.lang || "");
+    body.appendChild(codeEl);
     body.hidden = true;
     head.addEventListener("click", async () => {
       body.hidden = !body.hidden;
@@ -2291,7 +2499,7 @@ function renderSteps(item) {
         const full = await call(profile,
           `/api/sessions/${encodeURIComponent(state.open.sessionId)}`
           + `/steps/${encodeURIComponent(s.ref)}`, { timeout: 60000 });
-        body.textContent = full.text || body.textContent;
+        paintStepBody(codeEl, full.text || s.preview || "", s.lang || "");
       } catch (e) {
         s.loaded = false;
         toast(e.message);
@@ -2818,32 +3026,61 @@ async function pollJob() {
     renderBanner();
     return;
   }
-  if (["done", "error", "stopped"].includes(snap.status)) {
+  // A turn can report done/error while AskUserQuestion is still open (Stop
+  // fired with the panel up). Keep watching so the Answer banner and modal
+  // stay available until the gate clears.
+  const gateOpen = !!(job.pendingQuestion || job.pendingPermission
+    || snap.pending_question || snap.pending_permission);
+  if (["done", "error", "stopped"].includes(snap.status) && !gateOpen) {
     const notes = [];
     // Only real job errors — never "failed" for empty/unknown status.
     if (snap.status === "error") notes.push(snap.error || "The turn failed");
     if (snap.status === "stopped") notes.push("Stopped");
     if (snap.dropped_queued) notes.push(`${snap.dropped_queued} queued prompt(s) dropped`);
-    // End cue is shared with the global SSE watcher (deduped by key).
-    if (snap.status === "done" || snap.status === "error") {
-      chimeJobEnded(profile.id, job.id, { nextSeq: state.jobSince });
-    }
     const endGen = paintCtx.gen;
     const endProfile = paintCtx.profileId;
     const endSid = job.sessionId || paintCtx.sessionId;
     stopJobWatch();
     // Replace the live echoes with what the daemon actually persisted —
     // only if this session is still the open one. keepLive:false so disk
-    // fully replaces mid-turn stream rows (no double bubbles).
+    // fully replaces mid-turn stream rows (no double bubbles). Paint
+    // *before* the end chime so process steps are on screen when it rings.
+    // Shared with the SSE end-path (paintOpenAfterJob is single-flight).
     if (isOpenStill(endGen, endProfile, endSid)
         || (state.open && state.open.sessionId === endSid && state.open.profileId === endProfile)) {
-      await loadTail(state.openGen, { keepLive: false });
+      await paintOpenAfterJob(profile.id, job.id, snap, {
+        sessionId: endSid,
+        newSessionId: snap.new_session_id || "",
+      });
       if (notes.length && state.open && state.open.sessionId === endSid) {
         appendLive({ role: "notice", text: notes.join(" · "),
                      severity: snap.status === "error" ? "error" : "" });
       }
     }
+    // End cue is shared with the global SSE watcher (deduped by key). If SSE
+    // already chimed after its own paint, this is a no-op; if we got here
+    // first, chimeJobEnded only plays the sound (alreadyPainted).
+    if (snap.status === "done" || snap.status === "error") {
+      await chimeJobEnded(profile.id, job.id, {
+        nextSeq: state.jobSince,
+        sessionId: endSid,
+        newSessionId: snap.new_session_id || "",
+        alreadyPainted: true,
+      });
+    }
     refreshSessions();
+  } else if (processViewOn(state.open && state.open.sessionId)) {
+    // Mid-turn: tool rows in the job stream only update the banner. When
+    // process view is on, also pull journal steps (throttled) so the strip
+    // tracks the work, not just the chime.
+    const sawTool = (snap.events || []).some((ev) => ev.kind === "tool");
+    if (sawTool) {
+      scheduleProcessRefresh(profile.id, {
+        job_id: job.id,
+        session_id: job.sessionId || snap.session_id,
+        new_session_id: snap.new_session_id,
+      });
+    }
   }
   renderBanner();
 }
@@ -2884,6 +3121,17 @@ function renderBanner() {
     // stream into this transcript.
     attachJob(frame.job_id, sid);
     return; // attachJob → pollJob will re-render
+  }
+  // Synthetic tui-* rows can now flag pending_question, but Answer POSTs need
+  // the real job id — recover via /api/jobs when we only have the fake row.
+  if (frame && isSyntheticJobId(frame.job_id)
+      && (frame.pending_question || frame.pending_permission)
+      && !jobBelongsToOpen(state.job)
+      && !state._recoveringGate) {
+    state._recoveringGate = true;
+    recoverPendingGate(profile.id, sid, state.openGen).finally(() => {
+      state._recoveringGate = false;
+    });
   }
 
   const job = jobBelongsToOpen(state.job) ? state.job : null;
@@ -2936,9 +3184,11 @@ function renderBanner() {
     });
     box.appendChild(btn);
   } else {
-    // Mobile parity: one Label, multiline max 2 lines, elapsed/queued
-    // baked into the string (not a separate gray column).
-    box.appendChild(el("span", "banner-line", liveStatusLine(frame, job, pal)));
+    // Two-line strip: description (+ elapsed) on line 1, raw command /
+    // path / [attached: …] on line 2 when the daemon provided it.
+    const { line1, line2 } = liveStatusParts(frame, job, pal);
+    box.appendChild(el("span", "banner-line", line1));
+    if (line2) box.appendChild(el("span", "banner-cmd", line2));
   }
 }
 
@@ -4010,23 +4260,23 @@ async function openInbox() {
         });
         line.appendChild(dl);
 
-        // No delete for folders: the daemon refuses recursive delete, so
-        // offering the button would only ever produce an error toast.
-        if (!isDir) {
-          const del = el("button", "danger", "Delete");
-          del.type = "button";
-          del.addEventListener("click", async () => {
-            try {
-              await call(row.profile,
-                `/api/drop/${encodeURIComponent(row.file.name)}/delete`, { method: "POST" });
-              const owner = results.find((r) => r.profile.id === row.profile.id);
-              owner.files = owner.files.filter((f) => f.name !== row.file.name);
-              render();
-              toast(`Deleted ${row.file.name} on ${row.profile.name}`);
-            } catch (e) { toast(e.message); }
-          });
-          line.appendChild(del);
-        }
+        const del = el("button", "danger", isDir ? "Delete folder" : "Delete");
+        del.type = "button";
+        del.addEventListener("click", async () => {
+          if (isDir && !window.confirm(
+            `Delete folder “${row.file.name}” on the host? All files inside are removed.`)) {
+            return;
+          }
+          try {
+            await call(row.profile,
+              `/api/drop/${encodeURIComponent(row.file.name)}/delete`, { method: "POST" });
+            const owner = results.find((r) => r.profile.id === row.profile.id);
+            owner.files = owner.files.filter((f) => f.name !== row.file.name);
+            render();
+            toast(`Deleted ${row.file.name} on ${row.profile.name}`);
+          } catch (e) { toast(e.message); }
+        });
+        line.appendChild(del);
         body.appendChild(line);
       });
     },

@@ -43,6 +43,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Tag
+import androidx.compose.material.icons.outlined.Timeline
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
@@ -80,6 +81,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bb10d.remote.data.ExecMode
 import com.bb10d.remote.data.Time
@@ -91,6 +93,7 @@ import com.bb10d.remote.ui.components.WorkingPulse
 import com.bb10d.remote.ui.markdown.MarkdownText
 import com.bb10d.remote.ui.theme.Accent
 import com.bb10d.remote.ui.theme.AgentRemoteTheme
+import com.bb10d.remote.data.StepDto
 import com.bb10d.remote.ui.theme.MonoStyle
 import com.bb10d.remote.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
@@ -166,6 +169,8 @@ private fun TranscriptScreenBody(
     // the system file picker (local remember state was dropped on return).
     val composerText by vm.composerText.collectAsStateWithLifecycle()
     val attachments by vm.attachments.collectAsStateWithLifecycle()
+    val processView by vm.processView.collectAsStateWithLifecycle()
+    val openSteps by vm.openSteps.collectAsStateWithLifecycle()
     var menuOpen by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showOptions by remember { mutableStateOf(false) }
@@ -304,6 +309,18 @@ private fun TranscriptScreenBody(
                                         },
                                     )
                                 }
+                                // Adds the agent's working steps (tool calls,
+                                // results, thinking) under each message. This
+                                // session only, off by default — web parity.
+                                DropdownMenuItem(
+                                    text = { Text(if (processView) "Process view ✓" else "Process view") },
+                                    leadingIcon = { Icon(Icons.Outlined.Timeline, null) },
+                                    enabled = ref.sessionId.isNotEmpty(),
+                                    onClick = {
+                                        menuOpen = false
+                                        vm.setProcessView(!processView)
+                                    },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Copy transcript") },
                                     leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
@@ -388,6 +405,8 @@ private fun TranscriptScreenBody(
                                 accent = accent.tint,
                                 rich = settings.richText,
                                 onLongPress = { actionItem = item },
+                                openSteps = openSteps,
+                                onToggleStep = vm::toggleStep,
                             )
                         }
                     }
@@ -613,6 +632,24 @@ private fun MessageRow(
     accent: Color,
     rich: Boolean,
     onLongPress: () -> Unit,
+    openSteps: Map<String, String> = emptyMap(),
+    onToggleStep: (StepDto) -> Unit = {},
+) {
+    Column(Modifier.fillMaxWidth()) {
+        MessageBody(item, accent, rich, onLongPress)
+        if (item.steps.isNotEmpty()) {
+            StepsStrip(item.steps, accent, openSteps, onToggleStep)
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MessageBody(
+    item: TranscriptItem,
+    accent: Color,
+    rich: Boolean,
+    onLongPress: () -> Unit,
 ) {
     val pal = palette
     val clipboard = rememberClip()
@@ -697,6 +734,118 @@ private fun MessageRow(
     }
 }
 
+/**
+ * Process view: the working steps under one message — tool calls (▸), their
+ * results (↳) and thinking (✻), in the order they happened. Tapping a row
+ * expands the preview; a truncated body is fetched from the daemon on first
+ * expand only (mirrors the web client).
+ */
+@Composable
+private fun StepsStrip(
+    steps: List<StepDto>,
+    accent: Color,
+    openSteps: Map<String, String>,
+    onToggleStep: (StepDto) -> Unit,
+) {
+    val pal = palette
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, start = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        steps.forEach { step ->
+            val isError = step.kind == "tool_result" && !step.ok
+            val silent = step.kind == "thinking" && !step.recorded
+            val mark = when (step.kind) {
+                "tool_use" -> "▸"
+                "tool_result" -> "↳"
+                "thinking" -> "✻"
+                else -> "·"
+            }
+            val title = when (step.kind) {
+                "tool_use" -> step.name.ifBlank { "tool" }
+                "tool_result" -> if (isError) "error" else "result"
+                "thinking" -> "thinking"
+                else -> step.kind
+            }
+            val detail = step.detail.ifBlank {
+                step.preview.lineSequence().firstOrNull().orEmpty().take(120)
+            }
+            Column(Modifier.fillMaxWidth()) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(6.dp))
+                        .then(
+                            if (silent) Modifier
+                            else Modifier.clickable { onToggleStep(step) },
+                        )
+                        .padding(horizontal = 6.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Text(
+                        text = mark,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isError) pal.danger else accent.copy(alpha = 0.8f),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isError) pal.danger else pal.dim,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (silent) "not recorded by this CLI" else detail,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = pal.thought,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (step.bytes > 0) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = humanSize(step.bytes),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = pal.dim,
+                        )
+                    }
+                }
+                if (step.ref in openSteps) {
+                    val full = openSteps[step.ref].orEmpty()
+                    val body = full.ifEmpty { step.preview }
+                    val pending = full.isEmpty() && step.truncated
+                    SelectionContainer {
+                        Text(
+                            text = body + (if (pending) "\n…" else ""),
+                            style = MonoStyle.copy(fontSize = 12.sp),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            softWrap = false,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 18.dp, top = 2.dp, bottom = 4.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(pal.codeBg)
+                                .horizontalScroll(rememberScrollState())
+                                .padding(8.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun humanSize(bytes: Long): String = when {
+    bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
+    bytes >= 1024 -> "%.1f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
+}
+
 /** The live strip: what the agent is doing right now, and for how long. */
 @Composable
 private fun StatusBanner(
@@ -717,13 +866,22 @@ private fun StatusBanner(
         }
     }
     AnimatedVisibility(visible = running) {
+        // Line 1: human description (daemon phase_detail). Line 2: raw
+        // command / path / [attached: …] (tool_detail), when distinct.
         val headline = when {
-            phase.isNotEmpty() && phaseDetail.isNotEmpty() -> "$phase · $phaseDetail"
-            phase.isNotEmpty() -> phase
+            phase.isNotEmpty() && phaseDetail.isNotEmpty() -> {
+                val verb = phase.replaceFirstChar { it.uppercase() }
+                "$verb · $phaseDetail"
+            }
+            phase.isNotEmpty() -> phase.replaceFirstChar { it.uppercase() }
             tool.isNotEmpty() -> tool
             else -> "$agent is working"
         }
-        val second = listOf(tool, toolDetail).filter { it.isNotBlank() }.joinToString("  ")
+        val second = when {
+            toolDetail.isNotBlank() && toolDetail != phaseDetail -> toolDetail
+            tool.isNotBlank() && tool != phaseDetail -> tool
+            else -> ""
+        }
         Column(
             Modifier
                 .fillMaxWidth()
@@ -982,6 +1140,9 @@ private fun Composer(
  * What a long press offers. Copy is always here; rewind only appears on your
  * own messages, and only when the session's harness advertises it — an
  * option that would fail is worse than no option.
+ *
+ * Historical user prompts also show when they were sent (from the journal
+ * timestamp) under the text preview.
  */
 @Composable
 private fun MessageActionsSheet(
@@ -993,15 +1154,32 @@ private fun MessageActionsSheet(
     onRewind: () -> Unit,
 ) {
     val pal = palette
+    // Live echo has no journal ts yet; only historical rows carry one.
+    val whenSent = remember(item.ts, item.live, item.role) {
+        if (item.role == "user" && !item.live && item.ts.isNotBlank()) {
+            Time.fullStamp(Time.epochMs(item.ts))
+        } else {
+            ""
+        }
+    }
     Column(Modifier.padding(bottom = 28.dp)) {
-        Text(
-            text = item.text.lineSequence().first().take(120),
-            style = MaterialTheme.typography.bodyMedium,
-            color = pal.dim,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-        )
+        Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
+            Text(
+                text = item.text.lineSequence().first().take(120),
+                style = MaterialTheme.typography.bodyMedium,
+                color = pal.dim,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (whenSent.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = whenSent,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = pal.dim,
+                )
+            }
+        }
         Hairline(inset = 16)
 
         ActionRow(Icons.Outlined.ContentCopy, "Copy message", accent, onCopy)

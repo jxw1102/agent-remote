@@ -510,8 +510,14 @@ NavigationPane {
                                     // Rename: the derived names are often
                                     // unrecognisable with a dozen projects in
                                     // flight, which is the point of Focus.
+                                    // The dialog lives in C++ (promptRename-
+                                    // Session): a document-scope SystemPrompt
+                                    // id does not resolve from inside a
+                                    // ListItemComponent, so showing it from
+                                    // here silently did nothing.
                                     ActionItem {
                                         title: qsTr("Rename")
+                                        imageSource: "asset:///images/ic_edit.png"
                                         onTriggered: {
                                             var a = ListItemData.api;
                                             if (! a || ! ListItemData.id)
@@ -523,16 +529,15 @@ NavigationPane {
                                                  === null)
                                                 ? -1
                                                 : ListItemData.profileIndex;
-                                            renamePrompt.sessionId =
-                                                "" + ListItemData.id;
-                                            renamePrompt.profileIndex = pidx;
-                                            renamePrompt.inputField.defaultText =
-                                                "" + ListItemData.title;
-                                            renamePrompt.show();
+                                            a.promptRenameSession(
+                                                pidx,
+                                                "" + ListItemData.id,
+                                                "" + ListItemData.title);
                                         }
                                     }
                                     ActionItem {
                                         title: qsTr("Name it from the transcript")
+                                        imageSource: "asset:///images/ic_title.png"
                                         onTriggered: {
                                             var a = ListItemData.api;
                                             if (! a || ! ListItemData.id)
@@ -555,6 +560,11 @@ NavigationPane {
                                         title: ListItemData.focus
                                                ? qsTr("Done - out of Focus")
                                                : qsTr("Track in Focus")
+                                        // Check = already tracking (mark done);
+                                        // star = not yet tracked (add to Focus).
+                                        imageSource: ListItemData.focus
+                                            ? "asset:///images/ic_check.png"
+                                            : "asset:///images/ic_star.png"
                                         onTriggered: {
                                             var a = ListItemData.api;
                                             if (! a || ! ListItemData.id)
@@ -617,25 +627,6 @@ NavigationPane {
         attachedObjects: [
             ArrayDataModel {
                 id: sessionsModel
-            },
-            // Rename prompt. The row that opened it is remembered here: a
-            // SystemPrompt callback has no access to ListItemData.
-            SystemPrompt {
-                id: renamePrompt
-                property string sessionId: ""
-                property int profileIndex: -1
-                title: qsTr("Rename session")
-                body: qsTr("Leave it empty to go back to the name the agent derived.")
-                confirmButton.label: qsTr("Save")
-                cancelButton.label: qsTr("Cancel")
-                onFinished: {
-                    if (result != SystemUiResult.ConfirmButtonSelection)
-                        return;
-                    if (nav.api && renamePrompt.sessionId != "")
-                        nav.api.setSessionTitle(renamePrompt.profileIndex,
-                                                renamePrompt.sessionId,
-                                                renamePrompt.inputFieldTextEntry());
-                }
             },
             QueueSheet {
                 id: queueSheet

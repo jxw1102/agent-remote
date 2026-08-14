@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -32,6 +33,12 @@ data class AppSettings(
     val focusMode: Boolean = false,
     /** Render assistant markdown; off = plain monospace, always safe. */
     val richText: Boolean = true,
+    /**
+     * Sessions with process view on: the transcript additionally shows the
+     * agent's working steps (tool calls, results, thinking) under each
+     * message. Per session and off by default, like the web client.
+     */
+    val processViewSessions: Set<String> = emptySet(),
 )
 
 private val Context.settingsStore: DataStore<Preferences> by preferencesDataStore("settings")
@@ -47,6 +54,7 @@ class SettingsStore(context: Context) {
         val backgroundWatch = booleanPreferencesKey("backgroundWatch")
         val focusMode = booleanPreferencesKey("focusMode")
         val richText = booleanPreferencesKey("richText")
+        val processViewSessions = stringSetPreferencesKey("processViewSessions")
     }
 
     val state: Flow<AppSettings> = store.data.map { p ->
@@ -59,6 +67,7 @@ class SettingsStore(context: Context) {
             backgroundWatch = p[K.backgroundWatch] ?: d.backgroundWatch,
             focusMode = p[K.focusMode] ?: d.focusMode,
             richText = p[K.richText] ?: d.richText,
+            processViewSessions = p[K.processViewSessions] ?: d.processViewSessions,
         )
     }
 
@@ -69,4 +78,9 @@ class SettingsStore(context: Context) {
     suspend fun setBackgroundWatch(v: Boolean) = store.edit { it[K.backgroundWatch] = v }
     suspend fun setFocusMode(v: Boolean) = store.edit { it[K.focusMode] = v }
     suspend fun setRichText(v: Boolean) = store.edit { it[K.richText] = v }
+
+    suspend fun setProcessView(sessionId: String, on: Boolean) = store.edit { p ->
+        val current = p[K.processViewSessions] ?: emptySet()
+        p[K.processViewSessions] = if (on) current + sessionId else current - sessionId
+    }
 }

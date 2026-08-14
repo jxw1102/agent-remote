@@ -29,6 +29,8 @@
 
 // StatusSse is always compiled (secondary per-profile streams + optional
 // primary). WebSocket is only pulled in when the primary is not SSE.
+#include <bb/system/SystemUiResult>
+
 #include "statussse.hpp"
 #ifndef USE_SSE_STATUS
 #include "statussocket.hpp"
@@ -37,6 +39,7 @@
 class Chime;
 class QNetworkReply;
 class RichPaint;
+namespace bb { namespace system { class SystemPrompt; } }
 
 /*!
  * All communication with agentremoted (claude / grok / codex harnesses —
@@ -186,6 +189,10 @@ class ApiClient : public QObject
     Q_PROPERTY(bool scrollToEndHint READ scrollToEndHint NOTIFY messagesChanged)
     Q_PROPERTY(QString transcriptStatus READ transcriptStatus NOTIFY transcriptStatusChanged)
     Q_PROPERTY(QString currentSessionId READ currentSessionId NOTIFY currentSessionChanged)
+    // Process view: the OPEN session also shows the agent's working steps
+    // (tool calls, results, thinking) under each message. Per session,
+    // persisted, off by default — web/Android/iOS parity.
+    Q_PROPERTY(bool processView READ processView NOTIFY processViewChanged)
     // Job of the OPEN session only.
     Q_PROPERTY(bool jobRunning READ jobRunning NOTIFY jobRunningChanged)
     // Live "<Agent> is working... 12s" line while a job runs ("" otherwise).
@@ -487,6 +494,21 @@ public:
                                     bool member);
     // Cosmetic: stops flagging a finished turn once you have opened it.
     Q_INVOKABLE void markSessionSeen(int profileIndex, const QString &sessionId);
+    // Shows the rename dialog and saves on confirm. Lives here, not in QML:
+    // a ListItemComponent context action can reach nothing but ListItemData,
+    // so a document-scope SystemPrompt id never resolves from the row.
+    Q_INVOKABLE void promptRenameSession(int profileIndex,
+                                         const QString &sessionId,
+                                         const QString &currentTitle);
+
+    // ---- Process view ----
+    bool processView() const;
+    // Toggles it for the OPEN session and refetches (steps only arrive with
+    // ?detail=steps, so toggling off drops them too).
+    Q_INVOKABLE void setProcessView(bool on);
+    // Expand/collapse one step row. First expand of a truncated step fetches
+    // the full body — that keeps a 200KB tool result out of window fetches.
+    Q_INVOKABLE void toggleStep(const QString &ref);
 
 public Q_SLOTS:
     // Slot so applicationui can wire Application::fullscreen() to it.
@@ -513,6 +535,7 @@ Q_SIGNALS:
     void permissionChanged();
     void questionChanged();
     void queueChanged();
+    void processViewChanged();
     void newSessionRequestChanged();
     void attachChanged();
     void dropChanged();
@@ -521,6 +544,7 @@ Q_SIGNALS:
 
 private Q_SLOTS:
     void onFinished(QNetworkReply *reply);
+    void onRenamePromptFinished(bb::system::SystemUiResult::Type result);
     void pollJob();
     void pollTui();
     void onStatusFrame(const QByteArray &payload);
@@ -828,6 +852,16 @@ private:
     RichPaint *m_richPaint;
     Chime *m_chime;
     bool m_richPaintWarned;
+
+    // Rename dialog + the row that opened it (see promptRenameSession).
+    bb::system::SystemPrompt *m_renamePrompt;
+    int m_renameProfileIndex;
+    QString m_renameSessionId;
+
+    // Sessions with process view on (persisted via QSettings).
+    QSet<QString> m_processViewSessions;
+    void appendStepItems(QVariantList &out, const QVariantList &steps);
+    void handleStepFull(QNetworkReply *reply, const QVariant &data);
     QString m_errorLog;
 };
 

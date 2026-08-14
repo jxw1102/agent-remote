@@ -25,14 +25,17 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.List
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.DataUsage
 import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -460,8 +463,20 @@ private fun SessionActionsDialog(
                         }
                     },
                     enabled = busy == null,
-                ) { Text("Regenerate from transcript") }
+                ) {
+                    Icon(Icons.Outlined.AutoAwesome, contentDescription = null,
+                        modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Regenerate from transcript")
+                }
                 TextButton(onClick = { onBoard(!member); onDismiss() }) {
+                    Icon(
+                        if (member) Icons.Outlined.Check else Icons.Outlined.Star,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = if (member) pal.dim else pal.ok,
+                    )
+                    Spacer(Modifier.width(8.dp))
                     Text(
                         if (member) "Done — take it off Focus"
                         else "Track in Focus",
@@ -478,7 +493,12 @@ private fun SessionActionsDialog(
                     }
                 },
                 enabled = busy == null,
-            ) { Text("Save") }
+            ) {
+                Icon(Icons.Outlined.Edit, contentDescription = null,
+                    modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Save")
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

@@ -12,6 +12,7 @@ import com.bb10d.remote.data.MessageDto
 import com.bb10d.remote.data.Profile
 import com.bb10d.remote.data.SessionDto
 import com.bb10d.remote.data.SessionRef
+import com.bb10d.remote.data.StepDto
 import com.bb10d.remote.data.Time
 import com.bb10d.remote.net.DaemonClient
 import com.bb10d.remote.net.DaemonException
@@ -41,6 +42,8 @@ data class TranscriptItem(
     val live: Boolean = false,
     /** notice severity: info | error. */
     val severity: String = "info",
+    /** Process view: the working steps that followed this message. */
+    val steps: List<StepDto> = emptyList(),
 )
 
 data class TranscriptUi(
@@ -129,10 +132,25 @@ class TranscriptViewModel(
         byProfile[ref.profileId]?.firstOrNull { it.sessionIds().contains(ref.sessionId) }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    /** Process view for THIS session (persisted per session, like web). */
+    val processView: StateFlow<Boolean> = combine(repo.settings, _ref) { s, ref ->
+        ref.sessionId.isNotEmpty() && ref.sessionId in s.processViewSessions
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.Eagerly,
+        initialRef.sessionId in repo.settings.value.processViewSessions,
+    )
+
+    /** Expanded step bodies (ref → full text once fetched; "" = preview only). */
+    private val _openSteps = MutableStateFlow<Map<String, String>>(emptyMap())
+    val openSteps: StateFlow<Map<String, String>> = _openSteps.asStateFlow()
+
     private var loadedTotal = 0
     private var earliestOffset = 0
     private var liveCounter = 0
     private var lastCueSignature = ""
+    private var processRefreshAtMs = 0L
+    private var processRefresh: kotlinx.coroutines.Job? = null
 
     /** Jobs already seen through to the end; never re-attach to these. */
     private val handledJobs = mutableSetOf<String>()
@@ -213,6 +231,10 @@ class TranscriptViewModel(
                 val first = lastCueSignature.isEmpty()
                 lastCueSignature = signature
                 if (!first) repo.cue(Chime.Cue.Status)
+                // Steps live in the journal, not the status stream — with
+                // process view on, each new phase/tool pulls the tail so the
+                // strip does not trail the chime by a whole turn.
+                if (processView.value) scheduleProcessRefresh()
             }
         }
 
@@ -260,16 +282,18 @@ class TranscriptViewModel(
         }
     }
 
-    fun loadTail(keepLive: Boolean = false) {
+    fun loadTail(keepLive: Boolean = false, quiet: Boolean = false) {
         val c = client ?: return
         val id = _ref.value.sessionId
         if (id.isEmpty()) return
-        _ui.value = _ui.value.copy(loading = true, error = null)
+        if (!quiet) _ui.value = _ui.value.copy(loading = true, error = null)
         viewModelScope.launch {
             // A session the daemon just named has no transcript file yet, so
             // the first reads legitimately 404. Waiting beats telling the user
             // their brand-new session does not exist.
-            retryingWhileCreating { c.messages(id, offset = -1, limit = PAGE) }
+            retryingWhileCreating {
+                c.messages(id, offset = -1, limit = PAGE, steps = processView.value)
+            }
                 .onSuccess { page ->
                     loadedTotal = page.total
                     earliestOffset = page.offset
@@ -291,16 +315,76 @@ class TranscriptViewModel(
                         loading = false,
                         canLoadOlder = page.offset > 0,
                         // Open on the newest message, the way every chat does;
-                        // the window we just fetched is the tail.
-                        scrollTick = _ui.value.scrollTick + 1,
+                        // the window we just fetched is the tail. A quiet
+                        // (process-view) refresh must not yank the reader.
+                        scrollTick = _ui.value.scrollTick + (if (quiet) 0 else 1),
+                        prependTick = _ui.value.prependTick,
+                        prependCount = _ui.value.prependCount,
+                        status = _ui.value.status,
                     )
                 }
                 .onFailure { e ->
-                    _ui.value = _ui.value.copy(
-                        loading = false,
-                        error = repo.reason(e),
-                    )
+                    if (!quiet) {
+                        _ui.value = _ui.value.copy(
+                            loading = false,
+                            error = repo.reason(e),
+                        )
+                    }
                 }
+        }
+    }
+
+    /**
+     * Throttled tail pull while a turn runs with process view on — steps only
+     * arrive with `?detail=steps`, so the status stream alone cannot paint
+     * them. Mirrors the web client's 900 ms minimum gap.
+     */
+    private fun scheduleProcessRefresh() {
+        if (processRefresh?.isActive == true) return
+        val wait = (processRefreshAtMs + PROCESS_REFRESH_MIN_MS - System.currentTimeMillis())
+            .coerceAtLeast(0)
+        processRefresh = viewModelScope.launch {
+            delay(wait)
+            processRefreshAtMs = System.currentTimeMillis()
+            if (processView.value) loadTail(keepLive = true, quiet = true)
+        }
+    }
+
+    /** Turn the working-steps strip on/off for this session (persisted). */
+    fun setProcessView(on: Boolean) {
+        val id = _ref.value.sessionId
+        if (id.isEmpty()) return
+        viewModelScope.launch {
+            repo.settingsStore.setProcessView(id, on)
+            // Steps only arrive with ?detail=steps — refetch either way so
+            // toggling off also drops them.
+            loadTail(keepLive = true)
+        }
+    }
+
+    /**
+     * Expand/collapse one step. First expand of a truncated step fetches the
+     * full body from the daemon — that is what keeps a 200KB tool result out
+     * of every window fetch.
+     */
+    fun toggleStep(step: StepDto) {
+        val open = _openSteps.value
+        if (step.ref in open) {
+            _openSteps.value = open - step.ref
+            return
+        }
+        _openSteps.value = open + (step.ref to "")
+        if (!step.truncated) return
+        val c = client ?: return
+        val id = _ref.value.sessionId
+        viewModelScope.launch {
+            runCatching { c.stepText(id, step.ref) }
+                .onSuccess { full ->
+                    if (step.ref in _openSteps.value && full.text.isNotEmpty()) {
+                        _openSteps.value = _openSteps.value + (step.ref to full.text)
+                    }
+                }
+                .onFailure { setStatus(repo.reason(it)) }
         }
     }
 
@@ -329,7 +413,7 @@ class TranscriptViewModel(
         val count = earliestOffset - from
         _ui.value = _ui.value.copy(loadingOlder = true)
         viewModelScope.launch {
-            runCatching { c.messages(id, offset = from, limit = count) }
+            runCatching { c.messages(id, offset = from, limit = count, steps = processView.value) }
                 .onSuccess { page ->
                     earliestOffset = page.offset
                     val older = toItems(page.messages, page.offset)
@@ -363,8 +447,9 @@ class TranscriptViewModel(
         val id = _ref.value.sessionId
         viewModelScope.launch {
             if (id.isNotEmpty()) {
-                val fetched = runCatching { c.messages(id, offset = loadedTotal, limit = 200) }
-                    .getOrNull()
+                val fetched = runCatching {
+                    c.messages(id, offset = loadedTotal, limit = 200, steps = processView.value)
+                }.getOrNull()
                 if (fetched == null || fetched.total < loadedTotal) {
                     loadTail()
                 } else {
@@ -378,6 +463,10 @@ class TranscriptViewModel(
             val note = endNote(state)
             if (note != null) append(note)
             _ui.value = _ui.value.copy(status = "")
+            // Watching the turn finish on this screen counts as having read
+            // it — dim the Focus "turn finished" unread styling without
+            // requiring a leave-and-reopen.
+            repo.markSeen(_ref.value)
             repo.refreshSession(_ref.value)
         }
     }
@@ -410,7 +499,7 @@ class TranscriptViewModel(
     private fun toItems(messages: List<MessageDto>, offset: Int): List<TranscriptItem> =
         messages.flatMapIndexed { index, msg ->
             val key = "${offset + index}:${msg.uuid}"
-            shellEscape(msg, key) ?: listOf(
+            val rows = shellEscape(msg, key) ?: listOf(
                 TranscriptItem(
                     id = key,
                     role = msg.role,
@@ -419,6 +508,10 @@ class TranscriptViewModel(
                     metaKind = msg.metaKind,
                 ),
             )
+            // Steps hang under the message they FOLLOWED — on a split shell
+            // turn that is the output row, the last of the pair.
+            if (msg.steps.isEmpty()) rows
+            else rows.dropLast(1) + rows.last().copy(steps = msg.steps)
         }
 
     /**
@@ -950,6 +1043,7 @@ class TranscriptViewModel(
 
     private companion object {
         const val PAGE = 60
+        const val PROCESS_REFRESH_MIN_MS = 900L
         const val SHELL_FEED_LIMIT = 8000
         const val STATUS_LINGER_MS = 2500L
         const val SHELL_PREFIX = "[shell] ! "

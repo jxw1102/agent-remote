@@ -207,7 +207,34 @@ data class MessageDto(
     val ts: String = "",
     val text: String = "",
     @SerialName("metaKind") val metaKind: String = "",
+    /** Process view only (`?detail=steps`): the work between the messages. */
+    val steps: List<StepDto> = emptyList(),
 )
+
+/**
+ * One process-view step, hung off the message it followed. Kinds:
+ * `tool_use` (name/detail), `tool_result` (ok), `thinking` (recorded=false
+ * means the CLI stored ciphertext only). Previews are capped daemon-side at
+ * ~512 bytes; `truncated` rows fetch the rest from /steps/<ref> on expand.
+ */
+@Serializable
+data class StepDto(
+    val kind: String = "",
+    val ref: String = "",
+    val ts: String = "",
+    val name: String = "",
+    val detail: String = "",
+    val ok: Boolean = true,
+    val recorded: Boolean = true,
+    val preview: String = "",
+    val bytes: Long = 0,
+    val truncated: Boolean = false,
+    /** Syntax-highlight hint (python/diff/…); empty = plain text. */
+    val lang: String = "",
+)
+
+@Serializable
+data class StepTextDto(val text: String = "")
 
 @Serializable
 data class MessagesDto(

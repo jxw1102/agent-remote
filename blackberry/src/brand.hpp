@@ -74,7 +74,7 @@
 
 #define BRAND_APP_NAME        "Agent Remote"
 #define BRAND_AGENT_NAME      "Agent"
-#define BRAND_VERSION         "3.0.0"
+#define BRAND_VERSION         "3.0.2"
 // Fresh settings scope: this is a NEW app id, installed alongside the
 // single-provider ones. (QSettings are per-app sandboxes on BB10, so the
 // old apps' profiles cannot be imported - they are re-entered once.)

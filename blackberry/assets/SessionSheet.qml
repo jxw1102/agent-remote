@@ -59,6 +59,7 @@ Sheet {
 
             soundToggle.checked = sessionSheet.api.soundCues;
             ledToggle.checked = sessionSheet.api.ledCues;
+            processToggle.checked = sessionSheet.api.processView;
         }
         ready = true;
         open();
@@ -171,6 +172,45 @@ Sheet {
                     topMargin: 8
                     multiline: true
                     textStyle.fontSize: FontSize.XSmall
+                    textStyle.color: Color.create("#666666")
+                }
+
+                // ---- Process view (the OPEN session only) ---------------
+                Label {
+                    text: qsTr("Process view")
+                    visible: sessionSheet.api
+                             ? sessionSheet.api.currentSessionId != "" : false
+                    topMargin: 24
+                    textStyle.fontSize: FontSize.XSmall
+                    textStyle.color: Color.create("#888888")
+                }
+                Container {
+                    visible: sessionSheet.api
+                             ? sessionSheet.api.currentSessionId != "" : false
+                    horizontalAlignment: HorizontalAlignment.Fill
+                    layout: StackLayout { orientation: LayoutOrientation.LeftToRight }
+                    Label {
+                        text: qsTr("Show working steps")
+                        verticalAlignment: VerticalAlignment.Center
+                        layoutProperties: StackLayoutProperties { spaceQuota: 1 }
+                    }
+                    ToggleButton {
+                        id: processToggle
+                        verticalAlignment: VerticalAlignment.Center
+                        onCheckedChanged: {
+                            if (sessionSheet.ready && sessionSheet.api
+                                    && sessionSheet.api.processView != checked)
+                                sessionSheet.api.setProcessView(checked);
+                        }
+                    }
+                }
+                Label {
+                    visible: sessionSheet.api
+                             ? sessionSheet.api.currentSessionId != "" : false
+                    text: qsTr("Adds the agent's tool calls, results and thinking under each message. This session only; tap a step to expand it.")
+                    multiline: true
+                    topMargin: 0
+                    textStyle.fontSize: FontSize.XXSmall
                     textStyle.color: Color.create("#666666")
                 }
 

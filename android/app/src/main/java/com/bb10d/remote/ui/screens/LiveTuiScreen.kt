@@ -13,13 +13,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -29,6 +31,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -46,6 +49,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -159,10 +163,12 @@ fun LiveTuiScreen(
         ) {
             // Soft keys as real chrome buttons (surface + border) so they stay
             // readable on the near-black TUI pane — flat TextButtons vanish in dark.
+            // Horizontal scroll: 8 keys never squeeze the input row off-screen.
             Row(
                 Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surface)
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 8.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -180,59 +186,82 @@ fun LiveTuiScreen(
                     LiveTuiKeyButton(
                         label = label,
                         onClick = { sendKeys(keys) },
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.width(48.dp),
                     )
                 }
             }
-            // Coloured SGR from daemon tmux capture-pane -e.
-            AnsiText(
-                text = text,
-                modifier = Modifier
+            // weight must sit on a Column direct child — AnsiText wraps Text
+            // in SelectionContainer, so weight on its modifier was ignored and
+            // the pane grew to full content height, pushing the input off-screen.
+            Box(
+                Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .verticalScroll(scroll)
-                    .horizontalScroll(rememberScrollState())
-                    .background(Color(0xFF0A0C10))
-                    .padding(12.dp),
-                defaultColor = Color(0xFFD0D4DC),
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-                lineHeight = 16.sp,
-            )
+                    .background(Color(0xFF0A0C10)),
+            ) {
+                AnsiText(
+                    text = text,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(scroll)
+                        .horizontalScroll(rememberScrollState())
+                        .padding(12.dp),
+                    defaultColor = Color(0xFFD0D4DC),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                )
+            }
             if (error != null) {
                 Text(
                     error!!,
                     color = pal.danger,
                     style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
                 )
+            }
+            // Pinned input chrome — never inside the pane scroll.
+            fun submitLine() {
+                val t = line.trim()
+                if (t.isEmpty()) return
+                sendKeys(listOf("Enter"), t)
+                line = ""
             }
             Row(
                 Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surface)
-                    .padding(8.dp),
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 OutlinedTextField(
                     value = line,
                     onValueChange = { line = it },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 52.dp),
                     singleLine = true,
-                    placeholder = { Text("Line into TUI") },
+                    placeholder = { Text("Type a line into the TUI") },
                     textStyle = MaterialTheme.typography.bodyMedium.copy(
                         fontFamily = FontFamily.Monospace,
                     ),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { submitLine() }),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                        unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = pal.hairline,
+                        cursorColor = MaterialTheme.colorScheme.primary,
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    ),
                 )
                 Spacer(Modifier.width(8.dp))
-                Button(
-                    onClick = {
-                        val t = line.trim()
-                        if (t.isEmpty()) return@Button
-                        sendKeys(listOf("Enter"), t)
-                        line = ""
-                    },
-                ) { Text("Send") }
+                Button(onClick = { submitLine() }) { Text("Send") }
             }
         }
     }

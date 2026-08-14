@@ -9,7 +9,10 @@
 #include <bb/system/Clipboard>
 #include <bb/system/InvokeManager>
 #include <bb/system/InvokeRequest>
+#include <bb/system/SystemPrompt>
 #include <bb/system/SystemToast>
+#include <bb/system/SystemUiButton>
+#include <bb/system/SystemUiInputField>
 #include <QtDeclarative/QDeclarativeError>
 #include <QtAlgorithms>
 #include <QColor>
@@ -327,6 +330,9 @@ ApiClient::ApiClient(QObject *parent)
     , m_richPaint(0)
     , m_chime(new Chime(this))
     , m_richPaintWarned(false)
+    , m_renamePrompt(0)
+    , m_renameProfileIndex(-1)
+    , m_renameSessionId()
 {
     s_modelApi = this;
     // Classic/Q20 = 720; Passport = 1440. Same insets as the proven Classic
@@ -374,6 +380,9 @@ ApiClient::ApiClient(QObject *parent)
     // "" / "default" -> let the daemon (CLI) pick the model / effort.
     m_modelOverride = settings.value("modelOverride", "default").toString();
     m_effortOverride = settings.value("effortOverride", "default").toString();
+    // Sessions whose transcript also shows the agent's working steps.
+    m_processViewSessions = QSet<QString>::fromList(
+        settings.value("processViewSessions").toStringList());
     // Progress cues are on by default; the Session sheet silences either one.
     m_soundCues = settings.value("soundCues", true).toBool();
     // Focus mode is a view preference; capFocus comes from /api/ping.
@@ -1844,6 +1853,11 @@ void ApiClient::appendMessageItemsFor(QVariantList &out, const QVariantMap &m)
         else
             out.append(blockItem("p", text, QString(), false));
     }
+    // Process view: the daemon attaches each step to the message it FOLLOWED,
+    // so appending here keeps top-to-bottom the order it happened.
+    QVariantList steps = m.value("steps").toList();
+    if (!steps.isEmpty())
+        appendStepItems(out, steps);
 }
 
 // ---------------------------------------------------------------- API calls
@@ -2374,6 +2388,10 @@ void ApiClient::fetchMessages(int offset, int limit, bool older)
             .arg(m_currentSessionId).arg(limit);
     if (offset >= 0)
         path += QString("&offset=%1").arg(offset);
+    // Process view: each message also carries the working steps that
+    // followed it. Off = byte-identical to the pre-steps response.
+    if (processView())
+        path += QLatin1String("&detail=steps");
     QNetworkReply *reply = get(path, "messages");
     reply->setProperty("sid", m_currentSessionId);
     reply->setProperty("older", older);
@@ -2971,6 +2989,182 @@ void ApiClient::setSessionTitle(int profileIndex, const QString &sessionId,
            body, QLatin1String("focusTitle"));
 }
 
+void ApiClient::promptRenameSession(int profileIndex, const QString &sessionId,
+                                    const QString &currentTitle)
+{
+    if (sessionId.isEmpty())
+        return;
+    // One prompt, reused. The row that opened it is remembered on the client:
+    // a ListItemComponent context action resolves nothing but ListItemData, so
+    // neither a document-scope SystemPrompt nor its callback can carry the row.
+    if (!m_renamePrompt) {
+        m_renamePrompt = new bb::system::SystemPrompt(this);
+        m_renamePrompt->setTitle(tr("Rename session"));
+        m_renamePrompt->setBody(tr("Leave it empty to go back to the name "
+                                   "the agent derived."));
+        m_renamePrompt->confirmButton()->setLabel(tr("Save"));
+        m_renamePrompt->cancelButton()->setLabel(tr("Cancel"));
+        QObject::connect(
+            m_renamePrompt,
+            SIGNAL(finished(bb::system::SystemUiResult::Type)),
+            this,
+            SLOT(onRenamePromptFinished(bb::system::SystemUiResult::Type)));
+    }
+    m_renameProfileIndex = profileIndex;
+    m_renameSessionId = sessionId;
+    m_renamePrompt->inputField()->setDefaultText(currentTitle);
+    m_renamePrompt->show();
+}
+
+void ApiClient::onRenamePromptFinished(bb::system::SystemUiResult::Type result)
+{
+    if (result != bb::system::SystemUiResult::ConfirmButtonSelection)
+        return;
+    if (m_renameSessionId.isEmpty() || !m_renamePrompt)
+        return;
+    setSessionTitle(m_renameProfileIndex, m_renameSessionId,
+                    m_renamePrompt->inputFieldTextEntry());
+}
+
+// ---------------------------------------------------------- process view
+
+bool ApiClient::processView() const
+{
+    return !m_currentSessionId.isEmpty()
+            && m_processViewSessions.contains(m_currentSessionId);
+}
+
+void ApiClient::setProcessView(bool on)
+{
+    if (m_currentSessionId.isEmpty())
+        return;
+    if (on)
+        m_processViewSessions.insert(m_currentSessionId);
+    else
+        m_processViewSessions.remove(m_currentSessionId);
+    QSettings settings(BRAND_SETTINGS_ORG, BRAND_SETTINGS_APP);
+    settings.setValue("processViewSessions",
+                      QStringList(m_processViewSessions.toList()));
+    emit processViewChanged();
+    // Steps only travel with ?detail=steps — refetch either way so toggling
+    // off also drops them from the transcript.
+    fetchMessages(-1, INITIAL_PAGE_SIZE, false);
+}
+
+void ApiClient::toggleStep(const QString &ref)
+{
+    if (ref.isEmpty())
+        return;
+    for (int i = 0; i < m_messages.size(); ++i) {
+        QVariantMap item = m_messages.at(i).toMap();
+        if (item.value("kind").toString() != QLatin1String("step")
+                || item.value("stepRef").toString() != ref)
+            continue;
+        // Collapse when this step's body row is already open below it.
+        if (i + 1 < m_messages.size()) {
+            QVariantMap next = m_messages.at(i + 1).toMap();
+            if (next.value("kind").toString() == QLatin1String("stepbody")
+                    && next.value("stepRef").toString() == ref) {
+                m_messages.removeAt(i + 1);
+                bumpMessages(false);
+                return;
+            }
+        }
+        if (item.value("stepSilent").toBool())
+            return;
+        QVariantMap body = blockItem("stepbody",
+                                     item.value("stepPreview").toString(),
+                                     QString(), false);
+        body["stepRef"] = ref;
+        m_messages.insert(i + 1, body);
+        bumpMessages(false);
+        // Only the head of a big body travels with the window; the rest is
+        // fetched on this first expand.
+        if (item.value("stepTruncated").toBool()
+                && !m_currentSessionId.isEmpty()) {
+            QString path = QString("/api/sessions/%1/steps/%2")
+                    .arg(QString::fromUtf8(
+                             QUrl::toPercentEncoding(m_currentSessionId)),
+                         QString::fromUtf8(QUrl::toPercentEncoding(ref)));
+            QNetworkReply *reply = get(path, "stepfull");
+            reply->setProperty("sid", m_currentSessionId);
+            reply->setProperty("stepRef", ref);
+        }
+        return;
+    }
+}
+
+void ApiClient::handleStepFull(QNetworkReply *reply, const QVariant &data)
+{
+    if (reply->property("sid").toString() != m_currentSessionId)
+        return;
+    const QString ref = reply->property("stepRef").toString();
+    const QString text = data.toMap().value("text").toString();
+    if (ref.isEmpty() || text.isEmpty())
+        return;
+    for (int i = 0; i < m_messages.size(); ++i) {
+        QVariantMap item = m_messages.at(i).toMap();
+        if (item.value("kind").toString() == QLatin1String("stepbody")
+                && item.value("stepRef").toString() == ref) {
+            item["text"] = text;
+            m_messages.replace(i, item);
+            bumpMessages(false);
+            return;
+        }
+    }
+}
+
+/** One display row per step, appended under the message it followed. */
+void ApiClient::appendStepItems(QVariantList &out, const QVariantList &steps)
+{
+    for (int i = 0; i < steps.size(); ++i) {
+        QVariantMap s = steps.at(i).toMap();
+        const QString kind = s.value("kind").toString();
+        const bool isErr = kind == QLatin1String("tool_result")
+                && !s.value("ok", true).toBool();
+        const bool silent = kind == QLatin1String("thinking")
+                && !s.value("recorded", true).toBool();
+        QString mark, title;
+        if (kind == QLatin1String("tool_use")) {
+            mark = QString::fromUtf8("\xE2\x96\xB8");  // ▸
+            title = s.value("name").toString();
+            if (title.isEmpty())
+                title = tr("tool");
+        } else if (kind == QLatin1String("tool_result")) {
+            mark = QString::fromUtf8("\xE2\x86\xB3");  // ↳
+            title = isErr ? tr("error") : tr("result");
+        } else if (kind == QLatin1String("thinking")) {
+            mark = QString::fromUtf8("\xE2\x9C\xBB");  // ✻
+            title = tr("thinking");
+        } else {
+            mark = QLatin1String("-");
+            title = kind;
+        }
+        QString detail = s.value("detail").toString();
+        if (detail.isEmpty())
+            detail = s.value("preview").toString()
+                    .section(QLatin1Char('\n'), 0, 0);
+        detail = detail.simplified();
+        if (detail.length() > 110)
+            detail = detail.left(109) + QString::fromUtf8("\xE2\x80\xA6");
+        QString head = mark + QLatin1String(" ") + title;
+        if (silent)
+            head += QLatin1String("  ") + tr("(not recorded by this CLI)");
+        else if (!detail.isEmpty())
+            head += QLatin1String("  ") + detail;
+        const qlonglong bytes = s.value("bytes").toLongLong();
+        if (bytes >= 1024)
+            head += QString::fromLatin1("  %1KB").arg(bytes / 1024);
+        QVariantMap item = blockItem("step", head, QString(), false);
+        item["stepRef"] = s.value("ref").toString();
+        item["stepPreview"] = s.value("preview").toString();
+        item["stepTruncated"] = s.value("truncated").toBool();
+        item["stepErr"] = isErr;
+        item["stepSilent"] = silent;
+        out.append(item);
+    }
+}
+
 void ApiClient::regenerateSessionTitle(int profileIndex, const QString &sessionId)
 {
     QString base = m_baseUrl, token = m_token;
@@ -3272,6 +3466,10 @@ void ApiClient::handleJobEnd(const QString &status, const QString &newSessionId,
         setTranscriptStatus(QString());
         refreshTranscript();
     }
+    // Watching the turn finish on this transcript counts as having read it
+    // — same as opening the row from the list (dims Focus "turn finished").
+    if (!m_currentSessionId.isEmpty())
+        markSessionSeen(m_activeProfile, m_currentSessionId);
     // The finished job changed previews/ordering on the sessions list.
     refreshSessions();
 }
@@ -3750,6 +3948,13 @@ void ApiClient::onFinished(QNetworkReply *reply)
         // handleMessages has already built + rendered the new rows by now;
         // clearing here re-enables the "load older" row (success or error).
         setLoadingOlder(false);
+        return;
+    }
+
+    if (kind == "stepfull") {
+        // Full body behind a truncated process step; errors keep the preview.
+        if (ok)
+            handleStepFull(reply, data);
         return;
     }
 
@@ -4578,38 +4783,42 @@ QString ApiClient::highlightHtml(const QString &text, const QString &query,
 }
 
 // Human phrase for what the agent is doing (daemon streams the phase).
+// Line 1 only — description. The raw command/path is appended as line 2
+// by recomputeLiveStatus when tool_detail differs from phase_detail.
 QString ApiClient::phaseLine(const QVariantMap &s) const
 {
     const QString agent = statusActor();
     QString phase = s.value("phase").toString();
-    QString detail = shortDetail(s.value("phase_detail").toString());
+    QString detail = shortDetail(s.value("phase_detail").toString(), 100);
 
     if (phase == "thinking")
         return tr("%1 is thinking...").arg(agent);
     if (phase == "writing")
         return tr("%1 is writing...").arg(agent);
     if (phase == "editing")
-        return detail.isEmpty() ? tr("Editing files...") : tr("Editing %1").arg(detail);
+        return detail.isEmpty() ? tr("Editing files...") : tr("Editing · %1").arg(detail);
     if (phase == "reading")
-        return detail.isEmpty() ? tr("Reading files...") : tr("Reading %1").arg(detail);
+        return detail.isEmpty() ? tr("Reading files...") : tr("Reading · %1").arg(detail);
     if (phase == "searching")
-        return tr("Searching the code...");
+        return detail.isEmpty() ? tr("Searching the code...") : tr("Searching · %1").arg(detail);
     if (phase == "running")
-        return detail.isEmpty() ? tr("Running a command...") : tr("Running: %1").arg(detail);
+        return detail.isEmpty() ? tr("Running a command...") : tr("Running · %1").arg(detail);
     if (phase == "browsing")
-        return detail.isEmpty() ? tr("Browsing the web...") : tr("Browsing %1").arg(detail);
+        return detail.isEmpty() ? tr("Browsing the web...") : tr("Browsing · %1").arg(detail);
     if (phase == "delegating")
         return tr("Delegating to a subagent...");
+    if (phase == "asking")
+        return detail.isEmpty() ? tr("Waiting for your answer...") : tr("Asking · %1").arg(detail);
 
-    // No phase (or a generic "tool"): fall back to the last tool line.
+    if (!phase.isEmpty() && !detail.isEmpty())
+        return phase + QString::fromUtf8(" \xC2\xB7 ") + detail;
+    if (!phase.isEmpty())
+        return phase;
+
+    // No phase: tool name only (command goes on line 2).
     QString tool = shortDetail(s.value("tool").toString(), 32);
-    if (!tool.isEmpty()) {
-        QString line = QString::fromUtf8("\xE2\x9A\x99 ") + tool;
-        QString toolDetail = shortDetail(s.value("tool_detail").toString());
-        if (!toolDetail.isEmpty())
-            line += "  " + toolDetail;
-        return line;
-    }
+    if (!tool.isEmpty())
+        return QString::fromUtf8("\xE2\x9A\x99 ") + tool;
     return workingLine();
 }
 
@@ -4646,6 +4855,12 @@ void ApiClient::recomputeLiveStatus()
         }
         line += QString::fromUtf8("  \xC2\xB7  %1s")
                 .arg(s.value("elapsed_s").toInt());
+        // Line 2: raw command / path / [attached: …] when distinct from the
+        // description (phase_detail). Label is multiline maxLineCount: 2.
+        QString cmd = shortDetail(s.value("tool_detail").toString(), 160);
+        QString desc = shortDetail(s.value("phase_detail").toString(), 100);
+        if (!cmd.isEmpty() && cmd != desc)
+            line += QLatin1Char('\n') + cmd;
         break;
     }
     notifyStatus(sig);

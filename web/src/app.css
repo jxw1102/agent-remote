@@ -482,7 +482,9 @@ button.icon-btn.icon-idle {
 .banner {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  column-gap: 10px;
+  row-gap: 2px;
   padding: 6px 16px;
   background: var(--accent-soft);
   color: var(--accent);
@@ -499,20 +501,29 @@ button.icon-btn.icon-idle {
   border-bottom-color: rgba(95, 201, 139, 0.28);
 }
 /*
- * Mobile TranscriptPage status Label: multiline, maxLineCount: 2.
- * One accent-coloured block owns the strip; elapsed/queued live inside
- * the string (liveStatusLine), not as a competing gray column.
+ * Line 1: human description + elapsed/queued.
+ * Line 2 (.banner-cmd): raw command / path / [attached: …] when present.
  */
 .banner .banner-line {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  word-break: break-word;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.banner .banner-cmd {
+  flex: 1 1 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0 0 0 18px; /* align under text after the pulse */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  line-height: 1.3;
+  opacity: 0.78;
+  color: inherit;
 }
 .banner .pulse,
 .banner .banner-action {
@@ -753,22 +764,22 @@ button.icon-btn.icon-idle {
   white-space: pre;
   color: #c9d1d9;
 }
-/* GitHub-dark-ish token palette for fenced blocks (self-contained highlight). */
-.code-wrap .tok-kw { color: #ff7b72; }
-.code-wrap .tok-str { color: #a5d6ff; }
-.code-wrap .tok-cmt { color: #8b949e; font-style: italic; }
-.code-wrap .tok-num { color: #79c0ff; }
-.code-wrap .tok-fn { color: #d2a8ff; }
-.code-wrap .tok-type { color: #ffa657; }
-.code-wrap .tok-op { color: #ff7b72; }
-.code-wrap .tok-punct { color: #8b949e; }
-.code-wrap .tok-prop { color: #7ee787; }
-.code-wrap .tok-builtin { color: #ffa657; }
-.code-wrap .tok-meta { color: #79c0ff; }
-.code-wrap .tok-regex { color: #a5d6ff; }
-.code-wrap .tok-tag { color: #7ee787; }
-.code-wrap .tok-ins { color: #3fb950; }
-.code-wrap .tok-del { color: #f85149; }
+/* GitHub-dark-ish token palette for fenced blocks + process-view steps. */
+.code-wrap .tok-kw, .step-body .tok-kw { color: #ff7b72; }
+.code-wrap .tok-str, .step-body .tok-str { color: #a5d6ff; }
+.code-wrap .tok-cmt, .step-body .tok-cmt { color: #8b949e; font-style: italic; }
+.code-wrap .tok-num, .step-body .tok-num { color: #79c0ff; }
+.code-wrap .tok-fn, .step-body .tok-fn { color: #d2a8ff; }
+.code-wrap .tok-type, .step-body .tok-type { color: #ffa657; }
+.code-wrap .tok-op, .step-body .tok-op { color: #ff7b72; }
+.code-wrap .tok-punct, .step-body .tok-punct { color: #8b949e; }
+.code-wrap .tok-prop, .step-body .tok-prop { color: #7ee787; }
+.code-wrap .tok-builtin, .step-body .tok-builtin { color: #ffa657; }
+.code-wrap .tok-meta, .step-body .tok-meta { color: #79c0ff; }
+.code-wrap .tok-regex, .step-body .tok-regex { color: #a5d6ff; }
+.code-wrap .tok-tag, .step-body .tok-tag { color: #7ee787; }
+.code-wrap .tok-ins, .step-body .tok-ins { color: #3fb950; }
+.code-wrap .tok-del, .step-body .tok-del { color: #f85149; }
 
 /*
  * Tables: card shell, grid lines, sticky header, zebra body. Width is
@@ -1285,6 +1296,12 @@ button.icon-btn.icon-idle {
   background: var(--surface-2); border: 1px solid var(--line);
   border-radius: 6px; font-family: var(--mono); font-size: 11.5px;
   white-space: pre-wrap; word-break: break-word; color: var(--text);
+}
+.step-body code {
+  font: inherit;
+  color: inherit;
+  white-space: inherit;
+  word-break: inherit;
 }
 .step-tool_result .step-mark { color: var(--ok); }
 .step-tool_result.step-err .step-mark { color: var(--danger); }

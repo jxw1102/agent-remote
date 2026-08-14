@@ -12,6 +12,7 @@ import com.bb10d.remote.data.MessagesDto
 import com.bb10d.remote.data.PingDto
 import com.bb10d.remote.data.ProjectsDto
 import com.bb10d.remote.data.SearchDto
+import com.bb10d.remote.data.StepTextDto
 import com.bb10d.remote.data.SessionDto
 import com.bb10d.remote.data.SessionsDto
 import com.bb10d.remote.data.ShellResultDto
@@ -347,17 +348,27 @@ class DaemonClient(
     )
 
     /** offset < 0 asks for the tail, which is what a phone wants first. */
-    suspend fun messages(id: String, offset: Int, limit: Int): MessagesDto = call(
+    suspend fun messages(id: String, offset: Int, limit: Int, steps: Boolean = false): MessagesDto = call(
         request(
             url(
                 "api/sessions/$id/messages",
                 buildMap {
                     if (offset >= 0) put("offset", offset.toString())
                     put("limit", limit.toString())
+                    // Process view: attach tool_use/tool_result/thinking steps
+                    // to each message. Off = byte-identical to the old reply.
+                    if (steps) put("detail", "steps")
                 },
             ),
         ).get().build(),
         MessagesDto.serializer(),
+        timeoutSeconds = 60,
+    )
+
+    /** Full text behind a truncated process step — fetched only on expand. */
+    suspend fun stepText(sessionId: String, ref: String): StepTextDto = call(
+        request(url("api/sessions/$sessionId/steps/$ref")).get().build(),
+        StepTextDto.serializer(),
         timeoutSeconds = 60,
     )
 

@@ -432,6 +432,23 @@ function highlightInto(codeEl, code, langId) {
   appendTokens(codeEl, tokenize(text, rules));
 }
 
+/**
+ * Paint `code` into a host element with the fenced-block tokeniser.
+ * Used by process-view step bodies when the daemon sends a `lang` hint.
+ * Unknown / empty lang → plain textContent (no token spans).
+ */
+export function paintCode(host, code, lang) {
+  if (!host) return;
+  host.replaceChildren();
+  const text = String(code ?? "");
+  const id = resolveLang(lang).id;
+  if (!id || !text) {
+    host.textContent = text;
+    return;
+  }
+  highlightInto(host, text, id);
+}
+
 function highlightDiff(host, text) {
   const lines = text.split("\n");
   lines.forEach((line, i) => {

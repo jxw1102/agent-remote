@@ -257,7 +257,11 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
         }
     }
 
-    /** Dim a finished turn's tag once the human has opened it. */
+    /**
+     * Dim a finished turn's tag once the human has looked at it.
+     * Called when opening the session from the list, and when a turn ends
+     * while its transcript screen is already open.
+     */
     suspend fun markSeen(ref: SessionRef) {
         val profile = profile(ref.profileId) ?: return
         if (!profile.focus) return

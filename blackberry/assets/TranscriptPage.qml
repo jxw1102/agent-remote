@@ -322,13 +322,19 @@ Page {
 
             // Tapping the "Load older messages" row pages in more history
             // (a Button inside the item can't receive the tap on BB10).
+            // A process-view step row expands/collapses the same way.
             onTriggered: {
                 var row = indexPath && indexPath.length > 0 ? indexPath[0] : -1;
                 if (row < 0)
                     return;
                 var item = messagesModel.data([ row ]);
-                if (item && "" + item.kind == "older")
+                if (! item)
+                    return;
+                var k = "" + item.kind;
+                if (k == "older")
                     messagesList.loadOlderNow();
+                else if (k == "step" && item.api)
+                    item.api.toggleStep("" + item.stepRef);
             }
 
             // Typed rows (GrokRemote pattern): route each display item by
@@ -339,7 +345,8 @@ Page {
                 var k = "" + data.kind;
                 if (k == "older" || k == "gap" || k == "hr" || k == "user"
                         || k == "meta" || k == "h" || k == "li" || k == "code"
-                        || k == "paintimg" || k == "th" || k == "tr")
+                        || k == "paintimg" || k == "th" || k == "tr"
+                        || k == "step" || k == "stepbody")
                     return k;
                 return "p";
             }
@@ -372,6 +379,74 @@ Page {
                     Container {
                         background: Color.create("#121212")
                         preferredHeight: 10
+                    }
+                },
+                // Process view: one working step (▸ tool, ↳ result, ✻ thinking).
+                // Tap expands (handled by messagesList.onTriggered — a control
+                // inside the item never receives the tap on BB10).
+                ListItemComponent {
+                    type: "step"
+                    Container {
+                        horizontalAlignment: HorizontalAlignment.Fill
+                        preferredWidth: ListItem.view
+                                        ? ListItem.view.rowWidth : 720
+                        background: Color.create("#121212")
+                        leftPadding: 20
+                        rightPadding: 8
+                        topPadding: 2
+                        bottomPadding: 2
+                        Label {
+                            text: ListItemData.text
+                            textFormat: TextFormat.Plain
+                            textStyle.fontSize: FontSize.XSmall
+                            textStyle.color: ListItemData.stepErr
+                                             ? Color.create("#e0806c")
+                                             : Color.create("#8a92a4")
+                        }
+                    }
+                },
+                // The expanded body under a step: preview first, the full
+                // text swapped in once /steps/<ref> answers.
+                ListItemComponent {
+                    type: "stepbody"
+                    Container {
+                        horizontalAlignment: HorizontalAlignment.Fill
+                        preferredWidth: ListItem.view
+                                        ? ListItem.view.rowWidth : 720
+                        background: Color.create("#121212")
+                        leftPadding: 32
+                        rightPadding: 12
+                        contextActions: [
+                            ActionSet {
+                                title: qsTr("Step")
+                                ActionItem {
+                                    title: qsTr("Copy")
+                                    imageSource: "asset:///images/ic_copy.png"
+                                    onTriggered: {
+                                        var a = ListItemData.api;
+                                        if (a)
+                                            a.copyToClipboard("" + ListItemData.text);
+                                    }
+                                }
+                            }
+                        ]
+                        Container {
+                            horizontalAlignment: HorizontalAlignment.Fill
+                            background: Color.create("#1a1a1a")
+                            leftPadding: 10
+                            rightPadding: 10
+                            topPadding: 6
+                            bottomPadding: 6
+                            topMargin: 2
+                            bottomMargin: 4
+                            Label {
+                                text: ListItemData.text
+                                textFormat: TextFormat.Plain
+                                multiline: true
+                                textStyle.fontSize: FontSize.XSmall
+                                textStyle.color: Color.create("#9aa4b2")
+                            }
+                        }
                     }
                 },
                 ListItemComponent {
