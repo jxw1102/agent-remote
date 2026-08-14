@@ -314,4 +314,96 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(job.pendingQuestion?.questions.first?.question, "Ship it?")
         XCTAssertEqual(job.pendingQuestion?.questions.first?.options.count, 2)
     }
+
+    func testDecodeFocusList() throws {
+        let json = """
+        {"sessions": [
+          {"id": "f1", "title": "Fix the build", "cwd": "/repo", "provider": "claude",
+           "last_active": 1755150000.5, "focus": true, "focus_state": "needs_answer",
+           "focus_unread": true, "title_manual": true}
+        ], "counts": {"needs_answer": 1}, "total": 1}
+        """
+        let focus = try decoder().decode(FocusResponse.self, from: Data(json.utf8))
+        XCTAssertEqual(focus.total, 1)
+        XCTAssertEqual(focus.counts["needs_answer"], 1)
+        let row = try XCTUnwrap(focus.sessions.first)
+        XCTAssertTrue(row.focus)
+        XCTAssertEqual(row.focusState, "needs_answer")
+        XCTAssertTrue(row.focusUnread)
+        XCTAssertTrue(row.titleManual)
+    }
+
+    func testDecodeTitleResponse() throws {
+        let json = """
+        {"ok": true, "id": "s1", "title": "Renamed by hand", "manual": true}
+        """
+        let title = try decoder().decode(TitleResponse.self, from: Data(json.utf8))
+        XCTAssertTrue(title.ok)
+        XCTAssertEqual(title.title, "Renamed by hand")
+        XCTAssertTrue(title.manual)
+    }
+
+    func testDecodeDropListWithFolder() throws {
+        let json = """
+        {"path": "/Users/x/Public", "files": [
+          {"name": "report.pdf", "size": 1024, "mtime": 1755150000, "type": "file"},
+          {"name": "screenshots", "size": 5242880, "mtime": 1755150001,
+           "type": "dir", "entries": 12, "partial": false},
+          {"name": "legacy.bin", "size": 7, "mtime": 1755150002}
+        ]}
+        """
+        let list = try decoder().decode(DropListResponse.self, from: Data(json.utf8))
+        XCTAssertEqual(list.files.count, 3)
+        XCTAssertFalse(list.files[0].isDirectory)
+        XCTAssertTrue(list.files[1].isDirectory)
+        XCTAssertEqual(list.files[1].entries, 12)
+        // No `type` on an older daemon → a plain file.
+        XCTAssertFalse(list.files[2].isDirectory)
+    }
+
+    func testDecodeMultiUsageSections() throws {
+        let json = """
+        {"ok": true, "multi": true, "sections": [
+          {"provider": "claude", "ok": true, "account": "me@example.com", "account_id": "acc1",
+           "buckets": [{"title": "Session", "percent": 42, "resets_text": "resets 6pm",
+                        "severity": "normal"}]},
+          {"provider": "grok", "ok": false, "error": "not supported", "buckets": []}
+        ]}
+        """
+        let usage = try decoder().decode(UsageResponse.self, from: Data(json.utf8))
+        XCTAssertTrue(usage.multi)
+        XCTAssertEqual(usage.sections.count, 2)
+        XCTAssertEqual(usage.sections[0].accountId, "acc1")
+        XCTAssertEqual(usage.sections[0].buckets.first?.percent, 42)
+        XCTAssertEqual(usage.sections[1].error, "not supported")
+    }
+
+    func testStatusFrameToleratesUnknownStatusAndMissingFields() throws {
+        // A daemon newer than this client must degrade, not kill the stream: unknown status
+        // coerces to .running, and a missing next_seq means "no doorbell" (-1).
+        let json = """
+        {"type": "status", "active": [
+          {"job_id": "j9", "session_id": "s9", "new_session_id": "", "status": "paused",
+           "prompt": "hi", "elapsed_s": 3, "queued_count": 0,
+           "pending_permission": false, "pending_question": true,
+           "phase": "asking", "phase_detail": "question"}
+        ]}
+        """
+        let push = try decoder().decode(StatusPush.self, from: Data(json.utf8))
+        let job = try XCTUnwrap(push.active.first)
+        XCTAssertEqual(job.status, .running)
+        XCTAssertEqual(job.nextSeq, -1)
+        XCTAssertTrue(job.pendingQuestion)
+        XCTAssertEqual(job.phase, "asking")
+    }
+
+    func testDecodeShellResult() throws {
+        let json = """
+        {"ok": true, "output": "hello\\n", "exit_code": 0, "cwd": "/repo"}
+        """
+        let result = try decoder().decode(ShellResult.self, from: Data(json.utf8))
+        XCTAssertTrue(result.ok)
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.output, "hello\n")
+    }
 }

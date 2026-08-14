@@ -1275,6 +1275,8 @@ def _build_transcript(path: Path | None, want_steps: bool = False):
         return ([], []) if want_steps else []
     messages = []
     step_rows = []
+    # call_id → (name, path) so function_call_output can inherit a lang.
+    tool_meta = {}
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for ln, line in enumerate(f):
@@ -1282,7 +1284,7 @@ def _build_transcript(path: Path | None, want_steps: bool = False):
                 if not isinstance(ev, dict):
                     continue
                 if want_steps:
-                    st = _codex_step(ev, ln)
+                    st = _codex_step(ev, ln, tool_meta)
                     if st is not None:
                         step_rows.append((ln, st))
                 hit = _event_chat_message(ev)
@@ -1305,7 +1307,7 @@ def _build_transcript(path: Path | None, want_steps: bool = False):
     return (messages, step_rows) if want_steps else messages
 
 
-def _codex_step(ev: dict, ln: int):
+def _codex_step(ev: dict, ln: int, tool_meta: dict = None):
     """One process step from a rollout line, or None.
 
     Codex records the work as `response_item`s: function_call /
@@ -1329,8 +1331,13 @@ def _codex_step(ev: dict, ln: int):
             args = p.get("input")
         name = p.get("name") or "tool"
         body = steps_mod.format_tool_use(name, args)
+        lang = steps_mod.lang_for_tool_use(name, args)
+        path = steps_mod.path_from_input(args)
+        cid = p.get("call_id") or p.get("id")
+        if tool_meta is not None and cid:
+            tool_meta[str(cid)] = (name, path)
         return steps_mod.tool_use("cu%d" % ln, ts, name,
-                                  _codex_call_detail(args), body)
+                                  _codex_call_detail(args), body, lang=lang)
     if ptype in ("function_call_output", "custom_tool_call_output"):
         out = p.get("output")
         if not isinstance(out, str):
@@ -1339,11 +1346,17 @@ def _codex_step(ev: dict, ln: int):
             except (TypeError, ValueError):
                 out = str(out)
         body = steps_mod.format_tool_result(out or "")
+        name, path = "", ""
+        cid = p.get("call_id") or p.get("id")
+        if tool_meta is not None and cid and str(cid) in tool_meta:
+            name, path = tool_meta[str(cid)]
+        lang = steps_mod.lang_for_tool_result(name, path, body)
         # Codex reports shell failures as "Process exited with code N". Only
         # that is treated as failure — sniffing for the word "error" flagged
         # every grep for the string "error" as a failed call.
         ok = not re.search(r"exited with code [1-9]", body or "")
-        return steps_mod.tool_result("cr%d" % ln, ts, ok, body or "")
+        return steps_mod.tool_result("cr%d" % ln, ts, ok, body or "",
+                                     lang=lang)
     if ptype == "reasoning":
         return steps_mod.thinking("ct%d" % ln, ts, _codex_reasoning(p))
     return None

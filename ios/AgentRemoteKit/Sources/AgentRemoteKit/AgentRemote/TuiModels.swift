@@ -18,6 +18,25 @@ public struct TuiFrame: Codable, Sendable, Equatable {
     public let error: String
     public let ansi: Bool
     public let ts: Double
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try c.decodeIfPresent(String.self, forKey: .sessionId) ?? ""
+        jobId = try c.decodeIfPresent(String.self, forKey: .jobId) ?? ""
+        attached = try c.decodeIfPresent(Bool.self, forKey: .attached) ?? false
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        seq = try c.decodeIfPresent(Int.self, forKey: .seq) ?? 0
+        cols = try c.decodeIfPresent(Int.self, forKey: .cols) ?? 0
+        rows = try c.decodeIfPresent(Int.self, forKey: .rows) ?? 0
+        cursor = try c.decodeIfPresent(JSONValue.self, forKey: .cursor)
+        error = try c.decodeIfPresent(String.self, forKey: .error) ?? ""
+        ansi = try c.decodeIfPresent(Bool.self, forKey: .ansi) ?? false
+        ts = try c.decodeIfPresent(Double.self, forKey: .ts) ?? 0
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionId, jobId, attached, text, seq, cols, rows, cursor, error, ansi, ts
+    }
 }
 
 /// `POST /api/sessions/<id>/tui/keys`. `keys`: named tokens (case-insensitive) —

@@ -57,7 +57,8 @@ Endpoints (all under /api, all JSON):
                                                        (a folder arrives zipped
                                                        as <name>.zip)
   POST /api/drop/<name>/delete                         remove one drop file
-                                                       (folders are refused)
+                                                       or folder (recursive;
+                                                       still confined to drop)
   POST /internal/permission {job_id, nonce, ...}       (helper MCP tool only)
   POST /internal/hook?secret= {hook payload}           (interactive TUI hooks)
 """
@@ -70,6 +71,7 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import ssl
 import subprocess
 import tempfile
@@ -111,6 +113,12 @@ _FOCUS_SEEN = re.compile(r"^/api/focus/([^/]+)/seen$")
 
 
 MAX_BODY = 256 * 1024
+
+
+# Names that live in a default macOS ~/Public but are not agent staging.
+# "Drop Box" is the classic incoming-share folder (sticky permissions); showing
+# it in Inbox only confuses, and recursive delete would be the wrong tool.
+_DROP_LIST_SKIP = frozenset({"Drop Box"})
 
 
 def _safe_drop_name(raw: str) -> str:
@@ -2939,7 +2947,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         return candidate, None
 
     def _resolve_drop_file(self, raw_name):
-        """Files only — used by delete, which must never recurse."""
+        """Files only — kept for callers that must not touch directories."""
         return self._resolve_drop_entry(raw_name, dirs_ok=False)
 
     @staticmethod
@@ -3022,6 +3030,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             for entry in sorted(drop_dir.iterdir(), key=lambda p: p.name.lower()):
                 if entry.name.startswith("."):
+                    continue
+                # macOS ~/Public/Drop Box and similar — not agent staging.
+                if entry.name in _DROP_LIST_SKIP:
                     continue
                 is_dir = entry.is_dir()
                 if not is_dir and not entry.is_file():
@@ -3127,23 +3138,45 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _handle_drop_delete(self, raw_name):
-        # Files only. Recursive delete over HTTP is a far bigger gun than
-        # "tidy up a staged file", so a folder is refused rather than emptied.
-        path, err = self._resolve_drop_file(raw_name)
+        """Remove one staged file or folder from the drop dir.
+
+        Folders are deleted recursively, but only after the same resolve +
+        containment checks as download (symlink out of drop → refused). The
+        drop root itself and macOS "Drop Box" are never removed.
+        """
+        name = _safe_drop_name(raw_name)
+        if name in _DROP_LIST_SKIP:
+            self._error(400, "cannot delete protected folder %r" % name)
+            return
+        path, err = self._resolve_drop_entry(raw_name, dirs_ok=True)
         if path is None:
-            if err == "that is a folder":
-                self._error(400, "cannot delete a folder from a client — "
-                                 "remove it on the host")
-                return
             status = 404 if err == "file not found" else 400
             self._error(status, err)
             return
         try:
-            path.unlink()
+            drop_root = self._scoped_drop_path().resolve()
+        except OSError as e:
+            self._error(500, "drop dir unavailable: %s" % e)
+            return
+        # Never rmtree the drop directory itself (empty name, ".", etc.).
+        try:
+            if path.resolve() == drop_root:
+                self._error(400, "cannot delete the drop folder itself")
+                return
         except OSError as e:
             self._error(500, "delete failed: %s" % e)
             return
-        self._send_json({"ok": True, "name": path.name})
+        was_dir = path.is_dir()
+        try:
+            if was_dir:
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError as e:
+            self._error(500, "delete failed: %s" % e)
+            return
+        self._send_json({"ok": True, "name": path.name,
+                         "type": "dir" if was_dir else "file"})
 
     def _handle_internal_permission(self, body):
         if not isinstance(body, dict):

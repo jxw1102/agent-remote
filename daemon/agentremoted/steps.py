@@ -43,17 +43,23 @@ def clip(text: str, cap: int = PREVIEW_B):
     return text[:cap], len(text), True
 
 
-def tool_use(ref, ts, name, detail, full):
+def tool_use(ref, ts, name, detail, full, lang: str = ""):
     preview, n, cut = clip(full or "")
-    return {"kind": "tool_use", "ref": ref, "ts": ts or "",
-            "name": name or "tool", "detail": detail or "",
-            "preview": preview, "bytes": n, "truncated": cut}
+    out = {"kind": "tool_use", "ref": ref, "ts": ts or "",
+           "name": name or "tool", "detail": detail or "",
+           "preview": preview, "bytes": n, "truncated": cut}
+    if lang:
+        out["lang"] = lang
+    return out
 
 
-def tool_result(ref, ts, ok, full):
+def tool_result(ref, ts, ok, full, lang: str = ""):
     preview, n, cut = clip(full or "")
-    return {"kind": "tool_result", "ref": ref, "ts": ts or "",
-            "ok": bool(ok), "preview": preview, "bytes": n, "truncated": cut}
+    out = {"kind": "tool_result", "ref": ref, "ts": ts or "",
+           "ok": bool(ok), "preview": preview, "bytes": n, "truncated": cut}
+    if lang:
+        out["lang"] = lang
+    return out
 
 
 def thinking(ref, ts, text):
@@ -92,6 +98,113 @@ def attach(window, step_rows):
         end = window[i + 1].get("_pos") if i + 1 < len(window) else None
         msg["steps"] = [st for pos, st in step_rows
                         if pos >= start and (end is None or pos < end)]
+
+
+# ---------------------------------------------------------------------------
+# Language hints for client syntax highlighters
+# ---------------------------------------------------------------------------
+
+# Extension → id that web/md.js LANG_ALIASES understands (and Pygments-ish
+# names for the BB renderer). Keep this short; unknown ids degrade to plain.
+_EXT_LANG = {
+    "py": "python", "pyw": "python", "pyi": "python",
+    "js": "javascript", "mjs": "javascript", "cjs": "javascript", "jsx": "javascript",
+    "ts": "typescript", "tsx": "typescript",
+    "sh": "bash", "bash": "bash", "zsh": "bash", "fish": "bash",
+    "yml": "yaml", "yaml": "yaml",
+    "md": "markdown", "markdown": "markdown", "mdx": "markdown",
+    "rs": "rust", "go": "go",
+    "c": "c", "h": "c",
+    "cpp": "cpp", "cc": "cpp", "cxx": "cpp", "hpp": "cpp", "hh": "cpp",
+    "cs": "csharp", "java": "java", "kt": "kotlin", "kts": "kotlin",
+    "rb": "ruby", "sql": "sql",
+    "html": "html", "htm": "html", "xml": "html", "svg": "html",
+    "css": "css", "scss": "css", "less": "css",
+    "json": "json", "jsonc": "json", "json5": "json",
+    "toml": "toml", "ini": "ini", "cfg": "ini", "conf": "ini", "env": "ini",
+    "diff": "diff", "patch": "diff",
+    "qml": "qml", "pro": "qmake",
+    "dockerfile": "dockerfile",
+    "mk": "makefile", "make": "makefile",
+    "rsx": "rust", "swift": "swift",
+    "php": "php", "r": "r", "lua": "lua",
+    "ps1": "powershell", "psm1": "powershell",
+}
+
+
+def path_from_input(raw) -> str:
+    """Best-effort file path from a tool_use / tool_call input."""
+    obj = _as_obj(raw)
+    if not isinstance(obj, dict):
+        return ""
+    return (_first_str(obj, "file_path", "target_file", "path",
+                       "absolute_path", "target_directory") or "")
+
+
+def lang_from_path(path: str) -> str:
+    """Map a filesystem path to a highlighter language id, or ''."""
+    if not path:
+        return ""
+    base = path.replace("\\", "/").rsplit("/", 1)[-1]
+    if not base:
+        return ""
+    low = base.lower()
+    if low == "dockerfile" or low.startswith("dockerfile."):
+        return "dockerfile"
+    if low in ("makefile", "gnumakefile", "cmakelists.txt"):
+        return "makefile"
+    if "." not in base:
+        return ""
+    ext = base.rsplit(".", 1)[-1].lower()
+    return _EXT_LANG.get(ext, "")
+
+
+def lang_for_tool_use(name, raw) -> str:
+    """Language for a tool_use body (diff / source / shell)."""
+    obj = _as_obj(raw)
+    n = (name or "").lower()
+    # Edit bodies are unified diffs after format_tool_use.
+    if isinstance(obj, dict) and _has_any(obj, "old_string", "oldString",
+                                          "new_string", "newString"):
+        return "diff"
+    if isinstance(obj, dict) and isinstance(obj.get("edits"), list):
+        return "diff"
+    if n in ("bash", "shell", "run_terminal_command", "exec", "exec_command",
+             "run") or (isinstance(obj, dict)
+                        and _first_str(obj, "command", "cmd") is not None
+                        and not path_from_input(raw)):
+        return "bash"
+    return lang_from_path(path_from_input(raw))
+
+
+def lang_for_tool_result(name: str, path: str, text: str) -> str:
+    """Language for a tool_result body — only when it looks like source."""
+    body = (text or "").strip()
+    if not body:
+        return ""
+    # One-line success notices from Edit/Write are not source.
+    if "\n" not in body and len(body) < 240:
+        low = body.lower()
+        if any(w in low for w in ("updated", "created", "written",
+                                  "has been", "successfully", "no output")):
+            return ""
+    n = (name or "").lower()
+    # Shell stdout is usually not a single language — leave plain.
+    if any(s in n for s in ("bash", "shell", "terminal", "exec", "run_terminal")):
+        # Exception: pure JSON pretty-print dumps.
+        if body.startswith("{") or body.startswith("["):
+            return "json"
+        return ""
+    lang = lang_from_path(path)
+    if lang:
+        return lang
+    # Unwrapped ListDir / plain greps: no lang.
+    if any(s in n for s in ("grep", "glob", "list_dir", "listdir", "search")):
+        return ""
+    # Structured leftover JSON.
+    if body.startswith("{") or body.startswith("["):
+        return "json"
+    return ""
 
 
 # ---------------------------------------------------------------------------

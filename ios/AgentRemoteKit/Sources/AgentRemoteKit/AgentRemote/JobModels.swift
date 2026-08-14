@@ -2,12 +2,32 @@ import Foundation
 
 public enum JobStatus: String, Codable, Sendable, Equatable {
     case starting, running, done, error, stopped
+
+    /// A status string this client doesn't know must not fail the whole snapshot/status-frame
+    /// decode — treat it as still-running (the daemon's own status stream does the same coercion).
+    public init(from decoder: Decoder) throws {
+        let raw = (try? decoder.singleValueContainer().decode(String.self)) ?? ""
+        self = JobStatus(rawValue: raw) ?? .running
+    }
 }
 
 /// One entry in `queued` — a prompt chained behind a still-running job via `POST /api/jobs/<id>/queue`.
 public struct QueuedPrompt: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let prompt: String
+
+    public init(id: String, prompt: String) {
+        self.id = id
+        self.prompt = prompt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        prompt = try c.decodeIfPresent(String.self, forKey: .prompt) ?? ""
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, prompt }
 }
 
 /// Mirrors the job's `pending_permission` field: set for as long as a `canUseTool`-style approval
@@ -18,6 +38,15 @@ public struct PendingPermission: Codable, Sendable, Equatable {
     /// One pre-formatted display string (already clipped/whitespace-collapsed server-side) —
     /// there is no structured tool input in this protocol, unlike the old daemon's `toolInput`.
     public let detail: String
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        requestId = try c.decodeIfPresent(String.self, forKey: .requestId) ?? ""
+        toolName = try c.decodeIfPresent(String.self, forKey: .toolName) ?? ""
+        detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
+    }
+
+    private enum CodingKeys: String, CodingKey { case requestId, toolName, detail }
 }
 
 public struct QuestionOption: Codable, Sendable, Equatable {
@@ -103,6 +132,33 @@ public struct JobSnapshot: Codable, Sendable, Equatable, Identifiable {
     public let events: [JobEvent]
 
     public var resolvedSessionId: String { newSessionId.isEmpty ? sessionId : newSessionId }
+
+    public var finished: Bool { status == .done || status == .error || status == .stopped }
+
+    /// Defensive throughout: a missing field on an older/newer daemon must degrade to a default,
+    /// not fail the poll loop with a decode error the user can't act on.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        sessionId = try c.decodeIfPresent(String.self, forKey: .sessionId) ?? ""
+        newSessionId = try c.decodeIfPresent(String.self, forKey: .newSessionId) ?? ""
+        status = try c.decodeIfPresent(JobStatus.self, forKey: .status) ?? .running
+        error = try c.decodeIfPresent(String.self, forKey: .error) ?? ""
+        resultText = try c.decodeIfPresent(String.self, forKey: .resultText) ?? ""
+        pendingPermission = try c.decodeIfPresent(PendingPermission.self, forKey: .pendingPermission)
+        pendingQuestion = try c.decodeIfPresent(PendingQuestion.self, forKey: .pendingQuestion)
+        queued = try c.decodeIfPresent([QueuedPrompt].self, forKey: .queued) ?? []
+        nextJobId = try c.decodeIfPresent(String.self, forKey: .nextJobId) ?? ""
+        droppedQueued = try c.decodeIfPresent(Int.self, forKey: .droppedQueued) ?? 0
+        nextSeq = try c.decodeIfPresent(Int.self, forKey: .nextSeq) ?? 0
+        events = try c.decodeIfPresent([JobEvent].self, forKey: .events) ?? []
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, sessionId, newSessionId, status, error, resultText
+        case pendingPermission, pendingQuestion, queued, nextJobId, droppedQueued
+        case nextSeq, events
+    }
 }
 
 /// One event in a job's `events` array. Every case carries `seq`. `blocks` fields present in the
@@ -146,42 +202,42 @@ extension JobEvent: Codable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let seq = try c.decode(Int.self, forKey: .seq)
-        let kind = try c.decode(String.self, forKey: .kind)
+        let seq = try c.decodeIfPresent(Int.self, forKey: .seq) ?? 0
+        let kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? ""
         switch kind {
         case "init":
             self = .initEvent(
                 seq: seq,
-                sessionId: try c.decode(String.self, forKey: .sessionId),
-                model: try c.decode(String.self, forKey: .model)
+                sessionId: try c.decodeIfPresent(String.self, forKey: .sessionId) ?? "",
+                model: try c.decodeIfPresent(String.self, forKey: .model) ?? ""
             )
         case "text":
-            self = .text(seq: seq, text: try c.decode(String.self, forKey: .text))
+            self = .text(seq: seq, text: try c.decodeIfPresent(String.self, forKey: .text) ?? "")
         case "tool":
             self = .tool(
                 seq: seq,
-                name: try c.decode(String.self, forKey: .name),
-                detail: try c.decode(String.self, forKey: .detail)
+                name: try c.decodeIfPresent(String.self, forKey: .name) ?? "",
+                detail: try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
             )
         case "result":
             self = .result(
                 seq: seq,
-                isError: try c.decode(Bool.self, forKey: .isError),
-                durationMs: try c.decode(Int.self, forKey: .durationMs),
-                costUsd: try c.decode(Double.self, forKey: .costUsd)
+                isError: try c.decodeIfPresent(Bool.self, forKey: .isError) ?? false,
+                durationMs: try c.decodeIfPresent(Int.self, forKey: .durationMs) ?? 0,
+                costUsd: try c.decodeIfPresent(Double.self, forKey: .costUsd) ?? 0
             )
         case "permission":
             self = .permission(
                 seq: seq,
-                requestId: try c.decode(String.self, forKey: .requestId),
-                toolName: try c.decode(String.self, forKey: .toolName),
-                detail: try c.decode(String.self, forKey: .detail)
+                requestId: try c.decodeIfPresent(String.self, forKey: .requestId) ?? "",
+                toolName: try c.decodeIfPresent(String.self, forKey: .toolName) ?? "",
+                detail: try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
             )
         case "permission_resolved":
             self = .permissionResolved(
                 seq: seq,
-                requestId: try c.decode(String.self, forKey: .requestId),
-                allow: try c.decode(Bool.self, forKey: .allow),
+                requestId: try c.decodeIfPresent(String.self, forKey: .requestId) ?? "",
+                allow: try c.decodeIfPresent(Bool.self, forKey: .allow) ?? false,
                 reason: try c.decodeIfPresent(String.self, forKey: .reason)
             )
         case "question":
@@ -191,8 +247,8 @@ extension JobEvent: Codable {
         case "question_resolved":
             self = .questionResolved(
                 seq: seq,
-                requestId: try c.decode(String.self, forKey: .requestId),
-                cancelled: try c.decode(Bool.self, forKey: .cancelled),
+                requestId: try c.decodeIfPresent(String.self, forKey: .requestId) ?? "",
+                cancelled: try c.decodeIfPresent(Bool.self, forKey: .cancelled) ?? false,
                 answers: try c.decodeIfPresent(JSONValue.self, forKey: .answers)
             )
         default:

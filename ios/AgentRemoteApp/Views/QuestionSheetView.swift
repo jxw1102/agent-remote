@@ -1,9 +1,11 @@
 import AgentRemoteKit
 import SwiftUI
 
-/// AskUserQuestion panel (Android QuestionSheet parity).
+/// AskUserQuestion panel (Android QuestionSheet parity). Cancel presses Esc on the host panel;
+/// swiping the sheet away merely parks the gate (the chat shows an Answer banner).
 struct QuestionSheetView: View {
     let prompt: PendingQuestionUI
+    var accent: ProviderAccent = .neutral
     var onRespond: (_ answers: [[String]], _ notes: [String]?, _ cancel: Bool) -> Void
 
     @State private var selections: [[String]] = []
@@ -13,22 +15,25 @@ struct QuestionSheetView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    Text("The turn is paused until you answer or cancel.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     ForEach(Array(prompt.questions.enumerated()), id: \.offset) { index, item in
                         questionBlock(index: index, item: item)
                     }
                 }
                 .padding()
             }
-            .navigationTitle(prompt.questions.first?.header.isEmpty == false
-                             ? prompt.questions[0].header
-                             : "Question")
+            .navigationTitle(prompt.questions.count > 1
+                             ? "The agent is asking \(prompt.questions.count) things"
+                             : "The agent is asking")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Dismiss") { onRespond([], nil, true) }
+                    Button("Cancel", role: .destructive) { onRespond([], nil, true) }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Submit") {
+                    Button("Send answer") {
                         onRespond(selections, notes.contains(where: { !$0.isEmpty }) ? notes : nil, false)
                     }
                     .disabled(!canSubmit)
@@ -51,11 +56,22 @@ struct QuestionSheetView: View {
     @ViewBuilder
     private func questionBlock(index: Int, item: QuestionItem) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            if !item.header.isEmpty && index > 0 {
-                Text(item.header).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if !item.header.isEmpty {
+                Text(item.header)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(accent.tint)
             }
-            Text(item.question.isEmpty ? "Choose an option" : item.question)
-                .font(.body.weight(.medium))
+            // Markdown, not plain text — grok routes whole plan documents through this channel.
+            if item.question.isEmpty {
+                Text("Choose an option").font(.body.weight(.medium))
+            } else {
+                MarkdownView(text: item.question)
+            }
+            if item.multiSelect && !item.options.isEmpty {
+                Text("Pick as many as apply")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
 
             ForEach(item.options, id: \.label) { option in
                 let selected = selections.indices.contains(index) && selections[index].contains(option.label)
@@ -82,7 +98,12 @@ struct QuestionSheetView: View {
                 .buttonStyle(.plain)
             }
 
-            if !item.noteFor.isEmpty || item.options.isEmpty {
+            // Free text appears when the picked option asks for it (note_for), or when the
+            // question has no options at all — same rule as Android.
+            let noteSelected = !item.noteFor.isEmpty
+                && selections.indices.contains(index)
+                && selections[index].contains(item.noteFor)
+            if noteSelected || item.options.isEmpty {
                 TextField(item.noteHint.isEmpty ? "Optional note" : item.noteHint, text: noteBinding(at: index), axis: .vertical)
                     .lineLimit(1...4)
                     .textFieldStyle(.roundedBorder)

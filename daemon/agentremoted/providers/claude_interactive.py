@@ -424,6 +424,16 @@ class InteractiveManager:
             if job is not None:
                 acct = str(getattr(job, "account", "") or "")
                 iso = str(getattr(job, "isolate_root", "") or "")
+            pending_q = False
+            pending_p = False
+            if job is not None:
+                with job.lock:
+                    pending_q = bool(job.pending_question)
+                    pending_p = bool(job.pending_permission)
+            # hook_ask is an AskUserQuestion the PreToolUse hook just saw —
+            # treat it as blocked even before request_question publishes.
+            if t.hook_ask:
+                pending_q = True
             out.append({
                 "job_id": "tui-%s" % (sid.replace("-", "")[:12]),
                 "session_id": sid,
@@ -435,12 +445,12 @@ class InteractiveManager:
                 "isolate_root": iso,
                 "elapsed_s": max(0, int(now - float(t.last_used or now))),
                 "queued_count": 0,
-                "tool": "",
+                "tool": "AskUserQuestion" if pending_q else "",
                 "tool_detail": "",
-                "phase": "working",
+                "phase": "asking" if pending_q else ("permission" if pending_p else "working"),
                 "phase_detail": "host interactive TUI",
-                "pending_permission": False,
-                "pending_question": False,
+                "pending_permission": pending_p,
+                "pending_question": pending_q,
                 "next_seq": 0,
             })
         return out
@@ -1155,6 +1165,26 @@ class InteractiveManager:
                         deadline = time.time() + timeout_s
                     job.set_phase("thinking", "")
                     continue
+                # AskUserQuestion (or a permission) still open: Stop can fire
+                # while the panel is on screen (multi-tool / side-channel). If
+                # we mark the job done now, clients drop the Answer UI and the
+                # waiter is stranded with pending_question. Hold the turn until
+                # the phone (or host pane) resolves the gate.
+                ask_alive = bool(
+                    state.get("ask")
+                    or (state.get("ask_thread")
+                        and state["ask_thread"].is_alive())
+                    or job.pending_question
+                    or job.pending_permission
+                )
+                if ask_alive:
+                    tui.stop_event.clear()
+                    if timeout_s > 0:
+                        deadline = time.time() + timeout_s
+                    life_t = time.time()
+                    if job.pending_question:
+                        job.set_phase("asking", job.phase_detail or "question")
+                    continue
                 tui.typed_ahead = 0
                 break
             offset, transcript = self._drain(job, tui, transcript, offset, state)
@@ -1330,6 +1360,20 @@ class InteractiveManager:
                     or not tui.stop_event.is_set() or time.time() > grace):
                 break
             time.sleep(0.2)
+        # Never seal the job while a phone panel is still waiting — cancel so
+        # clients stop showing Answer on a dead gate. Prefer join first so a
+        # late phone POST can still land.
+        ask_thread = state.get("ask_thread")
+        if ask_thread is not None and ask_thread.is_alive():
+            ask_thread.join(timeout=2.0)
+        if job.pending_question:
+            log.warning("TUI %s: turn ending with pending AskUserQuestion — cancelling gate",
+                        tui.name)
+            job.cancel_question()
+        if job.pending_permission:
+            log.warning("TUI %s: turn ending with pending permission — cancelling gate",
+                        tui.name)
+            job.cancel_permission()
         if stalled and not state["last_text"]:
             self._fail(job, "turn ended with no reply (Stop hook lost) — "
                        "screen: %s" % self._pane_tail(tui.name))
@@ -1394,7 +1438,10 @@ class InteractiveManager:
         Plus the TUI-only shapes: bash-mode (!) lines arrive as user messages
         with <bash-*> markers, /command echo and output as system lines with
         subtype local_command."""
-        from .claude import tool_detail, _PHASE_BY_TOOL, _TASK_TOOLS, emit_claude_todos
+        from .claude import (
+            tool_detail, tool_status_parts, _PHASE_BY_TOOL, _TASK_TOOLS,
+            emit_claude_todos,
+        )
         from ..render_blocks import markdown_to_blocks
         if obj.get("isSidechain"):
             return
@@ -1435,9 +1482,13 @@ class InteractiveManager:
                         job, str(sid or ""),
                         tool_input=tool_input if isinstance(tool_input, dict) else None)
                     continue
-                detail = tool_detail(tool_input if isinstance(tool_input, dict) else {})
-                job.add_event("tool", name=name, detail=detail)
-                job.set_phase(_PHASE_BY_TOOL.get(name, "tool"), detail or name)
+                desc, cmd = tool_status_parts(
+                    tool_input if isinstance(tool_input, dict) else {})
+                # phase_detail = description (banner line 1);
+                # tool event detail = command (banner line 2).
+                job.add_event("tool", name=name, detail=cmd or desc)
+                job.set_phase(_PHASE_BY_TOOL.get(name, "tool"),
+                              desc or cmd or name)
             elif block.get("type") == "thinking":
                 job.set_phase("thinking", "")
 

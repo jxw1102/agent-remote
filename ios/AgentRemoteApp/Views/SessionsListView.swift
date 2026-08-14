@@ -14,6 +14,9 @@ struct SessionsListView: View {
 
     @State private var searching = false
     @State private var searchText = ""
+    @State private var renameTarget: SessionRow?
+    @State private var renameText = ""
+    @State private var regeneratingKey: String?
 
     private var rows: [SessionRow] { appModel.filteredRows }
 
@@ -34,19 +37,33 @@ struct SessionsListView: View {
                 }
             }
 
-            if profileStore.profiles.count > 1 {
+            if profileStore.profiles.count > 1 || appModel.focusAvailable {
                 Section {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
+                            if appModel.focusAvailable {
+                                FilterChip(
+                                    title: appModel.focusMode ? "Focus · \(rows.count)" : "Focus",
+                                    selected: appModel.focusMode
+                                ) { appModel.setFocusMode(!appModel.focusMode) }
+                            }
                             FilterChip(
                                 title: "All",
-                                selected: appModel.profileFilter == nil
-                            ) { appModel.profileFilter = nil }
-                            ForEach(profileStore.profiles) { profile in
-                                FilterChip(
-                                    title: profile.name,
-                                    selected: appModel.profileFilter == profile.id
-                                ) { appModel.profileFilter = profile.id }
+                                selected: appModel.profileFilter == nil && !appModel.focusMode
+                            ) {
+                                appModel.profileFilter = nil
+                                appModel.setFocusMode(false)
+                            }
+                            if profileStore.profiles.count > 1 {
+                                ForEach(profileStore.profiles) { profile in
+                                    FilterChip(
+                                        title: profile.name,
+                                        selected: appModel.profileFilter == profile.id
+                                    ) {
+                                        appModel.profileFilter =
+                                            appModel.profileFilter == profile.id ? nil : profile.id
+                                    }
+                                }
                             }
                         }
                         .padding(.vertical, 2)
@@ -84,10 +101,14 @@ struct SessionsListView: View {
                             SessionRowView(
                                 row: row,
                                 isWorking: appModel.isWorking(ref: row.ref),
-                                isSelected: appModel.selectedChatKey == row.ref.key
+                                isBlocked: appModel.isBlocked(ref: row.ref),
+                                showFocusState: appModel.focusMode,
+                                isSelected: appModel.selectedChatKey == row.ref.key,
+                                isRegenerating: regeneratingKey == row.ref.key
                             )
                         }
                         .buttonStyle(.plain)
+                        .contextMenu { rowMenu(for: row) }
                     }
                 }
             }
@@ -107,6 +128,22 @@ struct SessionsListView: View {
         .searchable(text: $searchText, isPresented: $searching, prompt: "Search sessions")
         .onChange(of: searchText) { _, value in
             appModel.setQuery(value)
+        }
+        .alert("Rename session", isPresented: Binding(
+            get: { renameTarget != nil },
+            set: { if !$0 { renameTarget = nil } }
+        )) {
+            TextField("Title", text: $renameText)
+            Button("Save") {
+                if let row = renameTarget {
+                    let title = String(renameText.prefix(120))
+                    Task { try? await appModel.renameSession(row, title: title) }
+                }
+                renameTarget = nil
+            }
+            Button("Cancel", role: .cancel) { renameTarget = nil }
+        } message: {
+            Text("Leave empty to go back to the derived title.")
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -141,6 +178,46 @@ struct SessionsListView: View {
     }
 }
 
+extension SessionsListView {
+    @ViewBuilder
+    fileprivate func rowMenu(for row: SessionRow) -> some View {
+        Button {
+            renameText = row.session.titleManual ? row.session.displayTitle : ""
+            renameTarget = row
+        } label: {
+            Label("Rename…", systemImage: "pencil")
+        }
+        Button {
+            regeneratingKey = row.ref.key
+            Task {
+                defer { regeneratingKey = nil }
+                if let suggestion = try? await appModel.regenerateTitle(row) {
+                    renameText = suggestion
+                    renameTarget = row
+                }
+            }
+        } label: {
+            Label("Suggest a title", systemImage: "sparkles")
+        }
+        if appModel.focusSupported(row) {
+            Divider()
+            if row.session.focus {
+                Button {
+                    Task { try? await appModel.setFocusMember(row, member: false) }
+                } label: {
+                    Label("Done — take it off Focus", systemImage: "checkmark.circle")
+                }
+            } else {
+                Button {
+                    Task { try? await appModel.setFocusMember(row, member: true) }
+                } label: {
+                    Label("Track in Focus", systemImage: "scope")
+                }
+            }
+        }
+    }
+}
+
 private struct FilterChip: View {
     let title: String
     let selected: Bool
@@ -163,7 +240,10 @@ private struct FilterChip: View {
 private struct SessionRowView: View {
     let row: SessionRow
     let isWorking: Bool
+    var isBlocked: Bool = false
+    var showFocusState: Bool = false
     let isSelected: Bool
+    var isRegenerating: Bool = false
 
     private var accent: ProviderAccent { ProviderAccent.forProvider(row.resolvedProvider) }
 
@@ -182,9 +262,24 @@ private struct SessionRowView: View {
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                     Spacer(minLength: 4)
-                    if isWorking {
+                    if isWorking || isRegenerating {
                         ProgressView().controlSize(.mini)
                     }
+                }
+                if isBlocked {
+                    Text("Waiting for your answer")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.18), in: Capsule())
+                        .foregroundStyle(.orange)
+                } else if showFocusState, let pill = focusPill {
+                    Text(pill.text)
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(pill.color.opacity(0.16), in: Capsule())
+                        .foregroundStyle(pill.color)
                 }
                 HStack(spacing: 6) {
                     Text(accent.label)
@@ -197,6 +292,12 @@ private struct SessionRowView: View {
                         Text(row.profileName)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                    }
+                    if !row.session.gitBranch.isEmpty {
+                        Text("⑂ \(row.session.gitBranch)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                     Spacer(minLength: 4)
                     Text(Self.relativeTime(row.session.lastActive.date))
@@ -222,6 +323,23 @@ private struct SessionRowView: View {
         }
         .padding(.vertical, 4)
         .listRowBackground(isSelected ? accent.soft : nil)
+    }
+
+    /// Live-corrected focus pill: the working/blocked truth from the status stream wins over the
+    /// stored state (the pill flips the instant a turn finishes, blocks, or resumes).
+    private var focusPill: (text: String, color: Color)? {
+        var state = row.session.focusState
+        if isWorking { state = "working" }
+        switch state {
+        case "needs_answer": return ("needs answer", .orange)
+        case "failed": return ("failed", .red)
+        case "working": return ("working", .green)
+        case "turn_finished":
+            return row.session.focusUnread
+                ? ("turn finished", accent.tint)
+                : ("turn finished", .secondary)
+        default: return nil
+        }
     }
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {

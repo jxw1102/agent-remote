@@ -2,7 +2,9 @@ import AgentRemoteKit
 import Combine
 import Foundation
 
-/// Drives one session: job poll loop for new/continue, history load for resume.
+/// Drives one session: job poll loop for new/continue, history load for resume. Also attaches to
+/// turns started elsewhere (desktop TUI, queued chain, another client) via the status stream, so
+/// a pending permission/question can always be answered from this phone.
 @MainActor
 final class ChatViewModel: ObservableObject, Identifiable, Hashable {
     nonisolated static func == (lhs: ChatViewModel, rhs: ChatViewModel) -> Bool { lhs === rhs }
@@ -12,6 +14,15 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         case idle
         case running
         case failed(String)
+    }
+
+    struct AttachmentChip: Identifiable, Equatable {
+        let id: String
+        let name: String
+        /// Host path once uploaded; empty while the upload is in flight.
+        var hostPath: String = ""
+        var uploading: Bool = true
+        var error: String?
     }
 
     nonisolated let localId: String
@@ -26,13 +37,26 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
     @Published private(set) var items: [TimelineItem] = []
     @Published var pendingPermission: PendingPermissionUI?
     @Published var pendingQuestion: PendingQuestionUI?
+    /// A gate the user swiped away without answering — still pending on the daemon; the chat shows
+    /// an "Answer" banner instead of the sheet until they reopen or the daemon resolves it.
+    @Published private(set) var parkedQuestion: PendingQuestionUI?
+    @Published private(set) var parkedPermission: PendingPermissionUI?
     @Published var draftText = ""
     @Published var selectedModel: String = ""
     @Published var selectedEffort: String = ""
     @Published var permissionMode: String = ""
+    /// Prompts queued behind the running turn (daemon-owned; cancellable one by one).
+    @Published private(set) var queued: [QueuedPrompt] = []
+    /// Composer attachment chips (uploading or uploaded to the host).
+    @Published private(set) var attachments: [AttachmentChip] = []
+    /// One-line acknowledgement under the composer ("Queued", "Stopping…"); self-explanatory
+    /// problems stick until the next action replaces them.
+    @Published var statusLine: String?
 
     private(set) var sessionId: String
     @Published private(set) var model: String = ""
+    /// Exposed so the app model can match this chat against the status stream.
+    @Published private(set) var currentJobId: String?
 
     /// Fired when a brand-new session gets a real daemon id (for list re-key).
     var onSessionIdResolved: ((String) -> Void)?
@@ -41,12 +65,19 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
     /// Exposed for Live TUI sheet (same connection as this chat).
     var liveDaemonClient: DaemonClient { client }
     private weak var settings: SettingsStore?
-    private var currentJobId: String?
     private var pollTask: Task<Void, Never>?
     private var permissionIndex: [String: Int] = [:]
+    /// Gates the user swiped away — show the "Answer" banner instead of re-opening the sheet.
+    private var dismissedQuestionIds: Set<String> = []
+    private var dismissedPermissionIds: Set<String> = []
+    /// Gates already answered/cancelled — show nothing while the daemon catches up.
+    private var answeredGateIds: Set<String> = []
+    /// True while watching a turn we didn't start (events were skipped, not replayed).
+    private var attachedMidTurn = false
 
     nonisolated var id: String { localId }
     var isBusy: Bool { phase == .running }
+    var isUploadingAttachment: Bool { attachments.contains { $0.uploading } }
 
     var displayTitle: String {
         if let sessionName, !sessionName.isEmpty { return sessionName }
@@ -120,7 +151,15 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
     }
 
     var liveTuiEnabled: Bool {
-        ping?.caps(for: provider).liveTuiEnabled ?? false
+        guard let caps = ping?.caps(for: provider) else { return false }
+        // Same fallback chain as Android: live_tui, else "interactive implies a host TUI exists".
+        return caps.liveTuiEnabled || caps.interactive
+    }
+
+    /// Per-harness, never the multi root's union — a union would offer rewind on a harness whose
+    /// daemon can't perform it.
+    var canRewind: Bool {
+        ping?.caps(for: provider).rewindEnabled ?? false
     }
 
     var availableSlashCommands: [String] {
@@ -132,11 +171,80 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         return list
     }
 
+    // MARK: - Send
+
     func send() {
         let text = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, phase != .running else { return }
-        items.append(.userText(id: UUID().uuidString, text: text))
+        guard !text.isEmpty else { return }
+        if isUploadingAttachment {
+            statusLine = "Still uploading an attachment — one moment."
+            return
+        }
+        if text.hasPrefix("!") {
+            draftText = ""
+            runShellCommand(String(text.dropFirst()).trimmingCharacters(in: .whitespaces))
+            return
+        }
+        if let refusal = slashRefusal(text) {
+            statusLine = refusal
+            return
+        }
+        var outgoing = text
+        for chip in attachments where !chip.hostPath.isEmpty {
+            outgoing += "\n[attached: \(chip.hostPath)]"
+        }
         draftText = ""
+        attachments = []
+        statusLine = nil
+
+        // Mid-turn: type into the interactive TUI, or queue behind the headless job.
+        if phase == .running, let jobId = currentJobId {
+            items.append(.userText(id: UUID().uuidString, text: outgoing))
+            Task {
+                guard let agentClient = client.agentClient else { return }
+                do {
+                    if permissionMode == "interactive" {
+                        try await agentClient.typeIntoTui(jobId: jobId, prompt: outgoing)
+                        statusLine = "Typed into the session."
+                    } else {
+                        let list = try await agentClient.queuePrompt(jobId: jobId, prompt: outgoing)
+                        queued = list
+                        statusLine = "Queued behind the running turn."
+                    }
+                } catch {
+                    statusLine = DaemonClient.describe(error)
+                }
+            }
+            return
+        }
+
+        sendTurn(outgoing, echo: true)
+    }
+
+    /// Refuse slash commands the daemon can't run — a swallowed `/compact` looks like a hang.
+    private func slashRefusal(_ text: String) -> String? {
+        guard text.hasPrefix("/") else { return nil }
+        let name = text.split(separator: " ", maxSplits: 1).first.map(String.init) ?? text
+        // Only things shaped like a command; "/path/to/file" is a message.
+        guard name.range(of: "^/[A-Za-z][A-Za-z0-9_-]*$", options: .regularExpression) != nil else {
+            return nil
+        }
+        if permissionMode != "interactive" && name != "/rewind" {
+            return "\(name) needs interactive execution — switch Execution to Interactive first."
+        }
+        let known = availableSlashCommands
+        if known.isEmpty { return "This daemon does not advertise any slash commands." }
+        if !known.contains(name) {
+            let sample = known.prefix(6).joined(separator: " ")
+            return "Unknown command \(name) — try: \(sample)"
+        }
+        return nil
+    }
+
+    private func sendTurn(_ prompt: String, echo: Bool) {
+        if echo {
+            items.append(.userText(id: UUID().uuidString, text: prompt))
+        }
         phase = .running
 
         // Persist last-used overrides into settings.
@@ -158,7 +266,7 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                 if sessionId.isEmpty {
                     jobId = try await agentClient.startSession(NewSessionRequest(
                         cwd: cwd.isEmpty ? nil : cwd,
-                        prompt: text,
+                        prompt: prompt,
                         provider: provider.isEmpty ? nil : provider,
                         permissionMode: permissionMode.isEmpty ? nil : permissionMode,
                         model: selectedModel.isEmpty ? nil : selectedModel,
@@ -166,7 +274,7 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                     ))
                 } else {
                     jobId = try await agentClient.continueSession(id: sessionId, ContinueSessionRequest(
-                        prompt: text,
+                        prompt: prompt,
                         permissionMode: permissionMode.isEmpty ? nil : permissionMode,
                         model: selectedModel.isEmpty ? nil : selectedModel,
                         effort: selectedEffort.isEmpty ? nil : selectedEffort
@@ -179,28 +287,193 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         }
     }
 
+    // MARK: - Shell (`!command`)
+
+    /// Runs one host shell command, echoes its output, then re-sends the exchange as a silent
+    /// context turn so it persists in the transcript (same format the Android client writes).
+    private func runShellCommand(_ command: String) {
+        guard !command.isEmpty else { return }
+        items.append(.userText(id: UUID().uuidString, text: "! \(command)"))
+        statusLine = "Running on the host…"
+        Task {
+            guard let agentClient = client.agentClient else {
+                statusLine = "Not connected."
+                return
+            }
+            do {
+                let result = try await agentClient.runShell(
+                    command: command,
+                    sessionId: sessionId.isEmpty ? nil : sessionId,
+                    cwd: sessionId.isEmpty && !cwd.isEmpty ? cwd : nil
+                )
+                var output = result.output
+                if output.count > 8000 { output = String(output.prefix(8000)) + "\n…(truncated)" }
+                let display = output.isEmpty ? "(no output)" : output
+                items.append(.assistantText(
+                    id: UUID().uuidString,
+                    text: "```\n\(display)\n```"
+                ))
+                statusLine = result.ok ? nil : "Exit code \(result.exitCode)"
+                // Persist into the conversation so the agent sees it — only once a session exists.
+                if !sessionId.isEmpty {
+                    let turn = "[shell] ! \(command)\n[output]\n```\n\(display)\n```\n"
+                        + "[silent] Shell result for context only. Do not reply or acknowledge this message."
+                    sendTurn(turn, echo: false)
+                }
+            } catch {
+                statusLine = DaemonClient.describe(error)
+            }
+        }
+    }
+
+    // MARK: - Rewind
+
+    /// How many of the user's messages a rewind to this row would drop (the row itself included).
+    func rewindDropCount(itemId: String) -> Int? {
+        guard let index = items.firstIndex(where: { $0.id == itemId }),
+              case .userText = items[index] else { return nil }
+        var count = 0
+        for item in items[index...] {
+            if case .userText(_, let text) = item, !text.hasPrefix("[shell] !") {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    /// Drops the last `count` user messages and everything after them (conversation only — file
+    /// changes on the host are not reverted). Callers must confirm with the user first.
+    func rewind(dropping count: Int) {
+        guard count > 0, !sessionId.isEmpty, phase != .running else { return }
+        sendTurn("/rewind \(count)", echo: true)
+    }
+
+    // MARK: - Attachments
+
+    func addAttachment(name: String, data: Data) {
+        let chip = AttachmentChip(id: UUID().uuidString, name: name)
+        attachments.append(chip)
+        Task {
+            guard let agentClient = client.agentClient else {
+                markAttachment(chip.id) { $0.uploading = false; $0.error = "Not connected." }
+                return
+            }
+            do {
+                let response = try await agentClient.uploadAttachment(name: name, data: data)
+                markAttachment(chip.id) { $0.uploading = false; $0.hostPath = response.path }
+            } catch {
+                markAttachment(chip.id) { $0.uploading = false; $0.error = DaemonClient.describe(error) }
+                statusLine = DaemonClient.describe(error)
+            }
+        }
+    }
+
+    func removeAttachment(id: String) {
+        attachments.removeAll { $0.id == id }
+    }
+
+    private func markAttachment(_ id: String, _ change: (inout AttachmentChip) -> Void) {
+        guard let idx = attachments.firstIndex(where: { $0.id == id }) else { return }
+        var chip = attachments[idx]
+        change(&chip)
+        attachments[idx] = chip
+    }
+
+    // MARK: - Gates (permission / question)
+
     func respondToPermission(approved: Bool) {
-        guard let prompt = pendingPermission, let jobId = currentJobId else { return }
+        guard let prompt = pendingPermission ?? parkedPermission, let jobId = currentJobId else { return }
         pendingPermission = nil
+        parkedPermission = nil
+        answeredGateIds.insert(prompt.requestId)
         Task {
             try? await client.agentClient?.resolvePermission(jobId: jobId, requestId: prompt.requestId, allow: approved)
         }
     }
 
+    /// Swipe-dismiss: hide the sheet but leave the gate pending on the daemon — the "Answer"
+    /// banner takes over. Dismissing must never silently deny.
+    func parkPermission() {
+        guard let prompt = pendingPermission else { return }
+        dismissedPermissionIds.insert(prompt.requestId)
+        parkedPermission = prompt
+        pendingPermission = nil
+    }
+
+    func reopenPermission() {
+        guard let prompt = parkedPermission else { return }
+        dismissedPermissionIds.remove(prompt.requestId)
+        parkedPermission = nil
+        pendingPermission = prompt
+    }
+
     func respondToQuestion(answers: [[String]], notes: [String]?, cancel: Bool) {
-        guard let q = pendingQuestion, let jobId = currentJobId else { return }
+        guard let q = pendingQuestion ?? parkedQuestion, let jobId = currentJobId else { return }
         pendingQuestion = nil
+        parkedQuestion = nil
+        answeredGateIds.insert(q.requestId)
         Task {
-            try? await client.agentClient?.resolveQuestion(
-                jobId: jobId,
-                QuestionAnswerRequest(requestId: q.requestId, answers: cancel ? nil : answers, notes: notes, cancel: cancel)
-            )
+            do {
+                try await client.agentClient?.resolveQuestion(
+                    jobId: jobId,
+                    QuestionAnswerRequest(requestId: q.requestId, answers: cancel ? nil : answers, notes: notes, cancel: cancel)
+                )
+            } catch {
+                // The gate is still open on the daemon — un-suppress so the next poll re-offers it.
+                answeredGateIds.remove(q.requestId)
+                statusLine = DaemonClient.describe(error)
+            }
         }
+    }
+
+    func parkQuestion() {
+        guard let q = pendingQuestion else { return }
+        dismissedQuestionIds.insert(q.requestId)
+        parkedQuestion = q
+        pendingQuestion = nil
+    }
+
+    func reopenQuestion() {
+        guard let q = parkedQuestion else { return }
+        dismissedQuestionIds.remove(q.requestId)
+        parkedQuestion = nil
+        pendingQuestion = q
     }
 
     func interrupt() {
         guard let jobId = currentJobId, phase == .running else { return }
+        statusLine = "Stopping…"
         Task { try? await client.agentClient?.stopJob(jobId: jobId) }
+    }
+
+    func cancelQueued(id: String) {
+        guard let jobId = currentJobId else { return }
+        Task {
+            do {
+                let response = try await client.agentClient?.cancelQueued(jobId: jobId, queuedId: id)
+                if let response { queued = response.queued }
+            } catch {
+                statusLine = DaemonClient.describe(error)
+            }
+        }
+    }
+
+    // MARK: - Attach to a turn started elsewhere
+
+    /// Adopt a job the status stream reports for this session (desktop TUI turn, queued chain,
+    /// or a finished job holding an open question gate — daemon ≥ 2.6.5 keeps those in the feed).
+    ///
+    /// Polls from the job's current cursor, not 0 — replaying events would double every text
+    /// block the history load already brought in. The text this skips is backfilled by a full
+    /// history reload when the turn ends.
+    func attach(to job: ActiveJobStatus) {
+        guard currentJobId == nil, phase != .running else { return }
+        currentJobId = job.jobId
+        phase = .running
+        attachedMidTurn = true
+        pollTask?.cancel()
+        let cursor = max(0, job.nextSeq)
+        pollTask = Task { await pollJob(job.jobId, from: cursor) }
     }
 
     var commandSuggestions: [String] {
@@ -242,8 +515,26 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
 
     // MARK: - History
 
+    /// Plain-text export of the visible conversation ("You:" / "Agent:" rows only).
+    var plainTranscript: String {
+        items.compactMap { item -> String? in
+            switch item {
+            case .userText(_, let text): return "You: \(text)"
+            case .assistantText(_, let text): return "Agent: \(text)"
+            default: return nil
+            }
+        }.joined(separator: "\n\n")
+    }
+
+    /// Re-fetch the transcript tail (toolbar Refresh) — safe on a session that got its id mid-chat.
+    func reloadHistory() {
+        guard phase != .running else { return }
+        loadHistory()
+    }
+
     private func loadHistory() {
-        guard let resumeId else { return }
+        let historyId = sessionId.isEmpty ? resumeId : sessionId
+        guard let resumeId = historyId else { return }
         Task {
             // Wait briefly for the multi-host pool to finish connecting this profile.
             var agentClient = client.agentClient
@@ -270,7 +561,7 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                 for message in response.messages {
                     switch message.role {
                     case "user":
-                        loaded.append(.userText(id: message.id, text: message.text))
+                        loaded.append(contentsOf: Self.splitStoredShellTurn(message))
                     case "status":
                         loaded.append(.systemNotice(id: message.id, text: message.text))
                     default:
@@ -284,6 +575,27 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         }
     }
 
+    /// A stored `!command` turn ("[shell] ! …\n[output]\n```…```\n[silent] …") replays as the
+    /// command row plus its output row, with the [silent] directive stripped — matches Android.
+    private static func splitStoredShellTurn(_ message: SessionMessage) -> [TimelineItem] {
+        let text = message.text
+        guard text.hasPrefix("[shell] !") else {
+            return [.userText(id: message.id, text: text)]
+        }
+        var lines = text.components(separatedBy: "\n")
+        let command = String(lines.removeFirst().dropFirst("[shell] ".count))
+        if lines.first == "[output]" { lines.removeFirst() }
+        if let silent = lines.lastIndex(where: { $0.hasPrefix("[silent]") }) {
+            lines.removeSubrange(silent...)
+        }
+        let output = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        var result: [TimelineItem] = [.userText(id: message.id, text: command)]
+        if !output.isEmpty {
+            result.append(.assistantText(id: message.id + "-out", text: output))
+        }
+        return result
+    }
+
     // MARK: - Job polling
 
     private func startPolling(_ jobId: String) {
@@ -292,9 +604,9 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         pollTask = Task { await pollJob(jobId) }
     }
 
-    private func pollJob(_ initialJobId: String) async {
+    private func pollJob(_ initialJobId: String, from startSeq: Int = 0) async {
         var jobId = initialJobId
-        var since = 0
+        var since = startSeq
         while !Task.isCancelled {
             guard let agentClient = client.agentClient else {
                 phase = .failed("Not connected.")
@@ -308,6 +620,7 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                 return
             }
             since = job.nextSeq
+            queued = job.queued
             if !job.resolvedSessionId.isEmpty {
                 let first = sessionId.isEmpty
                 sessionId = job.resolvedSessionId
@@ -316,21 +629,22 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
 
             for event in job.events { apply(event, job: job) }
 
-            pendingPermission = job.pendingPermission.map {
-                PendingPermissionUI(requestId: $0.requestId, toolName: $0.toolName, detail: $0.detail)
-            }
-            if let q = job.pendingQuestion, !q.requestId.isEmpty {
-                pendingQuestion = PendingQuestionUI(requestId: q.requestId, questions: q.questions)
-            } else if job.pendingQuestion == nil {
-                // Only clear when the server dropped it (not when we haven't answered yet).
-                // Keep local sheet until user responds or job ends.
-            }
+            syncPermissionGate(job.pendingPermission)
+            syncQuestionGate(job.pendingQuestion)
 
             switch job.status {
             case .starting, .running:
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 continue
             case .done, .error, .stopped:
+                // Claude can fire Stop while AskUserQuestion is still on screen — the daemon
+                // holds the gate open past job end (2.6.5). Keep the Answer UI alive and keep
+                // polling until the gate resolves; finishing now would strand the waiter.
+                if job.pendingQuestion?.requestId.isEmpty == false
+                    || job.pendingPermission?.requestId.isEmpty == false {
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    continue
+                }
                 if job.droppedQueued > 0 {
                     items.append(.systemNotice(
                         id: UUID().uuidString,
@@ -338,21 +652,80 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                     ))
                 }
                 if !job.nextJobId.isEmpty {
+                    // The daemon auto-started the next queued prompt — follow the chain in place.
                     jobId = job.nextJobId
                     currentJobId = jobId
                     since = 0
                     continue
                 }
-                currentJobId = nil
-                pendingQuestion = nil
-                if job.status == .error, !job.error.isEmpty, items.last.map({
-                    if case .turnResult(_, _, let err) = $0 { return !err } else { return true }
-                }) ?? true {
-                    // ensure error is visible if no result event
-                }
-                phase = .idle
+                finishTurn(job)
                 return
             }
+        }
+    }
+
+    private func syncPermissionGate(_ pending: PendingPermission?) {
+        guard let pending, !pending.requestId.isEmpty else {
+            pendingPermission = nil
+            parkedPermission = nil
+            return
+        }
+        if answeredGateIds.contains(pending.requestId) { return }
+        let ui = PendingPermissionUI(requestId: pending.requestId, toolName: pending.toolName, detail: pending.detail)
+        if dismissedPermissionIds.contains(pending.requestId) {
+            if pendingPermission == nil { parkedPermission = ui }
+        } else {
+            parkedPermission = nil
+            pendingPermission = ui
+        }
+    }
+
+    private func syncQuestionGate(_ pending: PendingQuestion?) {
+        guard let pending, !pending.requestId.isEmpty else {
+            // The daemon dropped the gate (answered elsewhere / cancelled / turn moved on).
+            pendingQuestion = nil
+            parkedQuestion = nil
+            return
+        }
+        if answeredGateIds.contains(pending.requestId) { return }
+        let ui = PendingQuestionUI(requestId: pending.requestId, questions: pending.questions)
+        if dismissedQuestionIds.contains(pending.requestId) {
+            if pendingQuestion == nil { parkedQuestion = ui }
+        } else {
+            parkedQuestion = nil
+            pendingQuestion = ui
+        }
+    }
+
+    private func finishTurn(_ job: JobSnapshot) {
+        currentJobId = nil
+        pendingQuestion = nil
+        parkedQuestion = nil
+        pendingPermission = nil
+        parkedPermission = nil
+        queued = []
+        // A job that ends .error without a result event otherwise surfaces nothing at all.
+        if job.status == .error {
+            let lastShowsError: Bool = {
+                if case .turnResult(_, _, let isError) = items.last { return isError }
+                return false
+            }()
+            if !lastShowsError {
+                items.append(.turnResult(
+                    id: UUID().uuidString,
+                    summary: job.error.isEmpty ? "The turn ended with an error." : job.error,
+                    isError: true
+                ))
+            }
+        } else if job.status == .stopped {
+            items.append(.systemNotice(id: UUID().uuidString, text: "Stopped."))
+        }
+        if statusLine == "Stopping…" { statusLine = nil }
+        phase = .idle
+        // An attached watch skipped this turn's earlier events — swap in the durable transcript.
+        if attachedMidTurn {
+            attachedMidTurn = false
+            loadHistory()
         }
     }
 
@@ -362,9 +735,14 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
             if model != "interactive" { self.model = model }
 
         case .text(_, let text):
+            // Attaching to a mid-flight job replays its events from 0 — drop exact repeats of a
+            // block that's already on screen instead of doubling the transcript.
+            if case .assistantText(_, let last) = items.last, last == text { break }
             items.append(.assistantText(id: UUID().uuidString, text: text))
 
         case .tool(_, let name, let detail):
+            if case .toolCall(_, let lastName, let lastDetail) = items.last,
+               lastName == name, lastDetail == detail { break }
             items.append(.toolCall(id: UUID().uuidString, name: name, detail: detail))
 
         case .result(_, let isError, _, _):
@@ -377,8 +755,10 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
             }
 
         case .permission(_, let requestId, let toolName, let detail):
-            permissionIndex[requestId] = items.count
-            items.append(.permissionRequest(id: requestId, toolName: toolName, detail: detail, resolution: nil))
+            if permissionIndex[requestId] == nil {
+                permissionIndex[requestId] = items.count
+                items.append(.permissionRequest(id: requestId, toolName: toolName, detail: detail, resolution: nil))
+            }
 
         case .permissionResolved(_, let requestId, let allow, let reason):
             if let index = permissionIndex[requestId], case .permissionRequest(let id, let toolName, let detail, _) = items[index] {
@@ -389,7 +769,9 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
             }
 
         case .question(_, let requestId, let questions):
-            pendingQuestion = PendingQuestionUI(requestId: requestId, questions: questions)
+            if !dismissedQuestionIds.contains(requestId), !answeredGateIds.contains(requestId) {
+                pendingQuestion = PendingQuestionUI(requestId: requestId, questions: questions)
+            }
 
         case .questionResolved, .unknown:
             break

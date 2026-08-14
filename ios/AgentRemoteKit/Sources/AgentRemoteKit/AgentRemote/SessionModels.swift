@@ -26,18 +26,29 @@ public struct SessionSummary: Codable, Sendable, Equatable, Identifiable {
     public let provider: String
     /// Only on search results.
     public let snippet: String
+    /// Focus list membership (daemon ≥ 2.6, only meaningful when the ping says `focus: true`).
+    public let focus: Bool
+    /// needs_answer | failed | working | turn_finished — empty when not a focus row.
+    public let focusState: String
+    /// A finished turn the human hasn't opened yet (styles the pill lit vs dim).
+    public let focusUnread: Bool
+    /// True when the title is a human rename, not a derived one.
+    public let titleManual: Bool
 
     public init(
         id: String, projectId: String = "", cwd: String = "", gitBranch: String = "",
         title: String = "", started: FlexibleDate = FlexibleDate(.distantPast),
         lastActive: FlexibleDate = FlexibleDate(.distantPast), lastRole: String = "",
         lastText: String = "", model: String = "", sizeBytes: Int = 0,
-        provider: String = "", snippet: String = ""
+        provider: String = "", snippet: String = "", focus: Bool = false,
+        focusState: String = "", focusUnread: Bool = false, titleManual: Bool = false
     ) {
         self.id = id; self.projectId = projectId; self.cwd = cwd; self.gitBranch = gitBranch
         self.title = title; self.started = started; self.lastActive = lastActive
         self.lastRole = lastRole; self.lastText = lastText; self.model = model
         self.sizeBytes = sizeBytes; self.provider = provider; self.snippet = snippet
+        self.focus = focus; self.focusState = focusState; self.focusUnread = focusUnread
+        self.titleManual = titleManual
     }
 
     public init(from decoder: Decoder) throws {
@@ -55,11 +66,16 @@ public struct SessionSummary: Codable, Sendable, Equatable, Identifiable {
         sizeBytes = decodeSizeBytes(c, key: .sizeBytes)
         provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? ""
         snippet = try c.decodeIfPresent(String.self, forKey: .snippet) ?? ""
+        focus = try c.decodeIfPresent(Bool.self, forKey: .focus) ?? false
+        focusState = try c.decodeIfPresent(String.self, forKey: .focusState) ?? ""
+        focusUnread = try c.decodeIfPresent(Bool.self, forKey: .focusUnread) ?? false
+        titleManual = try c.decodeIfPresent(Bool.self, forKey: .titleManual) ?? false
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, projectId, cwd, gitBranch, title, started, lastActive, lastRole
         case lastText, model, sizeBytes, provider, snippet
+        case focus, focusState, focusUnread, titleManual
     }
 
     public var displayTitle: String {
@@ -154,4 +170,67 @@ public struct MessagesResponse: Codable, Sendable, Equatable {
     public let total: Int
     public let offset: Int
     public let messages: [SessionMessage]
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try c.decodeIfPresent(String.self, forKey: .sessionId) ?? ""
+        total = try c.decodeIfPresent(Int.self, forKey: .total) ?? 0
+        offset = try c.decodeIfPresent(Int.self, forKey: .offset) ?? 0
+        messages = try c.decodeIfPresent([SessionMessage].self, forKey: .messages) ?? []
+    }
+
+    private enum CodingKeys: String, CodingKey { case sessionId, total, offset, messages }
+}
+
+/// `GET /api/focus` — session summaries the human enrolled, each tagged `focus_state`.
+public struct FocusResponse: Codable, Sendable, Equatable {
+    public let sessions: [SessionSummary]
+    public let counts: [String: Int]
+    public let total: Int
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessions = try c.decodeIfPresent([SessionSummary].self, forKey: .sessions) ?? []
+        counts = try c.decodeIfPresent([String: Int].self, forKey: .counts) ?? [:]
+        total = try c.decodeIfPresent(Int.self, forKey: .total) ?? 0
+    }
+
+    private enum CodingKeys: String, CodingKey { case sessions, counts, total }
+}
+
+/// `POST /api/focus/<key>/done|restore|seen`.
+public struct FocusActionResponse: Codable, Sendable, Equatable {
+    public let ok: Bool
+    public let changed: Bool
+    public let key: String
+    public let focus: Bool
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try c.decodeIfPresent(Bool.self, forKey: .ok) ?? false
+        changed = try c.decodeIfPresent(Bool.self, forKey: .changed) ?? false
+        key = try c.decodeIfPresent(String.self, forKey: .key) ?? ""
+        focus = try c.decodeIfPresent(Bool.self, forKey: .focus) ?? false
+    }
+
+    private enum CodingKeys: String, CodingKey { case ok, changed, key, focus }
+}
+
+/// `POST /api/sessions/<id>/title` and `.../title/regenerate`.
+public struct TitleResponse: Codable, Sendable, Equatable {
+    public let ok: Bool
+    public let id: String
+    public let title: String
+    /// True when the stored title is a human rename rather than a derived one.
+    public let manual: Bool
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try c.decodeIfPresent(Bool.self, forKey: .ok) ?? false
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        manual = try c.decodeIfPresent(Bool.self, forKey: .manual) ?? false
+    }
+
+    private enum CodingKeys: String, CodingKey { case ok, id, title, manual }
 }

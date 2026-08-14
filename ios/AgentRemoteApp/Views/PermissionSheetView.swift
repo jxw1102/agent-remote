@@ -2,6 +2,9 @@ import SwiftUI
 
 struct PermissionSheetView: View {
     let prompt: PendingPermissionUI
+    /// Harness display name ("Claude" / "Grok" / "Codex") — not hard-coded, this daemon fronts
+    /// several agents.
+    var agentLabel: String = "The agent"
     let onRespond: (Bool) -> Void
 
     var body: some View {
@@ -11,7 +14,7 @@ struct PermissionSheetView: View {
                 .foregroundStyle(.orange)
                 .padding(.top, 24)
 
-            Text("Claude wants to use \(prompt.toolName)")
+            Text("\(agentLabel) wants to use \(prompt.toolName)")
                 .font(.headline)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)

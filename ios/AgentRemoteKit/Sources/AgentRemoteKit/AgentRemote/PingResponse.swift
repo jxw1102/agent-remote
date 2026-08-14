@@ -21,6 +21,9 @@ public struct PingResponse: Codable, Sendable, Equatable {
     public let providerDetails: [String: ProviderDetail]?
     /// Aggregate harness login snapshot (daemon ≥ 2.5.3).
     public let auth: AuthHealth?
+    /// Focus-list support — gates the Focus filter, rename, and regenerate (daemon ≥ 2.6).
+    public let focus: Bool?
+    public let focusStates: [String]?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -38,11 +41,13 @@ public struct PingResponse: Codable, Sendable, Equatable {
         providers = try c.decodeIfPresent([String].self, forKey: .providers)
         providerDetails = try c.decodeIfPresent([String: ProviderDetail].self, forKey: .providerDetails)
         auth = try c.decodeIfPresent(AuthHealth.self, forKey: .auth)
+        focus = try c.decodeIfPresent(Bool.self, forKey: .focus)
+        focusStates = try c.decodeIfPresent([String].self, forKey: .focusStates)
     }
 
     private enum CodingKeys: String, CodingKey {
         case ok, app, version, host, provider, caps, slashCommands, models, efforts
-        case dropPath, multi, providers, providerDetails, auth
+        case dropPath, multi, providers, providerDetails, auth, focus, focusStates
     }
 
     /// Harnesses this daemon exposes (multi list, else the single root provider).
@@ -138,19 +143,27 @@ public struct PingResponse: Codable, Sendable, Equatable {
         }
 
         /// Build from a `provider_details[h].caps` map, filling gaps from root caps.
+        ///
+        /// The wire keys are snake_case, but `.convertFromSnakeCase` rewrites **dictionary keys
+        /// too**, so a map decoded through the client arrives camelCased. Accept both spellings —
+        /// looking up only `"can_set_effort"` here silently fell back to root caps for every
+        /// multi-word capability.
         public init(fromCapMap map: [String: Bool], fallback: Capabilities) {
+            func flag(_ camel: String, _ snake: String) -> Bool? {
+                map[camel] ?? map[snake]
+            }
             queue = map["queue"] ?? fallback.queue
             stop = map["stop"] ?? fallback.stop
             projects = map["projects"] ?? fallback.projects
-            wsStatus = map["ws_status"] ?? fallback.wsStatus
+            wsStatus = flag("wsStatus", "ws_status") ?? fallback.wsStatus
             permissions = map["permissions"] ?? fallback.permissions
-            permissionModes = map["permission_modes"] ?? fallback.permissionModes
-            requiresCwd = map["requires_cwd"] ?? fallback.requiresCwd
-            canSetModel = map["can_set_model"] ?? fallback.canSetModel
-            canSetEffort = map["can_set_effort"] ?? fallback.canSetEffort
-            canShowUsage = map["can_show_usage"] ?? fallback.canShowUsage
+            permissionModes = flag("permissionModes", "permission_modes") ?? fallback.permissionModes
+            requiresCwd = flag("requiresCwd", "requires_cwd") ?? fallback.requiresCwd
+            canSetModel = flag("canSetModel", "can_set_model") ?? fallback.canSetModel
+            canSetEffort = flag("canSetEffort", "can_set_effort") ?? fallback.canSetEffort
+            canShowUsage = flag("canShowUsage", "can_show_usage") ?? fallback.canShowUsage
             interactive = map["interactive"] ?? fallback.interactive
-            liveTui = map["live_tui"] ?? fallback.liveTui
+            liveTui = flag("liveTui", "live_tui") ?? fallback.liveTui
             rewind = map["rewind"] ?? fallback.rewind
         }
 

@@ -65,8 +65,15 @@ _BLANK_TITLES = ("", "(no title)", "untitled", "new session")
 # tool_call_update. Map those (and any stream tool events we do get) to the
 # same live-status phases the claude provider uses, so the phone banner shows
 # "Running: ls -la" instead of a bare "Grok is working...".
-# Prefer human `description` (run_terminal_command etc.) over raw command —
-# same contract as claude.tool_detail / live-status banner.
+# Live status is two lines: human description (line 1) + raw command/path
+# (line 2). Same contract as claude.tool_status_parts.
+_DESC_KEYS = (
+    "description", "subject", "content", "activeForm", "status",
+)
+_CMD_KEYS = (
+    "command", "target_file", "file_path", "path", "target_directory",
+    "pattern", "glob", "url", "query", "prompt", "old_string",
+)
 _DETAIL_KEYS = (
     "description", "command", "target_file", "file_path", "path", "pattern",
     "url", "query", "prompt", "old_string", "glob",
@@ -124,27 +131,48 @@ def _is_user_session(summary: dict) -> bool:
     return not titles.is_titler_cwd(cwd)
 
 
-def _tool_detail(tool_input, max_len: int = 200) -> str:
-    """One short single-line snippet for the phone status banner.
-
-    Same contract as claude.tool_detail: collapse whitespace, then
-    middle-ellipsis so head + tail stay readable.
-    """
-    if not isinstance(tool_input, dict):
+def _clip_detail(text, max_len: int) -> str:
+    t = " ".join(str(text or "").split())
+    if not t:
         return ""
-    for key in _DETAIL_KEYS:
+    if len(t) <= max_len:
+        return t
+    if max_len < 3:
+        return t[:max_len]
+    keep = max_len - 1
+    head = keep // 2
+    tail = keep - head
+    return t[:head] + "…" + t[-tail:]
+
+
+def _tool_status_parts(tool_input, desc_max: int = 120,
+                       cmd_max: int = 280):
+    """Two-line live-status parts: (description, command)."""
+    if not isinstance(tool_input, dict):
+        return "", ""
+    desc = ""
+    for key in _DESC_KEYS:
         val = tool_input.get(key)
         if isinstance(val, str) and val.strip():
-            text = " ".join(val.split())
-            if len(text) <= max_len:
-                return text
-            if max_len < 3:
-                return text[:max_len]
-            keep = max_len - 1
-            head = keep // 2
-            tail = keep - head
-            return text[:head] + "…" + text[-tail:]
-    return ""
+            desc = _clip_detail(val, desc_max)
+            break
+    cmd = ""
+    for key in _CMD_KEYS:
+        val = tool_input.get(key)
+        if isinstance(val, str) and val.strip():
+            cmd = _clip_detail(val, cmd_max)
+            break
+    if desc and cmd and desc == cmd:
+        return desc, ""
+    if not desc and cmd:
+        return cmd, ""
+    return desc, cmd
+
+
+def _tool_detail(tool_input, max_len: int = 200) -> str:
+    """One short single-line snippet (permission / legacy). Description first."""
+    desc, cmd = _tool_status_parts(tool_input, desc_max=max_len, cmd_max=max_len)
+    return desc or cmd
 
 
 def _phase_for_tool(name: str, kind: str = "") -> str:
@@ -833,7 +861,7 @@ def _build_transcript(updates_path: Path, want_steps: bool = False):
     # to the message they followed. Off by default — the default transcript
     # must stay exactly as cheap as it was.
     step_rows = []     # (line index, step dict)
-    calls = {}         # toolCallId -> title, for naming the result row
+    calls = {}         # toolCallId -> {title, path}, for result naming + lang
     th_parts = []      # consecutive agent_thought_chunk text, coalesced
     th_pos = [0]
     th_start = th_end = None
@@ -968,11 +996,13 @@ def _build_transcript(updates_path: Path, want_steps: bool = False):
                 if want_steps and update.get("status") == "completed":
                     cid = update.get("toolCallId") or ""
                     raw_out = _grok_tool_output(update)
+                    meta = calls.pop(cid, None) or {}
+                    title = meta.get("title") or ""
+                    path = meta.get("path") or ""
+                    body = steps_mod.format_tool_result(raw_out, name=title)
+                    lang = steps_mod.lang_for_tool_result(title, path, body)
                     step_rows.append((ln, steps_mod.tool_result(
-                        "gr%d" % ln, _iso(ts), True,
-                        steps_mod.format_tool_result(
-                            raw_out, name=calls.get(cid, "")))))
-                    calls.pop(cid, None)
+                        "gr%d" % ln, _iso(ts), True, body, lang=lang)))
             elif kind in ("tool_call", "plan"):
                 close_thought()
                 close_thought_step(ln)
@@ -980,12 +1010,14 @@ def _build_transcript(updates_path: Path, want_steps: bool = False):
                 if want_steps and kind == "tool_call":
                     cid = update.get("toolCallId") or ""
                     title = update.get("title") or "tool"
-                    calls[cid] = title
                     raw = update.get("rawInput")
+                    path = steps_mod.path_from_input(raw)
+                    calls[cid] = {"title": title, "path": path}
                     full = steps_mod.format_tool_use(title, raw)
+                    lang = steps_mod.lang_for_tool_use(title, raw)
                     step_rows.append((ln, steps_mod.tool_use(
                         "gu%d" % ln, _iso(ts), title,
-                        _grok_tool_detail(raw), full)))
+                        _grok_tool_detail(raw), full, lang=lang)))
             elif kind == "turn_completed":
                 close_thought()
                 close_thought_step(ln)
@@ -2041,10 +2073,10 @@ class GrokRunner:
         raw_input = upd.get("rawInput")
         if not isinstance(raw_input, dict):
             raw_input = meta.get("input") if isinstance(meta.get("input"), dict) else {}
-        detail = _tool_detail(raw_input)
+        desc, cmd = _tool_status_parts(raw_input)
         title = upd.get("title")
-        if not detail and isinstance(title, str) and title and title != name:
-            detail = title[:200]
+        if not desc and not cmd and isinstance(title, str) and title and title != name:
+            desc = title[:200]
         kind = upd.get("kind") or meta.get("kind") or ""
         phase = _phase_for_tool(name, str(kind or ""))
         tid = str(upd.get("toolCallId") or "")
@@ -2057,9 +2089,11 @@ class GrokRunner:
                     seen.add(tid)
             if emit_event:
                 self._flush_text(job)
-                job.add_event("tool", name=name, detail=detail or "")
-        if name or detail:
-            job.set_phase(phase, detail or name)
+                # tool event detail = command (banner line 2)
+                job.add_event("tool", name=name, detail=cmd or desc or "")
+        if name or desc or cmd:
+            # phase_detail = description (banner line 1)
+            job.set_phase(phase, desc or cmd or name)
 
     def _apply_stream_tool(self, job, obj: dict):
         title = obj.get("title") or obj.get("name") or obj.get("tool")
@@ -2070,10 +2104,10 @@ class GrokRunner:
         if not inp and data:
             inp = data.get("input") if isinstance(data.get("input"), dict) else data
         title = str(title or "tool")[:120]
-        detail = _tool_detail(inp)
+        desc, cmd = _tool_status_parts(inp)
         phase = _phase_for_tool(title, str(obj.get("kind") or ""))
-        job.add_event("tool", name=title, detail=detail or "")
-        job.set_phase(phase, detail or title)
+        job.add_event("tool", name=title, detail=cmd or desc or "")
+        job.set_phase(phase, desc or cmd or title)
 
     def _flush_text(self, job):
         state = job.runner_state

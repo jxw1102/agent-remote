@@ -120,6 +120,38 @@ def main():
     check("tool_use step has preview", bool(step.get("preview")), step)
     check("tool_use kind", step["kind"] == "tool_use", step)
 
+    # --- language hints --------------------------------------------------
+    check("lang from .py", steps.lang_from_path("/x/a.py") == "python")
+    check("lang from .ts", steps.lang_from_path("foo.ts") == "typescript")
+    check("lang from Dockerfile",
+          steps.lang_from_path("/app/Dockerfile") == "dockerfile")
+    check("lang empty for no ext", steps.lang_from_path("/tmp/foo") == "")
+
+    edit_lang = steps.lang_for_tool_use("Edit", {
+        "file_path": "/tmp/a.py", "old_string": "a", "new_string": "b",
+    })
+    check("edit tool_use lang is diff", edit_lang == "diff", edit_lang)
+
+    write_lang = steps.lang_for_tool_use("Write", {
+        "file_path": "/tmp/a.py", "content": "x=1\n",
+    })
+    check("write tool_use lang is python", write_lang == "python", write_lang)
+
+    bash_lang = steps.lang_for_tool_use(
+        "Bash", {"command": "ls", "description": "list"})
+    check("bash tool_use lang is bash", bash_lang == "bash", bash_lang)
+
+    read_res = steps.lang_for_tool_result(
+        "Read", "/tmp/a.py", "1\tdef foo():\n2\t    return 1\n")
+    check("read result lang is python", read_res == "python", read_res)
+
+    ok_msg = steps.lang_for_tool_result(
+        "Edit", "/tmp/a.py", "The file /tmp/a.py has been updated.")
+    check("edit success has no lang", ok_msg == "", ok_msg)
+
+    step_l = steps.tool_use("r2", "", "Write", "/tmp/a.py", "x", lang="python")
+    check("lang field on tool_use", step_l.get("lang") == "python", step_l)
+
     if failures:
         print("FAILED:", ", ".join(failures))
         sys.exit(1)

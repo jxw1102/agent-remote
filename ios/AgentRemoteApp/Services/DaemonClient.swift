@@ -87,7 +87,7 @@ final class DaemonClient: ObservableObject {
         }
     }
 
-    static func describe(_ error: Error) -> String {
+    nonisolated static func describe(_ error: Error) -> String {
         if let ar = error as? AgentRemoteError {
             return ar.errorDescription ?? String(describing: ar)
         }

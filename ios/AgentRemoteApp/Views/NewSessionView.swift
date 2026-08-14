@@ -85,6 +85,7 @@ struct NewSessionView: View {
                         .pickerStyle(.segmented)
                         .onChange(of: harness) { _, _ in
                             // Clear cwd when switching harness so projects re-filter cleanly.
+                            cwd = ""
                         }
                     }
                 }

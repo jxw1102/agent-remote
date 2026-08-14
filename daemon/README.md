@@ -19,6 +19,13 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.6.5** drop Inbox: skip macOS `~/Public/Drop Box` in listings; allow
+recursive folder delete via `POST /api/drop/<name>/delete` (still confined to
+the drop dir; Drop Box and the drop root itself are protected).
+**2.6.4** process-view steps carry an optional `lang` (from file path or
+body kind: `diff` / `bash` / `python` / …) so clients can syntax-highlight
+Read/Write bodies and Edit diffs. Web process view uses the same tokeniser
+as fenced markdown blocks.
 **2.6.3** process view (`?detail=steps`) smart-formats tool bodies on the
 daemon: Bash shows description + command, Edit/search_replace shows a
 unified diff, Write shows path + body; results unwrap Grok
@@ -37,7 +44,7 @@ three causes of `claude TUI exited mid-turn`. Adds `$AGENTREMOTED_HOME/tmux`,
 a generated wrapper for reaching the fleet (`~/.agentremoted/tmux ls`).
 Drop folders: `/api/drop` lists directories (`type`, `entries`) and
 `GET /api/drop/<name>` zips one on the fly (temp archive, deleted after the
-transfer; folder delete is refused). Process view: `?detail=steps` on
+transfer). Process view: `?detail=steps` on
 `/api/sessions/<id>/messages` attaches tool calls, results and thinking to
 the messages they happened between, with `GET /api/sessions/<id>/steps/<ref>`
 for the full text behind a truncated one — Claude, Grok and Codex alike
@@ -234,9 +241,10 @@ POST /api/focus/<key>/done                      take a row out of Focus
 POST /api/focus/<key>/restore                   undo done (7-day window)
 POST /api/sessions/<id>/title {title}           rename ("" restores derived name)
 POST /api/sessions/<id>/title/regenerate        re-derive the title (Haiku)
-GET  /api/drop                                  files and folders (type=file|dir)
+GET  /api/drop                                  files and folders (type=file|dir;
+                                                skips macOS "Drop Box")
 GET  /api/drop/<name>                           a folder downloads as <name>.zip
-POST /api/drop/<name>/delete                    files only
+POST /api/drop/<name>/delete                    file or folder (recursive)
 GET  /ws/status
 GET  /sse/status
 ```

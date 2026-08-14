@@ -246,10 +246,15 @@ final class AppModel: ObservableObject {
 
     private func load(agent: AgentRemoteClient, profile: ServerProfile, query: String, all: Bool) async throws -> [SessionRow] {
         let sessions: [SessionSummary]
-        if query.isEmpty {
-            sessions = try await agent.sessions(limit: perProfileLimit, all: all)
-        } else {
+        if !query.isEmpty {
             sessions = try await agent.searchSessionSummaries(query: query, limit: perProfileLimit, all: all)
+        } else if settingsStore.settings.focusMode {
+            // Focus mode: only daemons that keep a focus list contribute — a profile without it
+            // contributes nothing rather than dumping its whole session list into the view.
+            guard pings[profile.id]?.focus == true else { return [] }
+            sessions = try await agent.focusList().sessions
+        } else {
+            sessions = try await agent.sessions(limit: perProfileLimit, all: all)
         }
         let defaultProvider = pings[profile.id]?.provider ?? ""
         return sessions.map { s in
@@ -263,23 +268,104 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Focus / titles
+
+    /// Whether any connected daemon keeps a focus list (gates the Focus filter chip).
+    var focusAvailable: Bool {
+        pings.values.contains { $0.focus == true }
+    }
+
+    var focusMode: Bool { settingsStore.settings.focusMode }
+
+    func setFocusMode(_ enabled: Bool) {
+        guard settingsStore.settings.focusMode != enabled else { return }
+        settingsStore.settings.focusMode = enabled
+        Task { await refreshSessions() }
+    }
+
+    /// Enroll a session on the focus list (`member: true`) or take it off (`done`).
+    func setFocusMember(_ row: SessionRow, member: Bool) async throws {
+        guard let agent = clients[row.ref.profileId]?.agentClient else {
+            throw AgentRemoteError.daemon(status: 0, message: "Not connected")
+        }
+        _ = try await agent.setFocusDone(sessionId: row.ref.sessionId, done: !member)
+        await refreshSessions()
+    }
+
+    /// Read cursor — a finished turn the user just opened stops glowing on the focus list.
+    /// Fire-and-forget; skipped entirely when the daemon has no focus support.
+    func markSeen(_ row: SessionRow) {
+        guard pings[row.ref.profileId]?.focus == true else { return }
+        guard let agent = clients[row.ref.profileId]?.agentClient else { return }
+        let sessionId = row.ref.sessionId
+        Task { try? await agent.markFocusSeen(sessionId: sessionId) }
+    }
+
+    /// Rename a session (empty title reverts to the derived one). Returns the stored title.
+    @discardableResult
+    func renameSession(_ row: SessionRow, title: String) async throws -> String {
+        guard let agent = clients[row.ref.profileId]?.agentClient else {
+            throw AgentRemoteError.daemon(status: 0, message: "Not connected")
+        }
+        let response = try await agent.setTitle(sessionId: row.ref.sessionId, title: title)
+        await refreshSessions()
+        return response.title
+    }
+
+    /// Ask the daemon's model to re-derive a title from the transcript — returns the suggestion
+    /// (not yet saved; pass it to `renameSession` to keep it).
+    func regenerateTitle(_ row: SessionRow) async throws -> String {
+        guard let agent = clients[row.ref.profileId]?.agentClient else {
+            throw AgentRemoteError.daemon(status: 0, message: "Not connected")
+        }
+        return try await agent.regenerateTitle(sessionId: row.ref.sessionId).title
+    }
+
+    func focusSupported(_ row: SessionRow) -> Bool {
+        pings[row.ref.profileId]?.focus == true
+    }
+
     // MARK: - Working state
 
-    func isWorking(ref: SessionRef) -> Bool {
-        guard let jobs = activeJobs[ref.profileId]?.values else { return false }
-        return jobs.contains {
+    private func activeJob(ref: SessionRef) -> ActiveJobStatus? {
+        guard let jobs = activeJobs[ref.profileId]?.values else { return nil }
+        return jobs.first {
             $0.sessionId == ref.sessionId || $0.resolvedSessionId == ref.sessionId
         }
+    }
+
+    func isWorking(ref: SessionRef) -> Bool {
+        activeJob(ref: ref) != nil
+    }
+
+    /// A running job waiting on the human — permission prompt or AskUserQuestion.
+    func isBlocked(ref: SessionRef) -> Bool {
+        guard let job = activeJob(ref: ref) else { return false }
+        return job.pendingPermission || job.pendingQuestion
     }
 
     func isWorking(chat: ChatViewModel) -> Bool {
         chat.isBusy || (!chat.sessionId.isEmpty && isWorking(ref: SessionRef(profileId: chat.profileId, sessionId: chat.sessionId)))
     }
 
+    /// The status-stream frame for this chat's turn: by job id first (a brand-new session has no
+    /// session id yet), then by session id (a turn started from the desktop or a queued chain).
+    func activeStatus(for chat: ChatViewModel) -> ActiveJobStatus? {
+        guard let jobs = activeJobs[chat.profileId]?.values else { return nil }
+        if let jobId = chat.currentJobId, let match = jobs.first(where: { $0.jobId == jobId }) {
+            return match
+        }
+        guard !chat.sessionId.isEmpty else { return nil }
+        return jobs.first {
+            $0.sessionId == chat.sessionId || $0.resolvedSessionId == chat.sessionId
+        }
+    }
+
     // MARK: - Open chat
 
     func open(row: SessionRow) -> ChatViewModel {
         let key = row.ref.key
+        markSeen(row)
         if let existing = chats[key] {
             selectedChatKey = key
             return existing

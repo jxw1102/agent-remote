@@ -56,15 +56,30 @@ drop / settings live in the toolbar menu and sheets.
 ## What's implemented
 
 - Multi-profile daemons; one merged session list with search + profile filter chips
+- Focus mode (daemon ≥ 2.6): Focus chip, state pills, track/done, seen cursor
+- Session rename + model-suggested titles (long-press a row)
 - Resume session / new session (harness, cwd/projects, interactive toggle)
-- Chat: markdown transcript, tools, stop, slash autocomplete
-- Permission Allow/Deny sheet
-- AskUserQuestion sheet
+- Chat: markdown transcript, tools, stop, slash autocomplete (gated per harness)
+- Attach to turns started elsewhere (desktop TUI, queued chain) via the status stream
+- Live status banner (phase + command two-line, elapsed) from `/ws/status`
+- Send while running: types into an interactive TUI, queues behind a headless job
+- Queue sheet with per-prompt cancel
+- `!command` host shell escape (echo + silent context turn, Android format)
+- Composer attachments (upload → `[attached: …]` markers)
+- Rewind to a message (confirmation spells out what it drops; conversation only)
+- Permission Allow/Deny sheet (harness-named); AskUserQuestion sheet with markdown
+  bodies — swipe-dismiss parks the gate behind an "Answer" banner, never denies
+- Orphaned gates survive turn end (daemon 2.6.5 keeps them in the status feed)
 - Model + effort pickers (session harness catalogues)
-- Live TUI sheet (when `caps.live_tui`)
-- Host drop files + usage sheets
+- Live TUI sheet (when `caps.live_tui`, or `interactive` implies one)
+- Merged host drop inbox across daemons (folders download as `<name>.zip`, delete
+  works on folders, dedup across profiles) + per-account merged usage
+- Profile editor with test connection (ping + authenticated `/api/projects` call)
 - Settings: theme, show-all-sessions, default execution/model/effort
 - Provider-tinted UI (Claude / Grok / Codex)
+
+Not ported from Android (platform-specific): background foreground-service watch +
+push-style notifications, MediaStore Downloads (iOS uses the share sheet), sound/haptic cues.
 
 ## Protocol notes (daemon-side)
 

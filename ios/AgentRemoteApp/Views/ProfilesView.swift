@@ -6,6 +6,7 @@ struct ProfilesView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var isAdding = false
+    @State private var editingProfile: ServerProfile?
 
     var body: some View {
         NavigationStack {
@@ -18,24 +19,29 @@ struct ProfilesView: View {
                     )
                 } else {
                     ForEach(profileStore.profiles) { profile in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(profile.name).font(.headline)
-                                Spacer()
-                                statusBadge(for: profile.id)
-                            }
-                            Text(profile.serverURLString)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            if let ping = appModel.ping(for: profile.id) {
-                                Text(harnessLabel(ping))
-                                    .font(.caption2)
+                        Button {
+                            editingProfile = profile
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(profile.name).font(.headline)
+                                    Spacer()
+                                    statusBadge(for: profile.id)
+                                }
+                                Text(profile.serverURLString)
+                                    .font(.caption)
                                     .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                if let ping = appModel.ping(for: profile.id) {
+                                    Text(harnessLabel(ping))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
+                            .padding(.vertical, 2)
                         }
-                        .padding(.vertical, 2)
+                        .buttonStyle(.plain)
                     }
                     .onDelete { indexSet in
                         for index in indexSet {
@@ -58,6 +64,13 @@ struct ProfilesView: View {
             }
             .sheet(isPresented: $isAdding) {
                 AddConnectionView()
+                    .onDisappear {
+                        appModel.syncClients()
+                        appModel.refreshEverything()
+                    }
+            }
+            .sheet(item: $editingProfile) { profile in
+                AddConnectionView(editing: profile)
                     .onDisappear {
                         appModel.syncClients()
                         appModel.refreshEverything()

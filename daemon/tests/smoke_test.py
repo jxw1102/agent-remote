@@ -737,6 +737,34 @@ def run_claude_suite(token):
           drop_name not in [f["name"] for f in listing2.get("files", [])],
           listing2)
 
+    # macOS Public/Drop Box must not appear; folders can be deleted.
+    os.makedirs(os.path.join(drop_dir, "Drop Box"), exist_ok=True)
+    folder = os.path.join(drop_dir, "staged-folder")
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "inside.txt"), "w") as f:
+        f.write("nested\n")
+    _, listing3 = api(base, token, "/api/drop")
+    names3 = [f["name"] for f in listing3.get("files", [])]
+    check("drop hides Drop Box", "Drop Box" not in names3, listing3)
+    check("drop lists folder", "staged-folder" in names3, listing3)
+    folder_row = next((f for f in listing3.get("files", [])
+                       if f["name"] == "staged-folder"), None)
+    check("drop folder typed as dir",
+          folder_row and folder_row.get("type") == "dir", folder_row)
+    status, data = api(base, token,
+                       "/api/drop/" + urllib.request.quote("staged-folder")
+                       + "/delete", {})
+    check("drop delete folder ok",
+          status == 200 and data.get("ok") is True
+          and data.get("type") == "dir", data)
+    check("drop folder gone on disk", not os.path.isdir(folder), folder)
+    try:
+        api(base, token, "/api/drop/" + urllib.request.quote("Drop Box")
+            + "/delete", {})
+        check("drop refuses Drop Box delete", False)
+    except urllib.error.HTTPError as e:
+        check("drop refuses Drop Box delete", e.code == 400, e.code)
+
     print("new session:")
     status, data = api(base, token, "/api/sessions/new",
                        {"prompt": "hello", "cwd": FAKE_HOME})

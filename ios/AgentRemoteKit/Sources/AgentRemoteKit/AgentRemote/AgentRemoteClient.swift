@@ -102,12 +102,13 @@ public struct AgentRemoteClient: Sendable {
         jsonBody: Encodable? = nil,
         rawBody: Data? = nil,
         contentType: String? = nil,
-        requiresAuth: Bool = true
+        requiresAuth: Bool = true,
+        timeout: TimeInterval = 30
     ) async throws -> Response {
         let url = try buildURL(path, query: query)
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.timeoutInterval = 30
+        request.timeoutInterval = timeout
         if requiresAuth {
             request.setValue(token, forHTTPHeaderField: "X-Auth-Token")
         }
@@ -214,7 +215,45 @@ public struct AgentRemoteClient: Sendable {
         try await send("GET", "/api/sessions/\(sessionId)/messages", query: [
             "offset": offset.map(String.init),
             "limit": limit.map(String.init),
-        ])
+        ], timeout: 60)
+    }
+
+    // MARK: - Focus / titles
+
+    /// Sessions the human enrolled on the focus list, each tagged `focus_state`. Gate on
+    /// `ping.focus == true` — older daemons 404 here.
+    public func focusList() async throws -> FocusResponse {
+        try await send("GET", "/api/focus")
+    }
+
+    /// Take a session off the focus list (`done: true`) or undo that within the daemon's
+    /// 7-day window (`done: false`).
+    public func setFocusDone(sessionId: String, done: Bool) async throws -> FocusActionResponse {
+        try await send("POST", "/api/focus/\(sessionId)/\(done ? "done" : "restore")", jsonBody: EmptyBody())
+    }
+
+    /// Read cursor: marks a finished turn as seen (styles the focus pill dim instead of lit).
+    public func markFocusSeen(sessionId: String) async throws {
+        let _: FocusActionResponse = try await send("POST", "/api/focus/\(sessionId)/seen", jsonBody: EmptyBody())
+    }
+
+    /// Rename a session; an empty title clears the human override back to the derived one.
+    public func setTitle(sessionId: String, title: String) async throws -> TitleResponse {
+        try await send("POST", "/api/sessions/\(sessionId)/title", jsonBody: TitleBody(title: title))
+    }
+
+    /// Re-derive the title from the transcript via the daemon's model — slow, allow a minute.
+    public func regenerateTitle(sessionId: String) async throws -> TitleResponse {
+        try await send("POST", "/api/sessions/\(sessionId)/title/regenerate", jsonBody: EmptyBody(), timeout: 60)
+    }
+
+    // MARK: - Shell
+
+    /// Run one host shell command; `sessionId` makes it run in that session's cwd.
+    public func runShell(command: String, sessionId: String? = nil, cwd: String? = nil) async throws -> ShellResult {
+        try await send("POST", "/api/shell",
+                       jsonBody: ShellRequest(command: command, sessionId: sessionId, cwd: cwd),
+                       timeout: 40)
     }
 
     // MARK: - Sessions -> jobs
@@ -279,30 +318,57 @@ public struct AgentRemoteClient: Sendable {
         try await send("GET", "/api/drop")
     }
 
-    public func downloadDropFile(name: String) async throws -> Data {
+    /// Download one drop entry. The daemon names what it actually served in `X-Drop-Name` — a
+    /// folder arrives zipped as `<name>.zip` — so save under the returned name, not the entry
+    /// name that was requested.
+    public func downloadDropEntry(name: String) async throws -> DropDownload {
         let url = try buildURL("/api/drop/\(name)")
         var request = URLRequest(url: url)
         request.setValue(token, forHTTPHeaderField: "X-Auth-Token")
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        request.timeoutInterval = 180
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            let msg = (error as? URLError).map { urlErrorMessage($0, url: url) }
+                ?? error.localizedDescription
+            throw AgentRemoteError.network(msg)
+        }
+        guard let http = response as? HTTPURLResponse else {
             throw AgentRemoteError.invalidResponse
         }
-        return data
+        guard (200..<300).contains(http.statusCode) else {
+            let message = (try? Self.decoder.decode(DaemonErrorBody.self, from: data))?.error
+                ?? String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+            throw AgentRemoteError.daemon(status: http.statusCode, message: message)
+        }
+        let served = http.value(forHTTPHeaderField: "X-Drop-Name") ?? ""
+        return DropDownload(name: served.isEmpty ? name : served, data: data)
     }
 
+    @available(*, deprecated, renamed: "downloadDropEntry(name:)")
+    public func downloadDropFile(name: String) async throws -> Data {
+        try await downloadDropEntry(name: name).data
+    }
+
+    /// Remove one staged file or folder (daemon ≥ 2.6.5 deletes folders recursively).
     public func deleteDropFile(name: String) async throws {
         try await sendDiscardingResponse("POST", "/api/drop/\(name)/delete")
     }
 
-    /// Phone -> host. `data` is sent as the raw request body (not JSON).
+    /// Phone -> host. `data` is sent as the raw request body (not JSON). Long timeout — multi-MB
+    /// uploads on cellular are the norm, and an aborted write surfaces as a daemon "empty upload".
     public func uploadAttachment(name: String, data: Data, contentType: String = "application/octet-stream") async throws -> AttachmentUploadResponse {
-        try await send("POST", "/api/attachments", query: ["name": name], rawBody: data, contentType: contentType)
+        try await send("POST", "/api/attachments", query: ["name": name], rawBody: data,
+                       contentType: contentType, timeout: 180)
     }
 
     // MARK: - Usage
 
+    /// 90s: grok's usage resumes a tmux TUI on the host and scrapes its `/usage` output.
     public func usage() async throws -> UsageResponse {
-        try await send("GET", "/api/usage")
+        try await send("GET", "/api/usage", timeout: 90)
     }
 
     // MARK: - Status stream
@@ -363,3 +429,11 @@ private struct AnyEncodable: Encodable {
 }
 
 private struct EmptyResponse: Decodable {}
+
+/// `{}` — POST bodies for endpoints that take no parameters.
+private struct EmptyBody: Encodable {}
+
+/// `{"title": "..."}` for the rename endpoint.
+private struct TitleBody: Encodable {
+    let title: String
+}

@@ -303,7 +303,8 @@ class Focus:
 
         Cosmetic only: it does **not** change a row's state, it decides whether
         a finished turn is drawn lit (you have not looked) or dim (you have).
-        Clients call it when the human actually opens the session.
+        Clients call it when the human opens the session, or when a turn
+        finishes while that session's transcript is already on screen.
         """
         key = str(key or "").strip()
         now = time.time() if ts is None else float(ts)

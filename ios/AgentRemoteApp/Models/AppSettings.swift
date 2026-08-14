@@ -12,6 +12,28 @@ struct AppSettings: Codable, Equatable {
     var showAllSessions: Bool = false
     /// system | light | dark
     var theme: String = "system"
+    /// Sessions list shows only the daemon-side Focus list (toggled from the filter row).
+    var focusMode: Bool = false
+
+    init() {}
+
+    /// Field-tolerant: a settings blob saved by an older build must not reset to defaults just
+    /// because a new field appeared.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        modelOverride = try c.decodeIfPresent(String.self, forKey: .modelOverride) ?? ""
+        effortOverride = try c.decodeIfPresent(String.self, forKey: .effortOverride) ?? ""
+        permissionMode = try c.decodeIfPresent(String.self, forKey: .permissionMode) ?? "interactive"
+        soundCues = try c.decodeIfPresent(Bool.self, forKey: .soundCues) ?? true
+        showAllSessions = try c.decodeIfPresent(Bool.self, forKey: .showAllSessions) ?? false
+        theme = try c.decodeIfPresent(String.self, forKey: .theme) ?? "system"
+        focusMode = try c.decodeIfPresent(Bool.self, forKey: .focusMode) ?? false
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case modelOverride, effortOverride, permissionMode, soundCues
+        case showAllSessions, theme, focusMode
+    }
 }
 
 @MainActor

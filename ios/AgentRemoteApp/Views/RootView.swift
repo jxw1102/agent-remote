@@ -13,8 +13,6 @@ struct RootView: View {
     @State private var showSettings = false
     @State private var showUsage = false
     @State private var showDrop = false
-    @State private var usageProfileId: UUID?
-    @State private var dropProfileId: UUID?
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -28,14 +26,8 @@ struct RootView: View {
                 onNewSession: { showNewSession = true },
                 onProfiles: { showProfiles = true },
                 onSettings: { showSettings = true },
-                onUsage: {
-                    usageProfileId = profileStore.profiles.first?.id
-                    showUsage = true
-                },
-                onDrop: {
-                    dropProfileId = profileStore.profiles.first?.id
-                    showDrop = true
-                }
+                onUsage: { showUsage = true },
+                onDrop: { showDrop = true }
             )
             .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
         } detail: {
@@ -58,26 +50,10 @@ struct RootView: View {
             SettingsView()
         }
         .sheet(isPresented: $showUsage) {
-            if let pid = usageProfileId, let client = appModel.client(for: pid) {
-                UsageView(client: client)
-            } else {
-                NavigationStack {
-                    ContentUnavailableView("No servers", systemImage: "chart.bar",
-                                           description: Text("Add a server first."))
-                        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { showUsage = false } } }
-                }
-            }
+            UsageView()
         }
         .sheet(isPresented: $showDrop) {
-            if let pid = dropProfileId, let client = appModel.client(for: pid) {
-                DropView(client: client)
-            } else {
-                NavigationStack {
-                    ContentUnavailableView("No servers", systemImage: "tray",
-                                           description: Text("Add a server first."))
-                        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { showDrop = false } } }
-                }
-            }
+            DropView()
         }
     }
 

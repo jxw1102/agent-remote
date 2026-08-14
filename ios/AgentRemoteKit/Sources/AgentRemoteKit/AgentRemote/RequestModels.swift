@@ -87,6 +87,37 @@ public struct StopJobResponse: Codable, Sendable, Equatable {
     public let ok: Bool
 }
 
+/// `POST /api/shell {command, session_id?, cwd?}` — one host shell command, output captured.
+public struct ShellRequest: Codable, Sendable, Equatable {
+    public var command: String
+    /// Runs in that session's cwd when set (the daemon looks the path up).
+    public var sessionId: String?
+    public var cwd: String?
+
+    public init(command: String, sessionId: String? = nil, cwd: String? = nil) {
+        self.command = command
+        self.sessionId = sessionId
+        self.cwd = cwd
+    }
+}
+
+public struct ShellResult: Codable, Sendable, Equatable {
+    public let ok: Bool
+    public let output: String
+    public let exitCode: Int
+    public let cwd: String
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try c.decodeIfPresent(Bool.self, forKey: .ok) ?? false
+        output = try c.decodeIfPresent(String.self, forKey: .output) ?? ""
+        exitCode = try c.decodeIfPresent(Int.self, forKey: .exitCode) ?? 0
+        cwd = try c.decodeIfPresent(String.self, forKey: .cwd) ?? ""
+    }
+
+    private enum CodingKeys: String, CodingKey { case ok, output, exitCode, cwd }
+}
+
 public struct InputPromptRequest: Codable, Sendable, Equatable {
     public var prompt: String
     public init(prompt: String) { self.prompt = prompt }

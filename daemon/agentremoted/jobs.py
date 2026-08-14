@@ -223,8 +223,10 @@ class Job:
         # Keep name/detail single-line and short so a multi-line shell
         # command can't blow the phone strip to a dozen wraps.
         if kind == "tool":
+            # Command line (banner line 2) — keep more chars so paths like
+            # [attached: …/uploads/foo.png] stay readable end-to-end.
             if "detail" in fields and fields["detail"]:
-                fields["detail"] = self._clip_mid(fields["detail"], 200)
+                fields["detail"] = self._clip_mid(fields["detail"], 280)
             if "name" in fields and fields["name"]:
                 fields["name"] = self._clip_mid(fields["name"], 80)
         with self.lock:
@@ -413,6 +415,8 @@ class Job:
                 "prompt": self.prompt[:120],
                 "cwd": self.cwd,
                 "isolate_root": self.isolate_root,
+                "pending_question": bool(self.pending_question),
+                "pending_permission": bool(self.pending_permission),
                 "account": self.account,
                 "provider": self.provider,
                 # Lets a caller pick the LATEST job for a session (the focus
@@ -567,25 +571,43 @@ class JobManager:
         return [j.brief() for j in jobs]
 
     def active_status(self) -> list:
-        """Live status of every active job — the /ws/status stream payload."""
+        """Live status of every active job — the /ws/status stream payload.
+
+        Also keeps jobs that already finished (done/error/stopped) but still
+        hold a pending question or permission gate. Claude can fire Stop while
+        AskUserQuestion is still on screen; without these rows clients drop the
+        Answer UI the moment status leaves "running".
+        """
         with self.lock:
             jobs = list(self.jobs.values())
         out = []
         now = time.time()
         for job in jobs:
             with job.lock:
+                pending_q = bool(job.pending_question)
+                pending_p = bool(job.pending_permission)
                 if job.status not in ("starting", "running"):
-                    continue
+                    if not (pending_q or pending_p):
+                        continue
                 tool = {}
                 for event in reversed(job.events):
                     if event["kind"] == "tool":
                         tool = event
                         break
+                phase = job.phase
+                phase_detail = job.phase_detail
+                # Surface a clear "asking" phase for orphaned gates so focus
+                # and the web banner both classify as needs_answer.
+                if pending_q and phase != "asking":
+                    phase = "asking"
+                    if not phase_detail:
+                        phase_detail = "question"
                 out.append({
                     "job_id": job.id,
                     "session_id": job.session_id,
                     "new_session_id": job.new_session_id,
-                    "status": job.status,
+                    "status": job.status if job.status in ("starting", "running")
+                              else "running",
                     "prompt": job.prompt[:120],
                     "cwd": job.cwd,
                     "account": job.account,
@@ -595,10 +617,10 @@ class JobManager:
                     "queued_count": len(job.queued),
                     "tool": tool.get("name", ""),
                     "tool_detail": tool.get("detail", ""),
-                    "phase": job.phase,
-                    "phase_detail": job.phase_detail,
-                    "pending_permission": bool(job.pending_permission),
-                    "pending_question": bool(job.pending_question),
+                    "phase": phase,
+                    "phase_detail": phase_detail,
+                    "pending_permission": pending_p,
+                    "pending_question": pending_q,
                     # Doorbell for the phone: it only fetches
                     # /api/jobs/<id>?since=N when this grows past its cursor.
                     "next_seq": len(job.events),

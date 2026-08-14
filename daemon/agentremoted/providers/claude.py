@@ -70,9 +70,15 @@ _MAX_PREVIEW = 200
 _MAX_TITLE = 60
 
 # Fields worth surfacing when a tool use is shown or needs approval.
-# Prefer human `description` (Bash / run_terminal_command almost always set
-# it) over the raw `command` so the live-status banner stays short and
-# readable; fall through to path/url/etc. for tools that never send one.
+# Live status is two lines: human `description` (line 1) + raw command/path
+# (line 2). Permission prompts still prefer description via tool_detail().
+_DESC_KEYS = (
+    "description", "subject", "content", "activeForm", "status",
+)
+_CMD_KEYS = (
+    "command", "file_path", "path", "target_file", "target_directory",
+    "pattern", "glob", "url", "query", "prompt", "old_string",
+)
 _DETAIL_KEYS = (
     "description", "command", "file_path", "path", "pattern", "url",
     "prompt", "query",
@@ -108,8 +114,71 @@ _TASK_TOOLS = frozenset({
 _TASKS_ROOT = Path.home() / ".claude" / "tasks"
 _TODO_JSONL_SCAN = 256 * 1024
 
+def _clip_detail(text: str, max_len: int) -> str:
+    """Collapse whitespace and middle-ellipsis so head + tail stay readable."""
+    t = " ".join(str(text or "").split())
+    if not t:
+        return ""
+    if len(t) <= max_len:
+        return t
+    if max_len < 3:
+        return t[:max_len]
+    keep = max_len - 1
+    head = keep // 2
+    tail = keep - head
+    return t[:head] + "…" + t[-tail:]
+
+
+def tool_status_parts(tool_input: dict, desc_max: int = 120,
+                      cmd_max: int = 280) -> tuple:
+    """Two-line live-status parts: (description, command).
+
+    Line 1 is the human `description` (or a short subject). Line 2 is the
+    raw command / path / pattern — including things like
+    ``[attached: ~/.agentremoted/uploads/…]``. When only one field exists it
+    goes on line 1 and line 2 is empty (clients collapse the blank line).
+    """
+    if not isinstance(tool_input, dict):
+        return "", ""
+    todos = tool_input.get("todos")
+    if isinstance(todos, list) and todos and not any(
+            isinstance(tool_input.get(k), str) and tool_input.get(k).strip()
+            for k in _DESC_KEYS + _CMD_KEYS):
+        return ("%d todos" % len(todos), "")
+
+    desc = ""
+    for key in _DESC_KEYS:
+        val = tool_input.get(key)
+        if isinstance(val, str) and val.strip():
+            desc = _clip_detail(val, desc_max)
+            break
+    if not desc:
+        for key in ("taskId",):
+            val = tool_input.get(key)
+            if isinstance(val, str) and val.strip():
+                desc = _clip_detail(val, desc_max)
+                break
+
+    cmd = ""
+    for key in _CMD_KEYS:
+        val = tool_input.get(key)
+        if isinstance(val, str) and val.strip():
+            cmd = _clip_detail(val, cmd_max)
+            break
+
+    if desc and cmd and desc == cmd:
+        return desc, ""
+    if not desc and not cmd:
+        return "", ""
+    if not desc:
+        # Command-only tool (Read path, Grep pattern): put it on line 1 as
+        # the description, leave line 2 empty so we do not repeat it.
+        return cmd, ""
+    return desc, cmd
+
+
 def tool_detail(tool_input: dict, max_len: int = 200) -> str:
-    """One short single-line snippet for the phone status banner / permission.
+    """One short single-line snippet for permission prompts / legacy callers.
 
     Prefers a human `description` when the tool provided one (typical for
     Bash), else the first non-empty key in `_DETAIL_KEYS`. Collapses
@@ -117,32 +186,8 @@ def tool_detail(tool_input: dict, max_len: int = 200) -> str:
     strip into many wraps; then middle-ellipsis so head + tail stay
     readable (path prefix and filename, command verb and last args).
     """
-    if not isinstance(tool_input, dict):
-        return ""
-    # Task tools: subject / status beats generic DETAIL_KEYS.
-    for key in ("subject", "content", "status", "taskId", "activeForm"):
-        val = tool_input.get(key)
-        if isinstance(val, str) and val.strip():
-            text = " ".join(val.split())
-            if len(text) > max_len:
-                text = text[: max_len - 1] + "…"
-            return text
-    todos = tool_input.get("todos")
-    if isinstance(todos, list) and todos:
-        return "%d todos" % len(todos)
-    for key in _DETAIL_KEYS:
-        val = tool_input.get(key)
-        if isinstance(val, str) and val.strip():
-            text = " ".join(val.split())
-            if len(text) <= max_len:
-                return text
-            if max_len < 3:
-                return text[:max_len]
-            keep = max_len - 1
-            head = keep // 2
-            tail = keep - head
-            return text[:head] + "…" + text[-tail:]
-    return ""
+    desc, cmd = tool_status_parts(tool_input, desc_max=max_len, cmd_max=max_len)
+    return desc or cmd
 
 
 def _task_status_norm(raw) -> str:
@@ -1081,8 +1126,12 @@ def _result_text(block: dict) -> str:
     return ""
 
 
-def _steps_of(obj: dict) -> list:
-    """Process records inside one transcript line, in content order."""
+def _steps_of(obj: dict, tool_meta: dict = None) -> list:
+    """Process records inside one transcript line, in content order.
+
+    `tool_meta` is an optional session-wide map tool_use_id → (name, path)
+    so a later tool_result can inherit the file's language for highlighting.
+    """
     if obj.get("isSidechain"):
         return []
     content = (obj.get("message") or {}).get("content")
@@ -1100,14 +1149,25 @@ def _steps_of(obj: dict) -> list:
             raw = b.get("input")
             name = b.get("name", "?")
             full = steps_mod.format_tool_use(name, raw)
+            lang = steps_mod.lang_for_tool_use(name, raw)
+            path = steps_mod.path_from_input(raw)
+            tid = b.get("id")
+            if tool_meta is not None and tid:
+                tool_meta[str(tid)] = (name, path)
             out.append(steps_mod.tool_use(
                 ref, ts, name,
-                tool_detail(raw if isinstance(raw, dict) else {}), full))
+                tool_detail(raw if isinstance(raw, dict) else {}), full,
+                lang=lang))
         elif kind == "tool_result":
             raw_text = _result_text(b)
+            body = steps_mod.format_tool_result(raw_text)
+            name, path = "", ""
+            tid = b.get("tool_use_id")
+            if tool_meta is not None and tid and str(tid) in tool_meta:
+                name, path = tool_meta[str(tid)]
+            lang = steps_mod.lang_for_tool_result(name, path, body)
             out.append(steps_mod.tool_result(
-                ref, ts, not bool(b.get("is_error")),
-                steps_mod.format_tool_result(raw_text)))
+                ref, ts, not bool(b.get("is_error")), body, lang=lang))
         elif kind == "thinking":
             out.append(steps_mod.thinking(ref, ts, b.get("thinking")))
     return out
@@ -1633,6 +1693,8 @@ class ClaudeStore:
         t0 = time.perf_counter()
         messages = []
         step_rows = []      # (record position, uuid, step) — only when asked
+        # tool_use_id → (name, path) so tool_result steps can pick a lang.
+        tool_meta = {} if steps else None
         # uuid -> parentUuid for EVERY record, not just the messages: the
         # chain threads through system / file-history-snapshot lines, so a
         # message's parent is usually not another message.
@@ -1652,7 +1714,7 @@ class ClaudeStore:
                 # A record can hold BOTH text and tool_use, so steps are read
                 # from every line, not only the ones _parse_line rejected.
                 if steps and isinstance(obj, dict):
-                    for st in _steps_of(obj):
+                    for st in _steps_of(obj, tool_meta):
                         step_rows.append((pos, obj.get("uuid", ""), st))
                 pos += 1
         # Computed before the filter: _active_branch replaces the list.
@@ -2511,10 +2573,13 @@ class ClaudeRunner:
                         else:
                             emit_claude_todos(job, str(sid or ""))
                         continue
-                    detail = tool_detail(tool_input if isinstance(tool_input, dict) else {})
-                    job.add_event("tool", name=name, detail=detail)
+                    desc, cmd = tool_status_parts(
+                        tool_input if isinstance(tool_input, dict) else {})
+                    # tool event detail = command (line 2); phase_detail =
+                    # description (line 1). active_status maps both through.
+                    job.add_event("tool", name=name, detail=cmd or desc)
                     job.set_phase(_PHASE_BY_TOOL.get(name, "tool"),
-                                  detail or name)
+                                  desc or cmd or name)
                 elif block.get("type") == "thinking":
                     job.set_phase("thinking", "")
 
