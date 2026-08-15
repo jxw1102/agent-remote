@@ -4292,7 +4292,13 @@ void ApiClient::onFinished(QNetworkReply *reply)
         }
         m_dropLocalDir = dropDownloadDir();
         QDir().mkpath(m_dropLocalDir);
-        const QString localName = safeLocalFileName(name);
+        // The daemon names what it actually served in X-Drop-Name — a folder
+        // arrives zipped as "<name>.zip" — so save under that, not under the
+        // entry name that was requested. Older daemons omit the header.
+        QString served = QFileInfo(QString::fromUtf8(
+                reply->rawHeader("X-Drop-Name"))).fileName().trimmed();
+        const QString localName =
+                safeLocalFileName(served.isEmpty() ? name : served);
         const QString dest = QDir(m_dropLocalDir).absoluteFilePath(localName);
         // Same name again replaces the previous download (no -1/-2 suffixes).
         if (QFile::exists(dest) && !QFile::remove(dest)) {
