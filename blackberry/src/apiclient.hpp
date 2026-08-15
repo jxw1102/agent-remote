@@ -565,6 +565,9 @@ Q_SIGNALS:
 private Q_SLOTS:
     void onFinished(QNetworkReply *reply);
     void onRenamePromptFinished(bb::system::SystemUiResult::Type result);
+    // Inbox download progress — a 50 MB zip over Wi-Fi is many seconds of
+    // otherwise-dead "Downloading..." text.
+    void onDropDownloadProgress(qint64 received, qint64 total);
     void pollJob();
     void pollTui();
     void onStatusFrame(const QByteArray &payload);
@@ -891,6 +894,7 @@ private:
     QSet<QString> m_shownStepRefs;
     qint64 m_stepsLiveAtMs;
     bool m_stepsLivePending;
+    qint64 m_dropProgressAtMs;
     void publishStepEdit(const QString &action, int index,
                          const QVariantMap &item);
     int m_stepEditRev;

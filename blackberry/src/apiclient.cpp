@@ -338,6 +338,7 @@ ApiClient::ApiClient(QObject *parent)
     , m_scrollAnchor(-1)
     , m_stepsLiveAtMs(0)
     , m_stepsLivePending(false)
+    , m_dropProgressAtMs(0)
 {
     s_modelApi = this;
     // Classic/Q20 = 720; Passport = 1440. Same insets as the proven Classic
@@ -2967,6 +2968,36 @@ void ApiClient::downloadDropFrom(int profileIndex, const QString &name)
                     .arg(QString::fromUtf8(QUrl::toPercentEncoding(clean))),
             "drop_dl");
     reply->setProperty("dropName", clean);
+    // Live progress on the status line — a big zip is many seconds of
+    // otherwise-dead "Downloading..." text.
+    m_dropProgressAtMs = 0;
+    QObject::connect(reply, SIGNAL(downloadProgress(qint64, qint64)),
+                     this, SLOT(onDropDownloadProgress(qint64, qint64)));
+}
+
+void ApiClient::onDropDownloadProgress(qint64 received, qint64 total)
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply *>(sender());
+    if (!reply || received <= 0)
+        return;
+    // Repainting the sheet on every network chunk is wasted work; a few
+    // updates per second read as live.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - m_dropProgressAtMs < 300 && received != total)
+        return;
+    m_dropProgressAtMs = now;
+    const QString name = reply->property("dropName").toString();
+    if (total > 0) {
+        const int pct = (int) (received * 100 / total);
+        m_dropStatus = tr("Downloading %1... %2 of %3 (%4%)")
+                .arg(name, formatBytes(received), formatBytes(total))
+                .arg(pct);
+    } else {
+        m_dropStatus = tr("Downloading %1... %2")
+                .arg(name, formatBytes(received));
+    }
+    m_dropRev++;
+    emit dropChanged();
 }
 
 void ApiClient::deleteDropFile(const QString &name)
