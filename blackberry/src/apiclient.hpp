@@ -883,6 +883,14 @@ private:
     QSet<QString> m_processViewSessions;
     void appendStepItems(QVariantList &out, const QVariantList &steps);
     void handleStepFull(QNetworkReply *reply, const QVariant &data);
+    // Live steps while the turn runs: the journal is the only place
+    // tool_use/tool_result live, so poll it (throttled) and append rows the
+    // transcript has not shown yet instead of waiting for the turn to end.
+    void maybeFetchLiveSteps();
+    void handleLiveSteps(QNetworkReply *reply, const QVariant &data);
+    QSet<QString> m_shownStepRefs;
+    qint64 m_stepsLiveAtMs;
+    bool m_stepsLivePending;
     void publishStepEdit(const QString &action, int index,
                          const QVariantMap &item);
     int m_stepEditRev;

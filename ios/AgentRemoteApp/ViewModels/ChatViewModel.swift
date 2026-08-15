@@ -79,6 +79,11 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
     private var answeredGateIds: Set<String> = []
     /// True while watching a turn we didn't start (events were skipped, not replayed).
     private var attachedMidTurn = false
+    /// Live process-view steps: refs already on screen, so mid-turn journal
+    /// pulls only append what is new.
+    private var shownStepRefs: Set<String> = []
+    private var liveStepsAt = Date.distantPast
+    private var liveStepsInFlight = false
 
     nonisolated var id: String { localId }
     var isBusy: Bool { phase == .running }
@@ -145,6 +150,31 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
         // Steps only arrive with ?detail=steps — refetch either way so toggling
         // off also drops them.
         if phase != .running { loadHistory() }
+    }
+
+    /// Mid-turn journal pull: append steps the transcript has not shown yet. A small tail
+    /// window is enough (only the running turn's messages grow steps; previews are capped
+    /// daemon-side), and the turn-end reload replaces everything with the canonical order.
+    private func maybeFetchLiveSteps() {
+        guard processView, !sessionId.isEmpty, !liveStepsInFlight,
+              Date().timeIntervalSince(liveStepsAt) > 1.2,
+              let agentClient = client.agentClient else { return }
+        liveStepsAt = Date()
+        liveStepsInFlight = true
+        let sid = sessionId
+        Task {
+            defer { liveStepsInFlight = false }
+            guard let response = try? await agentClient.messages(sessionId: sid, limit: 5, steps: true),
+                  sid == sessionId, processView else { return }
+            var fresh: [TimelineItem] = []
+            for message in response.messages {
+                for step in message.steps where !step.ref.isEmpty && !shownStepRefs.contains(step.ref) {
+                    shownStepRefs.insert(step.ref)
+                    fresh.append(.step(id: "step-\(step.ref)", step: step))
+                }
+            }
+            if !fresh.isEmpty { items.append(contentsOf: fresh) }
+        }
     }
 
     /// Expand/collapse one step. First expand of a truncated step fetches the full body —
@@ -617,6 +647,8 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
                         loaded.append(.step(id: "step-\(step.ref)", step: step))
                     }
                 }
+                // Re-seed the live-steps dedupe with what this fetch painted.
+                shownStepRefs = Set(response.messages.flatMap { $0.steps.map(\.ref) })
                 items = loaded
             } catch {
                 items = [.systemNotice(id: UUID().uuidString, text: "Couldn't load history: \(DaemonClient.describe(error))")]
@@ -683,6 +715,10 @@ final class ChatViewModel: ObservableObject, Identifiable, Hashable {
 
             switch job.status {
             case .starting, .running:
+                // Process view: tool_use/tool_result live in the journal, not
+                // this event stream — pull the tail (throttled) so they appear
+                // while the turn runs instead of all at once at the end.
+                maybeFetchLiveSteps()
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 continue
             case .done, .error, .stopped:

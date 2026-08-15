@@ -336,6 +336,8 @@ ApiClient::ApiClient(QObject *parent)
     , m_stepEditRev(0)
     , m_stepEditIndex(-1)
     , m_scrollAnchor(-1)
+    , m_stepsLiveAtMs(0)
+    , m_stepsLivePending(false)
 {
     s_modelApi = this;
     // Classic/Q20 = 720; Passport = 1440. Same insets as the proven Classic
@@ -3181,6 +3183,51 @@ void ApiClient::appendStepItems(QVariantList &out, const QVariantList &steps)
     }
 }
 
+void ApiClient::maybeFetchLiveSteps()
+{
+    if (!processView() || m_currentSessionId.isEmpty() || m_stepsLivePending)
+        return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - m_stepsLiveAtMs < 1200)  // web parity: ~1s minimum gap
+        return;
+    m_stepsLiveAtMs = now;
+    m_stepsLivePending = true;
+    // A small tail window is enough: only the running turn's messages grow
+    // steps, and previews are capped daemon-side.
+    QNetworkReply *reply = get(
+            QString("/api/sessions/%1/messages?limit=5&detail=steps")
+                    .arg(m_currentSessionId),
+            "steps_live");
+    reply->setProperty("sid", m_currentSessionId);
+}
+
+void ApiClient::handleLiveSteps(QNetworkReply *reply, const QVariant &data)
+{
+    if (reply->property("sid").toString() != m_currentSessionId
+            || !processView())
+        return;
+    QVariantList raw = data.toMap().value("messages").toList();
+    QVariantList fresh;
+    for (int i = 0; i < raw.size(); ++i) {
+        QVariantList steps = raw.at(i).toMap().value("steps").toList();
+        for (int j = 0; j < steps.size(); ++j) {
+            const QString ref = steps.at(j).toMap().value("ref").toString();
+            if (ref.isEmpty() || m_shownStepRefs.contains(ref))
+                continue;
+            m_shownStepRefs.insert(ref);
+            appendStepItems(fresh, QVariantList() << steps.at(j));
+        }
+    }
+    if (fresh.isEmpty())
+        return;
+    // New steps belong to the running turn: append at the end after the live
+    // text rows and keep the reader pinned there, like any live append. The
+    // turn-end refetch replaces everything with the canonical order.
+    for (int i = 0; i < fresh.size(); ++i)
+        m_messages.append(fresh.at(i));
+    bumpMessages(true);
+}
+
 void ApiClient::regenerateSessionTitle(int profileIndex, const QString &sessionId)
 {
     QString base = m_baseUrl, token = m_token;
@@ -3382,8 +3429,13 @@ void ApiClient::handleJobPoll(int httpStatus, const QVariant &data, bool parseOk
     // Status stream blip (reconnect / daemon restart): job left the active
     // list but is still running — keep polling, do not end as failure.
     if (status == QLatin1String("starting")
-            || status == QLatin1String("running"))
+            || status == QLatin1String("running")) {
+        // Process view: tool_use/tool_result live in the journal, not this
+        // event stream — pull the tail (throttled) so they appear while the
+        // turn runs instead of all at once at the end.
+        maybeFetchLiveSteps();
         return;
+    }
 
     // The daemon chains queued prompts: when a job finishes cleanly it
     // starts the next queued one and points at it. Follow the chain
@@ -3974,6 +4026,15 @@ void ApiClient::onFinished(QNetworkReply *reply)
         return;
     }
 
+    if (kind == "steps_live") {
+        // Mid-turn journal pull for process view; a miss just waits for the
+        // next poll tick (or the turn-end refetch).
+        m_stepsLivePending = false;
+        if (ok)
+            handleLiveSteps(reply, data);
+        return;
+    }
+
     if (kind == "continue") {
         const QString sid = reply->property("sid").toString();
         // m_awaitingJob is global, so clear it whichever session answered.
@@ -4472,6 +4533,14 @@ void ApiClient::handleMessages(QNetworkReply *reply, const QVariant &data)
         m_jobEndStatus.clear();
     } else {
         setTranscriptStatus(QString());
+    }
+    // Live-steps dedupe: what a full fetch painted is what mid-turn journal
+    // pulls must not append again.
+    m_shownStepRefs.clear();
+    for (int i = 0; i < m_messages.size(); ++i) {
+        QVariantMap it = m_messages.at(i).toMap();
+        if (it.value("kind").toString() == QLatin1String("step"))
+            m_shownStepRefs.insert(it.value("stepRef").toString());
     }
     reportLoadTiming(payload["timing"].toMap(), netMs, buildMs, raw.size());
 }
