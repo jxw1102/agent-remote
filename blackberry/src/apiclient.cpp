@@ -494,7 +494,7 @@ static void appendUsageBuckets(QVariantList *tagged,
             : (harness.left(1).toUpper() + harness.mid(1));
     const QString prefix = harnessLabel.isEmpty()
             ? QString()
-            : (harnessLabel + QLatin1String(" · "));
+            : (harnessLabel + QString::fromUtf8(" · "));
     for (int i = 0; i < buckets.size(); ++i) {
         QVariantMap b = buckets.at(i).toMap();
         QString title = b.value("title").toString();
@@ -506,9 +506,9 @@ static void appendUsageBuckets(QVariantList *tagged,
         b["account_id"] = accountId.isEmpty() ? account : accountId;
         QString source = harnessLabel.isEmpty() ? profileName : harnessLabel;
         if (!account.isEmpty())
-            source += QLatin1String(" · ") + account;
+            source += QString::fromUtf8(" · ") + account;
         else if (!profileName.isEmpty() && !harnessLabel.isEmpty())
-            source = profileName + QLatin1String(" · ") + harnessLabel;
+            source = profileName + QString::fromUtf8(" · ") + harnessLabel;
         b["source"] = source;
         b["accent"] = accent;
         b["host"] = profileName;
@@ -3710,12 +3710,12 @@ void ApiClient::onFinished(QNetworkReply *reply)
                         const QString other = b.value("host").toString();
                         if (!other.isEmpty() && !host.contains(other)) {
                             if (!host.isEmpty())
-                                host += QLatin1String(" · ");
+                                host += QString::fromUtf8(" · ");
                             host += other;
                         }
                         b["host"] = host;
                         // source already names seat; append hosts if multi.
-                        if (host.contains(QLatin1String(" · ")))
+                        if (host.contains(QString::fromUtf8(" · ")))
                             b["source"] = b.value("source").toString()
                                     + QLatin1String("  (") + host + QLatin1Char(')');
                         merged.insert(key, b);
@@ -3724,10 +3724,10 @@ void ApiClient::onFinished(QNetworkReply *reply)
                         const QString other = b.value("host").toString();
                         if (!other.isEmpty() && !host.contains(other)) {
                             if (!host.isEmpty())
-                                host += QLatin1String(" · ");
+                                host += QString::fromUtf8(" · ");
                             host += other;
                             prev["host"] = host;
-                            if (host.contains(QLatin1String(" · ")))
+                            if (host.contains(QString::fromUtf8(" · ")))
                                 prev["source"] = prev.value("source").toString()
                                         + QLatin1String("  (") + host + QLatin1Char(')');
                             merged.insert(key, prev);
@@ -3776,7 +3776,7 @@ void ApiClient::onFinished(QNetworkReply *reply)
                     const QString label = harness.isEmpty()
                             ? account
                             : (harness.left(1).toUpper() + harness.mid(1)
-                               + QLatin1String(" · ") + account);
+                               + QString::fromUtf8(" · ") + account);
                     b["source"] = label;
                 }
                 if (!b.value("provider").toString().isEmpty())

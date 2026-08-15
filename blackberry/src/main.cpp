@@ -4,6 +4,7 @@
 #include <bb/cascades/VisualStyle>
 
 #include <QColor>
+#include <QTextCodec>
 
 #include "applicationui.hpp"
 #include "brand.hpp"
@@ -18,6 +19,14 @@ Q_DECL_EXPORT int main(int argc, char **argv)
     CrashGuard::install();
 
     Application app(argc, argv);
+
+    // The sources are UTF-8, but Qt 4.8 decodes plain char* literals and
+    // tr() through Latin-1 by default — a source "·" (bytes C2 B7) rendered
+    // as "Â·" on the status banner and the Usage sheet. Declare reality once
+    // instead of wrapping every literal. (Qt 5 made this the default.)
+    QTextCodec *utf8 = QTextCodec::codecForName("UTF-8");
+    QTextCodec::setCodecForCStrings(utf8);
+    QTextCodec::setCodecForTr(utf8);
 
     // Belt and suspenders with CASCADES_THEME=dark in the bar-descriptor:
     // force dark chrome at process start (GrokRemote pattern).
