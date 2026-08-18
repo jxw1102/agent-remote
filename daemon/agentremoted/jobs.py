@@ -717,6 +717,13 @@ class JobManager:
             _signal_group(proc, signal.SIGTERM)
             # Escalate if the CLI ignores SIGTERM (it may be mid tool-call).
             threading.Thread(target=_ensure_dead, args=(proc,), daemon=True).start()
+        # HTTP-native runners (DeepSeek / dsh web) have no child process.
+        canceller = getattr(self.runner, "cancel_job", None)
+        if callable(canceller):
+            try:
+                canceller(job)
+            except Exception:
+                log.exception("cancel_job failed for %s", job_id)
         return True
 
     def resolve_permission(self, job_id: str, request_id: str, allow: bool,

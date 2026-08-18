@@ -212,6 +212,12 @@ DEFAULTS = {
     "codex_sandbox": "danger-full-access",
     # Extra flags for every `codex exec` (whitespace-split).
     "codex_exec_flags": "",
+
+    # ---- deepseek harness (dsh web on localhost) ------------------------
+    # The official UI is `npx @deepseek-ai/dsh web`. Agent Remote talks to
+    # that process over loopback HTTP — never expose :3080 to the phone.
+    "dsh_url": "http://127.0.0.1:3080",
+    "dsh_home": str(Path.home() / ".dsh"),
 }
 
 

@@ -14,6 +14,8 @@ const PROVIDERS = {
   claude: { label: "Claude", accent: "#d97757", heading: "#e08a5c", inline: "#e0a183" },
   grok: { label: "Grok", accent: "#00d4ff", heading: "#b9a2f0", inline: "#67e8f9" },
   codex: { label: "Codex", accent: "#10a37f", heading: "#3dd68c", inline: "#6ee7b7" },
+  deepseek: { label: "DeepSeek", accent: "#4d6bfe", heading: "#7b93ff", inline: "#93a8ff" },
+  dsh: { label: "DeepSeek", accent: "#4d6bfe", heading: "#7b93ff", inline: "#93a8ff" },
 };
 const NEUTRAL = { label: "Agent", accent: "#9aa4b2", heading: "#9aa4b2", inline: "#9aa4b2" };
 // Multi-harness host chrome (one profile, Claude+Grok+Codex) — purple, not gray.
@@ -3613,7 +3615,7 @@ function normalizeProfile(p) {
   let url = String(p.baseUrl || "").trim().replace(/\/+$/, "");
   if (url && !/^https?:\/\//i.test(url)) url = "http://" + url;
   // Strip accidental /claude|/grok|/codex suffixes — multi lives at the root.
-  url = url.replace(/\/(claude|grok|codex)$/i, "");
+  url = url.replace(/\/(claude|grok|codex|deepseek|dsh)$/i, "");
   return {
     id: p.id || uuid(),
     name: p.name || url.replace(/^https?:\/\//, ""),

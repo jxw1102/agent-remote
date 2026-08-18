@@ -1,4 +1,4 @@
-"""Entry point: python3 -m agentremoted [--provider claude|grok|codex]"""
+"""Entry point: python3 -m agentremoted [--provider claude|grok|codex|deepseek]"""
 
 import argparse
 import logging
@@ -16,9 +16,10 @@ def main():
     parser = argparse.ArgumentParser(
         prog="agentremoted",
         description="Serve AI agent CLI sessions (Claude Code, Grok Build, "
-                    "Codex) to Agent Remote clients.",
+                    "Codex, DeepSeek Harness) to Agent Remote clients.",
     )
-    parser.add_argument("--provider", choices=("claude", "grok", "codex"),
+    parser.add_argument("--provider",
+                        choices=("claude", "grok", "codex", "deepseek"),
                         help="force single-provider mode (overrides config)")
     parser.add_argument("--port", type=int, help="override listen port")
     parser.add_argument("--bind", help="override bind address")

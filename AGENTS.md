@@ -1,7 +1,7 @@
 # Agent notes — Agent Remote
 
 How to **launch the daemon** (Mac launchd / Linux systemd / foreground):
-[README.md](README.md#quick-start--run-the-daemon) and
+[README.md](README.md#get-started) and
 [daemon/README.md](daemon/README.md#launch-the-daemon).
 
 ## Client parity (required)
@@ -16,6 +16,9 @@ Whenever you change a **client-side** feature, behaviour, or API contract, consi
 | iOS | `ios/` (SwiftUI + AgentRemoteKit) |
 | BlackBerry 10 | `blackberry/` (Cascades / QML + C++) |
 | LILYGO T-LoRa Pager | `esp32/` (ESP32-S3 firmware) |
+
+Harnesses the daemon can front: Claude Code, Grok, Codex, and DeepSeek
+Harness (`dsh web` on localhost — no TUI; the daemon is a client of `/api`).
 
 Examples of work that almost always spans clients:
 

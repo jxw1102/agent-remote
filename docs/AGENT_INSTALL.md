@@ -1,8 +1,13 @@
 # Agent install brief — Agent Remote daemon
 
-**Give this whole file to your coding agent** (Claude Code, Codex, Grok, Cursor, …) with a short instruction such as:
+**Give this brief to your coding agent** (Claude Code, Codex, Grok, Cursor, …).
+The human does **not** have a clone of this repo. Fetch this file from:
 
-> Follow `docs/AGENT_INSTALL.md` and install the Agent Remote daemon on this machine. When done, print the Base URL and token so I can add them on my phone.
+https://raw.githubusercontent.com/jxw1102/agent-remote/main/docs/AGENT_INSTALL.md
+
+Instruction they were told to paste:
+
+> Follow https://raw.githubusercontent.com/jxw1102/agent-remote/main/docs/AGENT_INSTALL.md and install the Agent Remote daemon on this machine. Print the Base URL and token when done.
 
 ---
 
@@ -27,13 +32,7 @@ The daemon does **not** sell LLM tokens. It runs the host’s existing CLIs. The
 
 ## Preferred install (one command)
 
-From a clone of this repo:
-
-```bash
-./install.sh
-```
-
-Or without cloning:
+Do **not** clone the repo. Run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.sh | bash
@@ -56,7 +55,7 @@ What success looks like:
 Foreground (debug):
 
 ```bash
-./install.sh --foreground
+curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.sh | bash -s -- --foreground
 ```
 
 ## Manual fallback
@@ -97,8 +96,6 @@ Do not port-forward raw 8473 to the world.
 
 ```bash
 # After daemon is healthy:
-./daemon/scripts/tunnel.sh
-# or:
 cloudflared tunnel --url http://127.0.0.1:8473
 ```
 
@@ -120,6 +117,29 @@ Smoke path: [getting-started.md](getting-started.md)
 
 Repeat install on each machine (Mac, VPS, …). Each has its own URL + token. Clients add **one profile per host**; sessions merge into one list.
 
+## Update (existing install)
+
+If the human asked to **update** to a new release, do the same as first install.
+Do **not** clone. Do **not** wipe `~/.agentremoted/token` or `config.json`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.sh | bash
+```
+
+The script already:
+
+- Overwrites daemon code under `~/.local/share/agent-remote`
+- Merges (does not wipe) `~/.agentremoted/config.json`
+- Leaves the existing token in place
+- Restarts launchd (macOS) or user systemd (Linux)
+
+Afterward, `GET /api/ping` `"version"` should match the latest
+[release](https://github.com/jxw1102/agent-remote/releases). Print URL,
+token, and the **new version** for the human.
+
+Native apps (Android / iOS / BlackBerry) are separate: the human installs a
+new APK / BAR from Releases. The hosted web client needs no update.
+
 ## Completion report (print for the human)
 
 When finished, print exactly:
@@ -133,7 +153,7 @@ Agent Remote install complete
   Providers: <list from /api/ping>
   Auth:     <summary from /api/ping auth field>
   Service:  launchd | systemd user | foreground
-  Remote:   run daemon/scripts/tunnel.sh for phone HTTPS URL
+  Remote:   cloudflared tunnel --url http://127.0.0.1:8473 for phone HTTPS URL
 ```
 
 ## Troubleshooting

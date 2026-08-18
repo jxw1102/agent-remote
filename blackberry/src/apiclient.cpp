@@ -182,6 +182,8 @@ const ProviderPalette GROK_PALETTE =
     {"#00d4ff", "#0d1a1f", "#00d4ff", "#17171c", "#c678dd", "#9a8fb0", "#67e8f9"};
 const ProviderPalette CODEX_PALETTE =
     {"#10a37f", "#0d1f1a", "#3dd68c", "#141a17", "#3dd68c", "#7a9a8a", "#6ee7b7"};
+const ProviderPalette DEEPSEEK_PALETTE =
+    {"#4d6bfe", "#12162a", "#7b93ff", "#14161f", "#7b93ff", "#8a92e0", "#93a8ff"};
 
 const ProviderPalette *palForProvider(const QString &provider)
 {
@@ -191,6 +193,9 @@ const ProviderPalette *palForProvider(const QString &provider)
         return &GROK_PALETTE;
     if (provider == QLatin1String("codex"))
         return &CODEX_PALETTE;
+    if (provider == QLatin1String("deepseek")
+            || provider == QLatin1String("dsh"))
+        return &DEEPSEEK_PALETTE;
     return 0; // unknown -> brand.hpp neutral fallbacks
 }
 

@@ -71,6 +71,9 @@ if has_bin("grok", "~/.grok/bin/grok", "~/.local/bin/grok"):
     providers.append("grok")
 if has_bin("codex", "~/.local/bin/codex"):
     providers.append("codex")
+# DeepSeek Harness: official UI is `dsh web` on loopback, not a TUI binary.
+if has_bin("dsh") or pathlib.Path(os.path.expanduser("~/.dsh")).is_dir():
+    providers.append("deepseek")
 if not providers:
     # Nothing on PATH yet — still write a multi-shaped config so adding a
     # CLI later only needs a restart, not a re-shape of the file.

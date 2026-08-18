@@ -20,5 +20,8 @@
   "codex_exec_flags": "",
   "codex_env": {},
 
+  "dsh_url": "http://127.0.0.1:3080",
+  "dsh_home": "~/.dsh",
+
   "turn_timeout": 1800
 }

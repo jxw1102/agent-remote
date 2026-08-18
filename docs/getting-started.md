@@ -25,15 +25,20 @@ claude   # or: codex / grok
 **Option A — one script**
 
 ```bash
-# from a clone of agent-remote / bb10-remote:
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.sh | bash
 ```
 
 **Option B — ask your coding agent**
 
-Copy [AGENT_INSTALL.md](AGENT_INSTALL.md) into the chat and say:
+Paste this (no clone needed):
 
-> Install the Agent Remote daemon using this brief. Print Base URL and token when done.
+```text
+Follow https://raw.githubusercontent.com/jxw1102/agent-remote/main/docs/AGENT_INSTALL.md
+and install the Agent Remote daemon on this machine.
+Print the Base URL and token when done.
+```
+
+Brief: https://github.com/jxw1102/agent-remote/blob/main/docs/AGENT_INSTALL.md
 
 **Option C — manual**
 
@@ -105,7 +110,42 @@ You should see live status, permissions / questions when the harness asks, and t
 
 ## 6. Second machine (optional)
 
-Install the daemon on a VPS the same way (`./install.sh` or `./deploy/deploy.sh user@vps`). Add a **second profile** on the phone. Both hosts’ sessions appear in one list.
+Install the daemon on a VPS the same way (the curl one-liner, or `./deploy/deploy.sh user@vps` if you already have the repo). Add a **second profile** on the phone. Both hosts’ sessions appear in one list.
+
+## 7. Update when a new version ships
+
+Releases: https://github.com/jxw1102/agent-remote/releases
+
+**Daemon** — same command as install, on every machine that runs it. No clone.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.sh | bash
+```
+
+Your token and `~/.agentremoted/config.json` stay put. The script replaces
+the daemon code and restarts launchd / systemd.
+
+Check the version:
+
+```bash
+curl -s http://127.0.0.1:8473/api/ping | python3 -m json.tool
+```
+
+Look at `"version"`. Or open a client and Test connection.
+
+| Piece | How to update |
+| --- | --- |
+| Daemon | Re-run the curl above (every host) |
+| Hosted web client | Nothing — it is already the latest |
+| Android / iOS / BlackBerry | Install the new APK / BAR from [Releases](https://github.com/jxw1102/agent-remote/releases) |
+
+Or paste this to your coding agent:
+
+```text
+Follow https://raw.githubusercontent.com/jxw1102/agent-remote/main/docs/AGENT_INSTALL.md
+and update the Agent Remote daemon on this machine to the latest release.
+Keep the existing token and config. Print the Base URL, token, and new version when done.
+```
 
 ## Billing reminder
 
@@ -124,3 +164,4 @@ If Claude turns suddenly cost API rates, check for `ANTHROPIC_API_KEY` overridin
 - [ ] Tunnel URL (or LAN/Tailscale) on the phone  
 - [ ] Test connection succeeds  
 - [ ] New session + one prompt returns  
+- [ ] Later: same curl updates the daemon; native apps from Releases  

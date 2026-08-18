@@ -19,6 +19,10 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.8.0** DeepSeek Harness (`dsh web`) as a fourth provider: the daemon is a
+localhost client of `http://127.0.0.1:3080/api` (list / history / prompt /
+cancel / models). Add `"deepseek"` to `providers`. Keep `dsh web` running on
+the host; do not expose :3080. No TUI / Live TUI.
 **2.7.0** session share: `POST /api/sessions/<id>/share` mints a 7-day
 read-only token; `GET /share/<token>` is a hosted transcript viewer (same
 look as the web client) and `GET /api/share/<token>` returns that session
@@ -65,6 +69,7 @@ state tags on session rows, session rename / retitle, and `"focus": true` on
 | `claude` | `~/.claude/projects/**/*.jsonl` | `claude` (headless or interactive TUI) |
 | `grok`   | `~/.grok/sessions/<group>/<id>/` | `grok` (headless or interactive TUI) |
 | `codex`  | `~/.codex` state / rollouts | `codex exec` / interactive TUI |
+| `deepseek` | `dsh web` `/api` on localhost | `session.prompt` / `session.cancel` |
 
 Everything CLI-specific lives in `agentremoted/providers/`. Queue, stop,
 permission bridge, and status streams are shared.
@@ -199,7 +204,7 @@ sudo systemctl enable --now agentremoted
 - `GET /api/ping` → `multi: true` when more than one provider, plus
   `providers` and per-harness `provider_details`
 - Sessions merged; each row has `provider`
-- `POST /api/sessions/new` requires `"provider": "claude"|"grok"|"codex"`
+- `POST /api/sessions/new` requires `"provider": "claude"|"grok"|"codex"|"deepseek"`
 
 Path mounts (`/claude/…`, `/grok/…`) still work. `/internal/permission` and
 `/internal/hook` stay unprefixed (MCP / TUI).
