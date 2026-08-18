@@ -46,6 +46,12 @@ data class TranscriptItem(
     val steps: List<StepDto> = emptyList(),
 )
 
+data class ShareUi(
+    val busy: Boolean = false,
+    val url: String = "",
+    val error: String? = null,
+)
+
 data class TranscriptUi(
     val items: List<TranscriptItem> = emptyList(),
     val loading: Boolean = false,
@@ -84,6 +90,9 @@ class TranscriptViewModel(
 
     private val _ui = MutableStateFlow(TranscriptUi(loading = true))
     val ui: StateFlow<TranscriptUi> = _ui.asStateFlow()
+
+    private val _share = MutableStateFlow(ShareUi())
+    val share: StateFlow<ShareUi> = _share.asStateFlow()
 
     private val _session = MutableStateFlow<SessionDto?>(null)
     val session: StateFlow<SessionDto?> = _session.asStateFlow()
@@ -905,6 +914,26 @@ class TranscriptViewModel(
      * (conversation only — host file changes stay), so the UI must confirm
      * before calling this.
      */
+    fun shareSession() {
+        val profile = profile.value
+        if (profile == null || !profile.share) {
+            _share.value = ShareUi(error = "This daemon is too old to share sessions")
+            return
+        }
+        if (_share.value.busy) return
+        viewModelScope.launch {
+            _share.value = ShareUi(busy = true)
+            repo.shareSession(_ref.value).fold(
+                onSuccess = { _share.value = ShareUi(url = it) },
+                onFailure = { _share.value = ShareUi(error = repo.reason(it)) },
+            )
+        }
+    }
+
+    fun dismissShare() {
+        _share.value = ShareUi()
+    }
+
     fun rewindTo(itemId: String) {
         rewindBlockedReason()?.let {
             setStatus(it)

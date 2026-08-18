@@ -14,6 +14,7 @@ LoRa is left powered down; this build is an Agent Remote remote, not a mesh node
 | **Network** | Wi‑Fi STA, NVS-stored SSID/password, HTTP(S) to daemon |
 | **Chime** | **Essential** — Status / Done / Error / Attention (same pitches as BB10/Android), I2S + optional DRV2605 haptic |
 | **Agent** | Session list, compose/send, new session, status poll + auto-chime |
+| **Share** | Not on device (no URL generation). A share link minted on web/Android/BB10 still opens in a browser. |
 
 ## Hardware
 

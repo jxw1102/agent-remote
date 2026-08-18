@@ -15,6 +15,7 @@ import com.bb10d.remote.data.SearchDto
 import com.bb10d.remote.data.StepTextDto
 import com.bb10d.remote.data.SessionDto
 import com.bb10d.remote.data.SessionsDto
+import com.bb10d.remote.data.ShareDto
 import com.bb10d.remote.data.ShellResultDto
 import com.bb10d.remote.data.TitleDto
 import com.bb10d.remote.data.TuiFrameDto
@@ -345,6 +346,13 @@ class DaemonClient(
             .post(jsonBody(buildJsonObject {})).build(),
         TitleDto.serializer(),
         timeoutSeconds = 60,
+    )
+
+    /** Mint a 7-day read-only share URL hosted by this daemon. */
+    suspend fun shareSession(sessionId: String): ShareDto = call(
+        request(url("api/sessions/$sessionId/share"))
+            .post(jsonBody(buildJsonObject {})).build(),
+        ShareDto.serializer(),
     )
 
     /** offset < 0 asks for the tail, which is what a phone wants first. */

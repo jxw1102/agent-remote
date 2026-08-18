@@ -1,5 +1,6 @@
 package com.bb10d.remote.ui.screens
 
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -40,6 +41,7 @@ import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Tag
@@ -171,6 +173,7 @@ private fun TranscriptScreenBody(
     val attachments by vm.attachments.collectAsStateWithLifecycle()
     val processView by vm.processView.collectAsStateWithLifecycle()
     val openSteps by vm.openSteps.collectAsStateWithLifecycle()
+    val share by vm.share.collectAsStateWithLifecycle()
     var menuOpen by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showOptions by remember { mutableStateOf(false) }
@@ -321,6 +324,17 @@ private fun TranscriptScreenBody(
                                         vm.setProcessView(!processView)
                                     },
                                 )
+                                if (profile?.share == true) {
+                                    DropdownMenuItem(
+                                        text = { Text("Share link") },
+                                        leadingIcon = { Icon(Icons.Outlined.Share, null) },
+                                        enabled = ref.sessionId.isNotEmpty() && !share.busy,
+                                        onClick = {
+                                            menuOpen = false
+                                            vm.shareSession()
+                                        },
+                                    )
+                                }
                                 DropdownMenuItem(
                                     text = { Text("Copy transcript") },
                                     leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
@@ -548,6 +562,59 @@ private fun TranscriptScreenBody(
             },
             dismissButton = {
                 TextButton(onClick = { confirmRewind = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (share.busy || share.url.isNotEmpty() || share.error != null) {
+        AlertDialog(
+            onDismissRequest = { vm.dismissShare() },
+            title = { Text("Share session") },
+            text = {
+                Column {
+                    when {
+                        share.busy -> Text("Creating a read-only link…")
+                        share.error != null -> Text(share.error!!)
+                        else -> {
+                            Text(
+                                "Anyone with this link can read the transcript for 7 days. " +
+                                    "They cannot send messages or see other sessions.",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                share.url,
+                                style = MonoStyle,
+                                color = pal.dim,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                if (share.url.isNotEmpty()) {
+                    TextButton(onClick = {
+                        clipboard.copy(share.url)
+                    }) { Text("Copy") }
+                }
+            },
+            dismissButton = {
+                Row {
+                    if (share.url.isNotEmpty()) {
+                        TextButton(onClick = {
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, share.url)
+                                putExtra(
+                                    Intent.EXTRA_SUBJECT,
+                                    session?.title?.ifBlank { null } ?: "Shared session",
+                                )
+                            }
+                            context.startActivity(Intent.createChooser(send, "Share session"))
+                        }) { Text("Share") }
+                    }
+                    TextButton(onClick = { vm.dismissShare() }) { Text("Close") }
+                }
             },
         )
     }

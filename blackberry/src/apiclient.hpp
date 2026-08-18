@@ -172,6 +172,10 @@ class ApiClient : public QObject
     // through the daemon. A filter over the same list, not a second layout.
     Q_PROPERTY(bool focusMode READ focusMode WRITE setFocusMode NOTIFY settingsChanged)
     Q_PROPERTY(bool capFocus READ capFocus NOTIFY capsChanged)
+    // Session share (agentremoted ≥ 2.7): mint a 7-day read-only URL.
+    Q_PROPERTY(bool capShare READ capShare NOTIFY capsChanged)
+    Q_PROPERTY(QString shareUrl READ shareUrl NOTIFY shareChanged)
+    Q_PROPERTY(QString shareStatus READ shareStatus NOTIFY shareChanged)
     // How many listed rows are in Focus. The drag-down menu shows it so you
     // can tell whether switching is worth it without switching first.
     Q_PROPERTY(int focusCount READ focusCount NOTIFY sessionsChanged)
@@ -314,6 +318,9 @@ public:
     // Focus: mode is a local preference, capability comes from ping.
     bool focusMode() const { return m_focusMode; }
     bool capFocus() const { return m_capFocus; }
+    bool capShare() const { return m_capShare; }
+    QString shareUrl() const { return m_shareUrl; }
+    QString shareStatus() const { return m_shareStatus; }
     int focusCount() const;
     bool ledCues() const { return m_ledCues; }
 
@@ -515,6 +522,8 @@ public:
     Q_INVOKABLE void promptRenameSession(int profileIndex,
                                          const QString &sessionId,
                                          const QString &currentTitle);
+    // Mint a 7-day read-only URL for the OPEN session and copy it.
+    Q_INVOKABLE void shareCurrentSession();
 
     // ---- Process view ----
     bool processView() const;
@@ -537,6 +546,7 @@ Q_SIGNALS:
     void settingsChanged();
     void profilesChanged();
     void capsChanged();
+    void shareChanged();
     void rewindConfirmChanged();
     void usageChanged();
     void jobTickerChanged();
@@ -772,6 +782,9 @@ private:
     bool m_soundCues;
     bool m_focusMode;
     bool m_capFocus;
+    bool m_capShare;
+    QString m_shareUrl;
+    QString m_shareStatus;
     bool m_ledCues;
 
     int m_pingState;

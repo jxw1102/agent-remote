@@ -430,6 +430,7 @@ private fun capsSummary(ok: ProfilesViewModel.TestState.Ok): String {
         if (ok.caps.canSetEffort) add("effort")
         if (ok.caps.rewind) add("rewind")
         if (ok.caps.canShowUsage) add("usage")
+        if (ok.caps.share) add("share")
     }
     return if (bits.isEmpty()) "basic" else bits.joinToString(", ")
 }

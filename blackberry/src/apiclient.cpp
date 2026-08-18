@@ -394,6 +394,7 @@ ApiClient::ApiClient(QObject *parent)
     // Focus mode is a view preference; capFocus comes from /api/ping.
     m_focusMode = settings.value("focusMode", false).toBool();
     m_capFocus = false;
+    m_capShare = false;
     m_ledCues = settings.value("ledCues", true).toBool();
     m_chime->setSoundEnabled(m_soundCues);
     m_chime->setLedEnabled(m_ledCues);
@@ -3062,6 +3063,23 @@ void ApiClient::onRenamePromptFinished(bb::system::SystemUiResult::Type result)
                     m_renamePrompt->inputFieldTextEntry());
 }
 
+void ApiClient::shareCurrentSession()
+{
+    if (m_currentSessionId.isEmpty() || !m_capShare) {
+        m_shareStatus = m_capShare
+                ? tr("Open a session first")
+                : tr("This daemon is too old to share sessions");
+        emit shareChanged();
+        return;
+    }
+    m_shareUrl.clear();
+    m_shareStatus = tr("Creating link...");
+    emit shareChanged();
+    post(QString("/api/sessions/%1/share")
+             .arg(QString::fromUtf8(QUrl::toPercentEncoding(m_currentSessionId))),
+         QVariantMap(), QLatin1String("share"));
+}
+
 // ---------------------------------------------------------- process view
 
 bool ApiClient::processView() const
@@ -3609,6 +3627,11 @@ void ApiClient::onFinished(QNetworkReply *reply)
                 m_capFocus = focus;
                 emit capsChanged();
             }
+            const bool share = map.value("share", QVariant(false)).toBool();
+            if (share != m_capShare) {
+                m_capShare = share;
+                emit capsChanged();
+            }
             QStringList commands;
             QVariantList rawCommands = map["slash_commands"].toList();
             for (int i = 0; i < rawCommands.size(); ++i)
@@ -3992,6 +4015,25 @@ void ApiClient::onFinished(QNetworkReply *reply)
             return;
         }
         refreshSessions();
+        return;
+    }
+    if (kind == "share") {
+        if (!ok) {
+            m_shareUrl.clear();
+            m_shareStatus = httpErrorText(httpStatus, data, parseOk, networkError);
+            emit shareChanged();
+            return;
+        }
+        const QVariantMap map = data.toMap();
+        QString path = map.value("path").toString();
+        if (path.isEmpty() && !map.value("token").toString().isEmpty())
+            path = QString("/share/%1").arg(map.value("token").toString());
+        m_shareUrl = path.isEmpty() ? map.value("url").toString()
+                                    : (m_baseUrl + path);
+        m_shareStatus = tr("Link expires in 7 days. Copied to clipboard.");
+        emit shareChanged();
+        if (!m_shareUrl.isEmpty())
+            copyToClipboard(m_shareUrl);
         return;
     }
     if (kind == "sessions" || kind == "search") {

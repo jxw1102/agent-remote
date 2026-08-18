@@ -80,7 +80,19 @@ _PANEL_TIMEOUT_S = 8.0    # /command with no output = UI panel; Esc closes it
 # turn waiting on a message claude never saw. Confirm the submit against the
 # transcript and re-press Enter this many times before giving up on confirming.
 _SUBMIT_CONFIRM_S = 3.0
-_SUBMIT_RETRIES = 2
+_SUBMIT_RETRIES = 3
+
+# claude ≥2.1.232 ships Agent View: ← on an empty prompt (one Live TUI tap
+# from the phone) moves the conversation to the background. The pane keeps
+# painting the conversation and a pasted prompt still renders in the input
+# box, but Enter belongs to the fleet layer and never submits — retries
+# included. These pane markers identify the fleet *list* screen, where
+# Escape returns to the conversation; the backgrounded pseudo-conversation
+# shows no marker at all and only a printable character refocuses it (and
+# replaces the draft) — see _foreground_and_resend.
+_AGENT_VIEW_MARKERS = ("moved to the background",
+                       "describe a task for a new session",
+                       "esc returns to it")
 
 # Crash watchdog. A live TUI always keeps its input box (❯), footer (⏵⏵) or
 # busy spinner on the bottom lines; a pane showing none of them (a node
@@ -555,14 +567,19 @@ class InteractiveManager:
             from .. import accounts as _accounts
             body = (
                 "ulimit -n 65536 2>/dev/null; "
-                "export AGENTREMOTE_HOOK_URL=%s; exec %s"
+                "export AGENTREMOTE_HOOK_URL=%s; "
+                "export CLAUDE_CODE_DISABLE_AGENT_VIEW=1; exec %s"
                 % (shlex.quote(self._hook_url(tui.name)),
                    " ".join(shlex.quote(p) for p in parts))
             )
             shell_cmd = _accounts.isolate_shell_line(body, tui.isolate_root)
         else:
+            # DISABLE_AGENT_VIEW: a stray ← (one Live TUI tap on an idle
+            # prompt) must not move the conversation to the background,
+            # where pasted prompts render but Enter never submits.
             shell_cmd = (
-                "ulimit -n 65536 2>/dev/null; AGENTREMOTE_HOOK_URL=%s exec %s"
+                "ulimit -n 65536 2>/dev/null; AGENTREMOTE_HOOK_URL=%s "
+                "CLAUDE_CODE_DISABLE_AGENT_VIEW=1 exec %s"
                 % (shlex.quote(self._hook_url(tui.name)),
                    " ".join(shlex.quote(p) for p in parts))
             )
@@ -819,42 +836,130 @@ class InteractiveManager:
             return -1
         return n
 
+    def _input_box_text(self, name: str) -> str:
+        """Text sitting in the TUI's input box, whitespace-collapsed.
+
+        Submitted history lines also start with ❯, so only the LAST one
+        counts; a long prompt wraps onto continuation lines that run until
+        the box's bottom border (or the footer)."""
+        lines = self._pane_text(name).splitlines()
+        start = -1
+        for i, l in enumerate(lines):
+            if l.lstrip().startswith("❯"):
+                start = i
+        if start < 0:
+            return ""
+        box = [lines[start].lstrip()[1:]]
+        for l in lines[start + 1:]:
+            s = l.strip()
+            if not s:
+                continue
+            if set(s) == {"─"} or "⏵⏵" in s:
+                break
+            box.append(s)
+        return " ".join(" ".join(box).split())
+
+    def _prompt_in_box(self, name: str, prompt: str) -> bool:
+        """Is (the head of) this prompt still sitting in the input box?"""
+        head = " ".join(prompt.lstrip("!").split())[:80].strip()
+        if not head:
+            return False
+        return head in self._input_box_text(name)
+
     def _submit(self, tui: _Tui, prompt: str) -> str:
         """Send a message and make sure the TUI really took it.
 
         A pasted prompt occasionally sits in the input box with the Enter
         lost, leaving the turn waiting on a message claude never saw, so
-        confirm against the transcript and press Enter again if needed.
-        Pressing Enter on an already-empty box is a no-op, so a retry cannot
-        duplicate a message that did land."""
+        confirm and press Enter again if needed. Pressing Enter on an
+        already-empty box is a no-op, so a retry cannot duplicate a message
+        that did land."""
         before = self._transcript_submits(tui.transcript)
         err = self._send_prompt(tui, prompt)
-        if err or before < 0:
+        if err:
             return err
-        self._confirm_submit(tui, before)
+        self._confirm_submit(tui, before, prompt)
         return ""
 
-    def _confirm_submit(self, tui: _Tui, before: int):
-        """Poll for proof the input was accepted, re-pressing Enter if not."""
+    def _confirm_submit(self, tui: _Tui, before: int, prompt: str = ""):
+        """Poll for proof the input was accepted, recovering if it wasn't.
+
+        Proof is a new user line in the transcript — or, when there is no
+        transcript to read yet (a session's very first prompt writes the
+        file), the prompt leaving the input box. A prompt still sitting in
+        the box gets one plain Enter (the key can outrun the paste), then
+        the Agent View recovery: a backgrounded conversation renders pasted
+        text but its Enter is a fleet key and never submits (≥2.1.232)."""
         for attempt in range(_SUBMIT_RETRIES + 1):
             end = time.time() + _SUBMIT_CONFIRM_S
             while time.time() < end:
-                if self._transcript_submits(tui.transcript) > before:
-                    return ""
+                if (before >= 0
+                        and self._transcript_submits(tui.transcript) > before):
+                    return
+                if (before < 0 and prompt
+                        and not self._prompt_in_box(tui.name, prompt)):
+                    return
                 time.sleep(_POLL_S)
             if attempt >= _SUBMIT_RETRIES:
                 break
-            log.warning("TUI %s: no submit after %.0fs, pressing Enter again",
-                        tui.name, _SUBMIT_CONFIRM_S)
-            try:
-                self._tmux("send-keys", "-t", tui.name, "Enter")
-            except (OSError, subprocess.TimeoutExpired) as e:
-                log.warning("TUI %s: retry keypress failed: %s", tui.name, e)
-                return
+            if prompt and not self._prompt_in_box(tui.name, prompt):
+                # Text left the box but no user line yet: a busy TUI queues
+                # the message and writes it later. Keep waiting, no re-keying.
+                continue
+            if attempt == 0:
+                log.warning("TUI %s: no submit after %.0fs, pressing Enter "
+                            "again", tui.name, _SUBMIT_CONFIRM_S)
+                try:
+                    self._tmux("send-keys", "-t", tui.name, "Enter")
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    log.warning("TUI %s: retry keypress failed: %s",
+                                tui.name, e)
+                    return
+            else:
+                log.warning("TUI %s: Enter is dead (Agent View background?), "
+                            "recovering", tui.name)
+                if not self._foreground_and_resend(tui, prompt):
+                    return
         # Not proof of failure: a busy TUI queues the text and writes the line
         # later. Let the turn run; its own timeout is the backstop.
         log.warning("TUI %s: submit unconfirmed (queued, or still in the box)",
                     tui.name)
+
+    def _foreground_and_resend(self, tui: _Tui, prompt: str) -> bool:
+        """Refocus a backgrounded conversation, then paste the prompt again.
+
+        Verified against claude 2.1.232: in the backgrounded conversation
+        Enter/End/arrows are inert and a printable character refocuses it,
+        REPLACING the draft; on the fleet list screen Escape returns to the
+        conversation with an empty box. Either way the box must be verified
+        empty before the re-paste — re-pasting over leftovers would submit
+        doubled text."""
+        try:
+            pane = self._pane_text(tui.name)
+            if any(m in pane for m in _AGENT_VIEW_MARKERS):
+                self._tmux("send-keys", "-t", tui.name, "Escape")
+                time.sleep(0.5)
+            # Refocus (swallows the stale draft), then clear the one
+            # character that keystroke left behind.
+            self._tmux("send-keys", "-l", "-t", tui.name, "x")
+            time.sleep(0.3)
+            for _ in range(2):
+                self._tmux("send-keys", "-t", tui.name, "C-u")
+                time.sleep(0.3)
+                if not self._input_box_text(tui.name):
+                    break
+            else:
+                log.warning("TUI %s: input box would not clear; not "
+                            "re-pasting", tui.name)
+                return False
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log.warning("TUI %s: recovery keys failed: %s", tui.name, e)
+            return False
+        err = self._send_prompt(tui, prompt)
+        if err:
+            log.warning("TUI %s: recovery re-paste failed: %s", tui.name, err)
+            return False
+        return True
 
     def type_text(self, session_id: str, text: str) -> str:
         """Type a message straight into this session's live TUI.
@@ -887,9 +992,8 @@ class InteractiveManager:
             return err
         # Confirm off-thread: while the TUI is busy the message is queued and
         # nothing is written for a while, and the phone should not wait.
-        if before >= 0:
-            threading.Thread(target=self._confirm_submit, args=(tui, before),
-                             daemon=True).start()
+        threading.Thread(target=self._confirm_submit,
+                         args=(tui, before, text), daemon=True).start()
         return ""
 
     def capture_tui(self, session_id: str, *, ansi: bool = False) -> dict:
@@ -1220,8 +1324,12 @@ class InteractiveManager:
                 stopped = job.status == "stopped"
             if stopped:
                 interrupted = True
-                try:  # Escape = the TUI's interrupt key
-                    self._tmux("send-keys", "-t", tui.name, "Escape")
+                try:  # Escape = the TUI's interrupt key. Only fire while a
+                    # turn is visibly running: a stop racing the turn's end
+                    # would land Escape on an idle prompt, where stray keys
+                    # flirt with Agent View (≥2.1.232).
+                    if self._pane_busy(tui.name):
+                        self._tmux("send-keys", "-t", tui.name, "Escape")
                 except (OSError, subprocess.TimeoutExpired):
                     pass
                 break

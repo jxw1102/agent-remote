@@ -1307,3 +1307,51 @@ button.icon-btn.icon-idle {
 .step-tool_result.step-err .step-mark { color: var(--danger); }
 .step-thinking .step-mark { color: var(--warn); }
 .step-thinking .step-body { font-style: italic; color: var(--dim); }
+
+/* ---------------------------------------------------------------- share page
+   Hosted by the daemon at /share/<token>. Same transcript chrome as the
+   main app, no session list or composer. */
+html.share, body.share {
+  overflow: auto;
+  height: auto;
+  min-height: 100%;
+}
+.share-app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+.share-head {
+  flex: none;
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 18px 20px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.share-head .brand { display: flex; align-items: center; gap: 10px; }
+.share-head .logo { width: 22px; height: 22px; }
+.share-badge {
+  font-size: 11px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.share-head h1 {
+  font-size: 20px;
+  font-weight: 650;
+  margin: 12px 0 4px;
+}
+.share-sub { color: var(--dim); font-size: 13px; }
+.share-app .transcript { flex: 1 1 auto; }
+.share-url {
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  user-select: all;
+}

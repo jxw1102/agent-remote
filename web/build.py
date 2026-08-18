@@ -34,8 +34,8 @@ def read(name: str) -> str:
     return (SRC / name).read_text(encoding="utf-8")
 
 
-def flatten_modules(md_js: str, app_js: str) -> str:
-    """md.js + app.js as one classic script, each keeping its own scope.
+def flatten_modules(md_js: str, app_js: str, app_name: str = "app.js") -> str:
+    """md.js + a page script as one classic script, each keeping its own scope.
 
     Concatenating the two bodies into a single scope looks simpler and is
     wrong: both modules privately declare helpers with the same names (`el`),
@@ -52,11 +52,11 @@ def flatten_modules(md_js: str, app_js: str) -> str:
     imported = re.search(r'^import\s*\{([^}]*)\}\s*from\s*"\./md\.js";\s*$',
                          app_js, flags=re.M)
     if not imported:
-        raise SystemExit("error: app.js has no import from ./md.js — update the build")
+        raise SystemExit(f"error: {app_name} has no import from ./md.js — update the build")
     names = [n.strip() for n in imported.group(1).split(",") if n.strip()]
     missing = [n for n in names if n not in exported]
     if missing:
-        raise SystemExit(f"error: app.js imports {missing} which md.js does not export")
+        raise SystemExit(f"error: {app_name} imports {missing} which md.js does not export")
 
     md_body = re.sub(r"^export\s+", "", md_js, flags=re.M)
     app_body = app_js.replace(imported.group(0), "")
@@ -65,7 +65,7 @@ def flatten_modules(md_js: str, app_js: str) -> str:
         "// ---- md.js (module scope) ----\n"
         f"const __md = (function () {{\n{md_body}\nreturn {{ {returns} }};\n}})();\n"
         f"const {{ {', '.join(names)} }} = __md;\n"
-        "// ---- app.js (module scope) ----\n"
+        f"// ---- {app_name} (module scope) ----\n"
         f"(function () {{\n{app_body}\n}})();\n"
     )
 
@@ -98,7 +98,8 @@ def main() -> int:
 
     html = read("index.html")
     css = read("app.css")
-    script = flatten_modules(read("md.js"), read("app.js"))
+    md_js = read("md.js")
+    script = flatten_modules(md_js, read("app.js"), "app.js")
 
     # Inline the stylesheet and the module script.
     html = html.replace(
@@ -132,6 +133,37 @@ def main() -> int:
     OUT.write_text(html, encoding="utf-8")
     size = OUT.stat().st_size
     print(f"OK: {OUT} ({size // 1024} KB, self-contained)")
+
+    share_script = flatten_modules(md_js, read("share.js"), "share.js")
+    if not syntax_ok(share_script):
+        return 4
+    share_html = read("share.html")
+    share_html = share_html.replace(
+        '<link rel="stylesheet" href="app.css">',
+        "<style>\n" + css + "\n</style>",
+    )
+    share_html = share_html.replace(
+        '<script type="module" src="share.js"></script>',
+        "<script>\n(function () {\n" + share_script + "\n})();\n</script>",
+    )
+    share_html = share_html.replace(
+        "<title>Shared session · Agent Remote</title>",
+        f"<title>Shared session · Agent Remote</title>\n<!-- built {stamp} from web/src -->",
+    )
+    for leftover in ('href="app.css"', 'src="share.js"', 'from "./md.js"'):
+        if leftover in share_html:
+            print(f"error: share.html still references {leftover}",
+                  file=sys.stderr)
+            return 3
+    share_out = DIST / "share.html"
+    share_out.write_text(share_html, encoding="utf-8")
+    print(f"OK: {share_out} ({share_out.stat().st_size // 1024} KB, self-contained)")
+
+    # Packaged with the daemon so GET /share/<token> needs no extra deploy.
+    daemon_static = ROOT.parent / "daemon" / "agentremoted" / "static"
+    daemon_static.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(share_out, daemon_static / "share.html")
+    print(f"OK: copied to {daemon_static / 'share.html'}")
 
     # Same convention as the .bar and .apk builds: land it in the pickup
     # folder so it is reachable from the phone and the drop listing.

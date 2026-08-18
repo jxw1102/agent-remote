@@ -893,7 +893,10 @@ async function pingProfile(profile) {
     // Focus list (agentremoted ≥ 2.6): absent on older daemons, which then
     // contribute nothing to Focus mode rather than dumping every session in.
     profile.focus = !!ping.focus;
+    // Session share (agentremoted ≥ 2.7): hosted read-only /share/<token>.
+    profile.share = !!ping.share;
     store.save();
+    syncShareButton();
     return true;
   } catch {
     return false;
@@ -1471,6 +1474,7 @@ function liveFocusState(session, key, working, blocked) {
 
 const focusMode = () => !!state.settings.focusMode;
 const focusCapable = (profile) => profile && profile.focus !== false;
+const shareCapable = (profile) => !!(profile && profile.share);
 
 function setFocusMode(on) {
   state.settings.focusMode = !!on;
@@ -1882,6 +1886,7 @@ async function openSession(row) {
   applyAccent(row.provider);
 
   $("chat-head").classList.remove("hidden");
+  syncShareButton();
   $("composer").classList.remove("hidden");
   $("chat-title").textContent = row.session.title || "Session";
   renderChatSub();
@@ -1976,6 +1981,91 @@ async function setRowFocus(row, member) {
     refreshSessions();
   } catch (e) {
     toast(`Focus: ${e.message}`);
+  }
+}
+
+function syncShareButton() {
+  const btn = $("btn-share");
+  if (!btn) return;
+  const open = state.open;
+  const profile = open && profileById(open.profileId);
+  btn.classList.toggle("hidden", !shareCapable(profile));
+}
+
+/**
+ * Mint a 7-day read-only URL hosted by this session's daemon.
+ * The link is the daemon origin + /share/<token> — no daemon auth token.
+ */
+async function openShare() {
+  const open = state.open;
+  if (!open) return;
+  const profile = profileById(open.profileId);
+  if (!shareCapable(profile)) {
+    toast("This daemon is too old to share sessions");
+    return;
+  }
+  const key = encodeURIComponent(open.sessionId);
+  let url = "";
+  let expiresIn = 0;
+  let status = "Creating a read-only link…";
+  const paint = (body) => {
+    body.textContent = "";
+    body.appendChild(el("div", "help",
+      "Anyone with this link can read the transcript for 7 days. "
+      + "They cannot send messages, list other sessions, or use your daemon token."));
+    if (url) {
+      const box = el("div", "share-url", url);
+      box.title = url;
+      body.appendChild(box);
+      const note = el("div", "help",
+        expiresIn
+          ? `Expires in ${Math.max(1, Math.round(expiresIn / 86400))} day`
+            + (Math.round(expiresIn / 86400) === 1 ? "" : "s") + "."
+          : "Expires in 7 days.");
+      body.appendChild(note);
+    } else {
+      body.appendChild(el("p", null, status));
+    }
+  };
+  const sheet = modal({
+    title: "Share session",
+    build: paint,
+    actions: [
+      { label: "Close", close: true },
+      {
+        label: "Copy link",
+        primary: true,
+        close: false,
+        disabled: true,
+        id: "share-copy",
+        run: async () => {
+          if (!url) return;
+          try {
+            await copyText(url);
+            toast("Share link copied");
+          } catch {
+            toast("Could not copy the link");
+          }
+        },
+      },
+    ],
+  });
+  try {
+    const data = await call(profile, `/api/sessions/${key}/share`, {
+      method: "POST",
+      body: {},
+    });
+    const path = data.path || (data.token ? "/share/" + data.token : "");
+    const origin = String(profile.baseUrl || "").replace(/\/+$/, "");
+    url = (origin && path) ? origin + path : (data.url || "");
+    expiresIn = Number(data.expires_in) || 0;
+    status = "";
+    paint(sheet.body);
+    const copyBtn = $("share-copy");
+    if (copyBtn) copyBtn.disabled = !url;
+  } catch (e) {
+    status = e.message || "Could not create a share link";
+    paint(sheet.body);
   }
 }
 
@@ -4646,6 +4736,7 @@ function wire() {
   $("btn-usage").addEventListener("click", openUsage);
   $("btn-options").addEventListener("click", openOptions);
   $("btn-rename").addEventListener("click", openRename);
+  $("btn-share")?.addEventListener("click", openShare);
   $("btn-refresh").addEventListener("click", () => {
     loadTail();
     refreshSessions();

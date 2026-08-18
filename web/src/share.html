@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en" class="share">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>Shared session · Agent Remote</title>
+<link rel="stylesheet" href="app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 108 108'%3E%3Crect width='108' height='108' rx='54' fill='%2312121a'/%3E%3Cpath d='M34 40 L48 54 L34 68' stroke='%23d97757' stroke-width='7' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M56 68 L76 68' stroke='%2300d4ff' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E">
+</head>
+<body class="share">
+<div class="share-app">
+  <header class="share-head">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 108 108" aria-hidden="true">
+        <path d="M34 40 L48 54 L34 68" stroke="#d97757" stroke-width="7"
+              fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M56 68 L76 68" stroke="#00d4ff" stroke-width="7"
+              stroke-linecap="round"/>
+      </svg>
+      <span>Agent Remote</span>
+      <span class="share-badge">Shared · read only</span>
+    </div>
+    <h1 id="share-title">Shared session</h1>
+    <div id="share-sub" class="share-sub"></div>
+  </header>
+  <div id="transcript" class="transcript">
+    <div class="empty"><p>Loading…</p></div>
+  </div>
+</div>
+<div id="toast" class="toast hidden"></div>
+<script type="module" src="share.js"></script>
+</body>
+</html>

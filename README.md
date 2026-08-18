@@ -52,6 +52,8 @@ prompts, and stop work without sitting at the desk.
 - Auth / login health on `/api/ping` (daemon ≥ 2.5.3)
 - Focus mode: filter the list to the projects you are carrying, tagged *needs
   answer · failed · working · turn finished*; rename or re-derive session titles
+- Share a session: web, Android, and BlackBerry mint a 7-day read-only URL
+  hosted by the daemon (`/share/<token>`). LILYGO does not generate links.
 - Permission Allow/Deny and `AskUserQuestion` where the harness supports them
 - Attachments, slash commands, host→device file drop, session rewind
 - Interactive and headless execution modes

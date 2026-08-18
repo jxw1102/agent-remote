@@ -1,0 +1,2818 @@
+<!DOCTYPE html>
+<html lang="en" class="share">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>Shared session · Agent Remote</title>
+<!-- built 2026-08-18 07:54 from web/src -->
+<style>
+/* Agent Remote, browser client.
+ *
+ * A PC is not a phone stretched wide: this is a two-pane layout (session list
+ * beside the transcript) with a keyboard-first composer. The accent is data,
+ * not a build flag — --accent is rewritten per open session so a Claude
+ * session reads warm and a Grok session reads cyan, exactly like the apps.
+ */
+
+:root {
+  --bg: #0b0b0d;
+  --surface: #101114;
+  --surface-2: #15171b;
+  --surface-3: #1b1d22;
+  --line: #23262d;
+  --text: #e6e8ec;
+  --dim: #7a8394;
+  --accent: #9aa4b2;          /* neutral until a session is open */
+  --accent-soft: rgba(154, 164, 178, 0.14);
+  --claude: #d97757;
+  --grok: #00d4ff;
+  --danger: #e5706b;
+  --warn: #e0b454;
+  --ok: #5fc98b;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b0b0d;
+  font-weight: 600;
+}
+button.danger { color: var(--danger); border-color: rgba(229, 112, 107, 0.4); }
+button.ghost { background: none; border: none; color: var(--dim); font-size: 16px; }
+
+input, textarea, select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  width: 100%;
+}
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+a { color: var(--accent); }
+
+.hidden { display: none !important; }
+
+/* ---------------------------------------------------------------- layout */
+
+.app {
+  display: grid;
+  grid-template-columns: minmax(300px, 26vw) 1fr;
+  height: 100%;
+  /* Grid items default to min-height:auto (= content size). Without this,
+     the flex children never shrink and overflow-y:auto never engages. */
+  min-height: 0;
+}
+@media (max-width: 860px) {
+  /* Narrow window: one pane at a time, list on top. */
+  .app { grid-template-columns: 1fr; grid-template-rows: 45% 1fr; }
+}
+
+.pane-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.list-head { padding: 12px; border-bottom: 1px solid var(--line); flex: none; }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  margin-bottom: 10px;
+}
+.logo { width: 22px; height: 22px; flex: none; }
+.head-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.head-actions button { padding: 5px 10px; font-size: 13px; }
+#btn-sound {
+  min-width: 34px;
+  font-size: 15px;
+  padding: 5px 8px;
+  color: var(--dim);
+}
+#btn-sound[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: var(--accent-soft);
+}
+.search { margin-bottom: 8px; }
+
+.filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  border-radius: 999px;
+  padding: 3px 11px;
+  font-size: 12px;
+  background: var(--surface-3);
+}
+.chip[aria-pressed="true"] {
+  background: var(--chip-soft, var(--accent-soft));
+  border-color: var(--chip, var(--accent));
+  color: var(--chip, var(--accent));
+  font-weight: 600;
+}
+.chip.chip-error {
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--line));
+  color: var(--danger);
+}
+
+.list-status { color: var(--dim); font-size: 12px; margin-top: 8px; }
+.list-status .err { color: var(--danger); white-space: pre-wrap; }
+
+.sessions {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.day {
+  padding: 12px 12px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--dim);
+}
+.row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.row:hover { background: var(--surface-2); }
+.row[aria-current="true"] { background: var(--surface-3); }
+.row-top { display: flex; gap: 8px; align-items: baseline; }
+.row-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row-when { color: var(--dim); font-size: 11px; flex: none; }
+
+/* One strip of tags + shrinkable session id (must not wrap the id onto its own row). */
+.row-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 5px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
+}
+.row-meta > .tag { flex: none; }
+.row-preview {
+  margin-top: 5px;
+  color: var(--dim);
+  font-size: 12px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.row-preview mark { background: none; color: var(--warn); }
+
+.tag {
+  font-size: 11px;
+  border-radius: 5px;
+  padding: 1px 6px;
+  background: var(--surface-3);
+  color: var(--dim);
+  white-space: nowrap;
+}
+.tag.provider,
+.tag.host {
+  color: var(--tag, var(--accent));
+  background: color-mix(in srgb, var(--tag, var(--accent)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tag, var(--accent)) 35%, transparent);
+  font-weight: 600;
+}
+.tag.host {
+  /* Slightly softer so a harness text badge can sit next to it. */
+  font-weight: 500;
+  opacity: 0.95;
+}
+.tag.waiting { color: var(--warn); background: rgba(224, 180, 84, 0.14); }
+
+/* Focus state tags. Focus is a filter over the same list, so these are
+   ordinary row chips — the row layout must not change between modes. Colour
+   carries the urgency: amber wants you now, green is busy, neutral can wait. */
+.tag.focus { font-weight: 600; }
+.tag.focus-needs-answer {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, transparent);
+}
+.tag.focus-failed {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.tag.focus-working {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 32%, transparent);
+}
+/* Finished turn. Dim once you have opened it — read, waiting on you, no
+   longer competing for attention. */
+.tag.focus-turn-finished {
+  color: var(--dim);
+  background: transparent;
+  border: 1px dashed var(--line);
+}
+/* ...and lit until you have, so an unread result stands out in the list. */
+.tag.focus-turn-finished.focus-unread {
+  color: var(--text);
+  background: var(--surface-3);
+  border: 1px solid color-mix(in srgb, var(--text) 28%, transparent);
+}
+
+/* Focus toggle chip. Same pill as the daemon filters beside it — Focus is one
+   more way to narrow the same list, not a separate control. The check makes it
+   read as a toggle rather than another filter name. */
+.chip-focus {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.chip-focus svg { width: 13px; height: 13px; flex: none; }
+
+/* Row "Done" control. Lives on the row rather than the chat header so the
+   gesture is where the thing is, and it is hover-only so 40 idle rows do not
+   each carry a button. Absolutely positioned and vertically centred: it floats
+   over the row's own content instead of reserving a slot, so appearing never
+   reflows the row. An opaque tinted background keeps the glyph readable over
+   whatever text it covers. Opacity (not display) keeps it keyboard-focusable. */
+.row { position: relative; }
+.row-done {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  transform: translateY(-50%);
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 9px;
+  color: var(--ok);
+  border: 1px solid color-mix(in srgb, var(--ok) 38%, transparent);
+  background: color-mix(in srgb, var(--ok) 12%, var(--surface-2));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.row-done svg { width: 18px; height: 18px; display: block; }
+.row:hover .row-done,
+.row:focus-visible .row-done,
+.row-done:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.row-done:hover {
+  background: color-mix(in srgb, var(--ok) 26%, var(--surface-2, #1b1e24));
+}
+/* Touch and coarse pointers never hover: show it always, dimmed. */
+@media (hover: none) {
+  .row-done { opacity: 0.72; pointer-events: auto; }
+}
+
+.pulse {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent);
+  animation: breathe 1.6s ease-in-out infinite;
+  flex: none;
+}
+/* Same slot as .pulse: permission / AskUserQuestion needs the human. */
+.pulse-ask {
+  flex: none;
+  width: 12px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--warn);
+  animation: ask-blink 1s step-end infinite;
+}
+@keyframes ask-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.15; }
+}
+@keyframes breathe { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
+
+/* ------------------------------------------------------------------ chat */
+
+.pane-chat {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.chat-title { flex: 1; min-width: 0; }
+.chat-title h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-sub {
+  color: var(--dim);
+  font-size: 12px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.chat-cwd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* Clickable session id — full string when space allows, ellipsis if not. */
+button.session-id {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 7px;
+  cursor: pointer;
+  /* Prefer showing the whole id; shrink only after cwd has given ground. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button.session-id:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* Session-list chip: same row as other tags; shrinks with ellipsis. */
+button.tag.session-id-tag {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  /* min-width:0 is required — buttons default to min-width:auto and refuse to shrink. */
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  padding: 1px 6px;
+  line-height: 1.4;
+  display: inline-block;
+  text-align: left;
+  vertical-align: middle;
+}
+button.tag.session-id-tag:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.sid-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.sid-full {
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.chat-actions { display: flex; gap: 6px; flex: none; align-items: center; }
+/* Square icon controls in the chat header (options / refresh / stop / Live TUI). */
+button.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  flex: none;
+  color: var(--dim);
+}
+button.icon-btn svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+button.icon-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+button.icon-btn.danger {
+  color: var(--danger);
+  border-color: rgba(229, 112, 107, 0.4);
+}
+button.icon-btn.danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: rgba(229, 112, 107, 0.12);
+}
+/* Keep the slot reserved; do not use .hidden (display:none) — that reflows
+   siblings. Idle Stop still occupies space so Live TUI never moves. */
+button.icon-btn.icon-idle {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  column-gap: 10px;
+  row-gap: 2px;
+  padding: 6px 16px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12.5px;
+  line-height: 1.35;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+  min-width: 0;
+}
+/* Human gate (ask / permission): stand out from the normal working strip. */
+.banner.needs-answer {
+  background: rgba(95, 201, 139, 0.12);
+  color: var(--ok);
+  border-bottom-color: rgba(95, 201, 139, 0.28);
+}
+/*
+ * Line 1: human description + elapsed/queued.
+ * Line 2 (.banner-cmd): raw command / path / [attached: …] when present.
+ */
+.banner .banner-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.banner .banner-cmd {
+  flex: 1 1 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0 0 0 18px; /* align under text after the pulse */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  line-height: 1.3;
+  opacity: 0.78;
+  color: inherit;
+}
+.banner .pulse,
+.banner .banner-action {
+  flex: none;
+  align-self: center;
+}
+.banner .banner-action {
+  padding: 4px 12px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+.banner.needs-answer .banner-action.primary {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #0b0b0d;
+}
+
+.transcript {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 18px 0 8px;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+.thread { max-width: 900px; margin: 0 auto; padding: 0 20px; }
+
+.msg {
+  margin-bottom: 16px;
+  position: relative;
+}
+.msg.user {
+  background: var(--surface-3);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+.msg.user::before {
+  content: "›";
+  color: var(--accent);
+  font-weight: 700;
+  margin-right: 8px;
+}
+.msg.user .body { display: inline; white-space: pre-wrap; }
+.msg.status { color: var(--dim); font-size: 12.5px; border-left: 2px solid var(--line); padding-left: 10px; }
+.msg.notice {
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: var(--dim);
+  font-size: 12.5px;
+}
+.msg.notice.error { color: var(--danger); background: rgba(229, 112, 107, 0.1); }
+/* Timestamp sits in the same hover row as Copy / Rewind (right-aligned). */
+.msg-tools {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.msg:hover .msg-tools { opacity: 1; }
+.msg-tools .msg-time {
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+  color: var(--dim);
+  white-space: nowrap;
+  line-height: 1.4;
+}
+.msg-tools button { padding: 2px 8px; font-size: 11px; }
+
+.load-older { display: block; margin: 0 auto 18px; }
+
+.empty {
+  max-width: 420px;
+  margin: 14vh auto;
+  text-align: center;
+  color: var(--dim);
+}
+.empty-logo {
+  width: 54px;
+  height: 54px;
+  display: block;
+  margin: 0 auto 4px;
+  opacity: 0.95;
+}
+.empty h2 { color: var(--text); font-size: 17px; margin: 14px 0 6px; }
+.empty p { margin: 0 0 10px; line-height: 1.45; }
+.empty strong { color: var(--text); font-weight: 600; }
+.empty code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--surface-3);
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--text);
+}
+.welcome { max-width: 460px; padding: 0 16px; }
+.welcome-steps {
+  text-align: left;
+  margin: 14px auto 18px;
+  padding: 0 0 0 1.25em;
+  color: var(--dim);
+  line-height: 1.55;
+  max-width: 360px;
+}
+.welcome-steps li { margin: 6px 0; }
+.welcome-steps strong { color: var(--text); }
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  align-items: center;
+  margin: 12px 0 8px;
+}
+.welcome-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.welcome-link:hover { text-decoration: underline; }
+/* Session-list empty (no daemons): short note only — full guide is in transcript. */
+.empty.list-quiet {
+  max-width: none;
+  padding: 28px 16px;
+  text-align: left;
+  color: var(--muted);
+  font-size: 13px;
+}
+.empty.list-quiet p { margin: 0; line-height: 1.4; }
+
+/* -------------------------------------------------------------- markdown */
+
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 10px; white-space: pre-wrap; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+  margin: 18px 0 8px;
+  color: var(--heading, var(--accent));
+  line-height: 1.3;
+}
+.md h1 { font-size: 19px; }
+.md h2 { font-size: 17px; }
+.md h3 { font-size: 15.5px; }
+.md h4, .md h5, .md h6 { font-size: 14.5px; }
+.md ul, .md ol { margin: 0 0 10px; padding-left: 24px; }
+.md li { margin-bottom: 4px; }
+.md li::marker { color: var(--accent); }
+.md blockquote {
+  margin: 0 0 10px;
+  padding-left: 12px;
+  border-left: 3px solid var(--accent-soft);
+  color: var(--dim);
+}
+.md hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
+.md code.inline {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--inline-code, var(--accent));
+  background: var(--surface-2);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+/* GFM task lists (grok todo_write → "- [ ]" / "- [x]"). */
+.md ul.task-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 0 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+.md li.task-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  line-height: 1.45;
+}
+.md li.task-item:last-child { border-bottom: none; }
+.md li.task-item.is-done { color: var(--dim); }
+.md li.task-item.is-done .task-body { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--dim) 55%, transparent); }
+.md .task-check {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border-radius: 4px;
+  border: 1.5px solid color-mix(in srgb, var(--dim) 55%, transparent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  color: transparent;
+  background: transparent;
+}
+.md .task-check.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+  font-weight: 700;
+}
+.md .task-body { flex: 1; min-width: 0; }
+
+.code-wrap {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #0d0f13;
+  margin: 0 0 12px;
+  overflow: hidden;
+}
+.code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px 4px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.code-lang { font-size: 11px; color: var(--dim); font-family: var(--mono); }
+.code-copy { padding: 1px 8px; font-size: 11px; }
+.code-wrap pre { margin: 0; padding: 10px 12px; overflow-x: auto; }
+.code-wrap code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre;
+  color: #c9d1d9;
+}
+/* GitHub-dark-ish token palette for fenced blocks + process-view steps. */
+.code-wrap .tok-kw, .step-body .tok-kw { color: #ff7b72; }
+.code-wrap .tok-str, .step-body .tok-str { color: #a5d6ff; }
+.code-wrap .tok-cmt, .step-body .tok-cmt { color: #8b949e; font-style: italic; }
+.code-wrap .tok-num, .step-body .tok-num { color: #79c0ff; }
+.code-wrap .tok-fn, .step-body .tok-fn { color: #d2a8ff; }
+.code-wrap .tok-type, .step-body .tok-type { color: #ffa657; }
+.code-wrap .tok-op, .step-body .tok-op { color: #ff7b72; }
+.code-wrap .tok-punct, .step-body .tok-punct { color: #8b949e; }
+.code-wrap .tok-prop, .step-body .tok-prop { color: #7ee787; }
+.code-wrap .tok-builtin, .step-body .tok-builtin { color: #ffa657; }
+.code-wrap .tok-meta, .step-body .tok-meta { color: #79c0ff; }
+.code-wrap .tok-regex, .step-body .tok-regex { color: #a5d6ff; }
+.code-wrap .tok-tag, .step-body .tok-tag { color: #7ee787; }
+.code-wrap .tok-ins, .step-body .tok-ins { color: #3fb950; }
+.code-wrap .tok-del, .step-body .tok-del { color: #f85149; }
+
+/*
+ * Tables: card shell, grid lines, sticky header, zebra body. Width is
+ * max-content so a sparse 4-col table does not stretch into empty space;
+ * min-width:100% still fills the pane when the table is wider than its
+ * content. Long Notes cells wrap at ~28em instead of forcing horizontal
+ * scroll for every word.
+ */
+.md-table-wrap {
+  overflow-x: auto;
+  margin: 0 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  -webkit-overflow-scrolling: touch;
+}
+.md table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.md th, .md td {
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  max-width: 28em;
+  word-break: break-word;
+}
+.md th:last-child, .md td:last-child { border-right: none; }
+.md th {
+  background: var(--surface-2);
+  color: var(--heading, var(--accent));
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  white-space: nowrap;
+}
+.md tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+}
+.md tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+.md tr:last-child td { border-bottom: none; }
+/* "#" / rank first column only (see isRankFirstColumn in md.js): tight, never wraps.
+ * Do not apply this to untitled row-label columns — body text needs full width. */
+.md table.has-rank .col-rank {
+  width: 1%;
+  max-width: 4em;
+  white-space: nowrap;
+  text-align: center;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+/* Status pills for Pending / Done / In Progress / … */
+.md .status-pill {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--dim);
+  white-space: nowrap;
+  text-transform: capitalize;
+}
+.md .status-pill.status-pending,
+.md .status-pill.status-todo,
+.md .status-pill.status-open,
+.md .status-pill.status-wip {
+  color: #e0b454;
+  border-color: color-mix(in srgb, #e0b454 40%, transparent);
+  background: color-mix(in srgb, #e0b454 14%, transparent);
+}
+.md .status-pill.status-in-progress,
+.md .status-pill.status-active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.md .status-pill.status-done,
+.md .status-pill.status-completed,
+.md .status-pill.status-complete,
+.md .status-pill.status-ok,
+.md .status-pill.status-pass,
+.md .status-pill.status-passed,
+.md .status-pill.status-closed {
+  color: #5ecf8a;
+  border-color: color-mix(in srgb, #5ecf8a 40%, transparent);
+  background: color-mix(in srgb, #5ecf8a 12%, transparent);
+}
+.md .status-pill.status-blocked,
+.md .status-pill.status-failed,
+.md .status-pill.status-fail,
+.md .status-pill.status-error,
+.md .status-pill.status-cancelled,
+.md .status-pill.status-canceled {
+  color: #f07178;
+  border-color: color-mix(in srgb, #f07178 40%, transparent);
+  background: color-mix(in srgb, #f07178 12%, transparent);
+}
+
+/* -------------------------------------------------------------- live TUI */
+
+.live-tui {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0a0c10;
+  border-top: 1px solid var(--line);
+}
+.live-tui.hidden { display: none !important; }
+.live-tui-bar {
+  /* Two fixed rows: meta (status/hint) then keys. Status text length must
+     never reflow the soft-key strip (mis-clicks when job id appears). */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  flex: none;
+}
+.live-tui-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+  min-height: 28px;
+  min-width: 0;
+}
+.live-tui-status {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  /* Reserve room for "● " live prefix + longer job status; ellipsis if longer. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.live-tui-status.live::before {
+  content: "● ";
+  color: var(--ok, #5fc98b);
+}
+.live-tui-hint {
+  font-size: 11px;
+  color: var(--dim);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.live-tui-meta > .ghost {
+  flex: none;
+  white-space: nowrap;
+}
+.live-tui-keys {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  /* Horizontal scroll on narrow panes instead of wrapping (which shifts hits). */
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+.live-tui-keys button {
+  /* Fixed hit targets — equal width for Esc/Enter/Tab; square for arrows. */
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 3.25rem;
+  height: 1.75rem;
+  padding: 0;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1;
+  font-family: var(--mono, ui-monospace, monospace);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+/* Arrow / ^C stay the same footprint as Esc/Tab. */
+.live-tui-keys button[data-tui-key="Up"],
+.live-tui-keys button[data-tui-key="Down"],
+.live-tui-keys button[data-tui-key="Left"],
+.live-tui-keys button[data-tui-key="Right"],
+.live-tui-keys button[data-tui-key="Ctrl+C"] {
+  width: 2.25rem;
+}
+.live-tui-pane {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #d0d4dc;
+  background: #0a0c10;
+  outline: none;
+  cursor: text;
+}
+/* ANSI colour spans from ansiToHtml() — keep mono + pre-wrap on parent. */
+.live-tui-pane span {
+  white-space: inherit;
+  font-family: inherit;
+  font-size: inherit;
+}
+.live-tui-pane:focus {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.live-tui-pane.empty-tui {
+  color: var(--dim);
+  font-style: italic;
+}
+.live-tui-line {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  flex: none;
+}
+.live-tui-line input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+#btn-live-tui[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* -------------------------------------------------------------- composer */
+
+.composer {
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  padding: 10px 20px 14px;
+  flex: none;
+}
+.composer-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  max-width: 900px;
+  margin: 0 auto;
+}
+#btn-attach {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+  font-weight: 500;
+  color: var(--dim);
+}
+#btn-attach:hover:not(:disabled) { color: var(--accent); }
+#prompt {
+  resize: none;
+  min-height: 38px;
+  max-height: 220px;
+  line-height: 1.4;
+  font-family: inherit;
+  overflow-y: auto;
+  field-sizing: content;
+}
+.composer-note {
+  max-width: 900px;
+  margin: 0 auto 6px;
+  color: var(--dim);
+  font-size: 12px;
+}
+.composer-note.err { color: var(--danger); }
+.composer.dragover {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  background: var(--accent-soft);
+}
+
+/* ----------------------------------------------------------------- modal */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 20;
+}
+.modal-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  width: min(680px, 100%);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.modal-head h2 { margin: 0; font-size: 15px; }
+.modal-body {
+  padding: 16px 18px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+}
+.modal-foot:empty { display: none; }
+
+.field { margin-bottom: 12px; }
+.field label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+.field .help { font-size: 11.5px; color: var(--dim); margin-top: 4px; }
+.pillbar { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill { font-size: 12px; padding: 4px 10px; border-radius: 8px; }
+/* --pc is per-button brand (harness chips); falls back to session --accent. */
+.pill[aria-pressed="true"] {
+  background: var(--pc, var(--accent));
+  border-color: var(--pc, var(--accent));
+  color: #0b0b0d;
+  font-weight: 600;
+}
+/* Unselected harness chips keep a quiet brand hint so each colour is visible. */
+.pill.pill-brand:not([aria-pressed="true"]) {
+  border-color: color-mix(in srgb, var(--pc, var(--line)) 55%, var(--line));
+  color: var(--pc, var(--text));
+}
+
+.plist { display: flex; flex-direction: column; gap: 8px; }
+.pcard {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  cursor: pointer;
+  background: none;
+  text-align: left;
+  width: 100%;
+}
+.pcard[aria-pressed="true"] { border-color: var(--pc, var(--accent)); background: color-mix(in srgb, var(--pc, var(--accent)) 10%, transparent); }
+.pcard.multi[aria-pressed="true"] {
+  /* Multi-harness host: purple chrome (not a single brand colour). */
+  border-color: var(--pc, #a78bfa);
+}
+.pdot { width: 10px; height: 10px; border-radius: 50%; background: var(--pc, var(--dim)); flex: none; }
+.pcard .pname { font-weight: 600; }
+.pcard .phost { color: var(--dim); font-size: 12px; }
+
+.frow {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.frow:last-child { border-bottom: none; }
+.frow .fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frow .fmeta { display: flex; gap: 6px; align-items: center; margin-top: 3px; flex-wrap: wrap; }
+.frow .also { color: var(--dim); font-size: 11.5px; }
+
+.bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin: 6px 0 4px; }
+.bar > span { display: block; height: 100%; border-radius: 4px; background: var(--ok); }
+.bar.warning > span { background: var(--warn); }
+.bar.critical > span { background: var(--danger); }
+.usage-item { margin-bottom: 16px; }
+.usage-src { font-size: 11.5px; font-weight: 600; color: var(--tag, var(--accent)); }
+.usage-top { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
+.usage-foot { display: flex; justify-content: space-between; color: var(--dim); font-size: 11.5px; }
+
+.q-block { margin-bottom: 18px; }
+.q-head { font-size: 12px; font-weight: 700; color: var(--accent); margin-bottom: 6px; }
+/* Grok plan approval: long markdown + sticky option picks. */
+.modal-body.plan-review {
+  display: flex;
+  flex-direction: column;
+  max-height: min(72vh, 720px);
+  gap: 10px;
+}
+.q-block.q-plan {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  margin-bottom: 0;
+  gap: 10px;
+}
+.q-plan-body {
+  flex: 1 1 auto;
+  min-height: 12rem;
+  max-height: min(52vh, 520px);
+  overflow-y: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg, #0c0c0e) 80%, var(--surface));
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.q-plan-body h1, .q-plan-body h2, .q-plan-body h3 {
+  margin: 0.85em 0 0.35em;
+  line-height: 1.25;
+}
+.q-plan-body h1 { font-size: 1.15em; color: var(--heading, var(--accent)); }
+.q-plan-body h2 { font-size: 1.05em; color: var(--heading, var(--accent)); }
+.q-plan-body pre, .q-plan-body code { font-size: 12px; }
+.q-plan-opts {
+  flex: none;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+.q-opt {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+  cursor: pointer;
+  background: none;
+  width: 100%;
+  text-align: left;
+}
+.q-opt[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.q-opt .qmark { color: var(--accent); font-family: var(--mono); flex: none; }
+.q-opt .qdesc { color: var(--dim); font-size: 12px; }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 18px;
+  font-size: 13px;
+  z-index: 30;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.spinner {
+  width: 13px; height: 13px; flex: none;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  display: inline-block;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- process view: the agent's working steps under a message ----------
+   Deliberately quieter than a message bubble: this is context for the
+   reader who wants it, and it must never compete with the answer above it. */
+.steps { margin: 2px 0 10px; display: flex; flex-direction: column; gap: 2px; }
+.step { border-left: 2px solid var(--line); padding-left: 10px; }
+.step-head {
+  display: flex; align-items: baseline; gap: 8px;
+  width: 100%; background: none; border: none; padding: 3px 0;
+  color: var(--dim); font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.step-head:hover { color: var(--text); }
+.step-head:disabled { cursor: default; opacity: 0.75; }
+.step-mark { flex: none; font-family: var(--mono); }
+.step-title { flex: none; font-weight: 600; }
+.step-detail {
+  flex: 1; min-width: 0; font-family: var(--mono); font-size: 11.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.step-size, .step-note { flex: none; font-size: 11px; opacity: 0.75; }
+.step-body {
+  margin: 2px 0 6px; padding: 8px 10px; max-height: 380px; overflow: auto;
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 6px; font-family: var(--mono); font-size: 11.5px;
+  white-space: pre-wrap; word-break: break-word; color: var(--text);
+}
+.step-body code {
+  font: inherit;
+  color: inherit;
+  white-space: inherit;
+  word-break: inherit;
+}
+.step-tool_result .step-mark { color: var(--ok); }
+.step-tool_result.step-err .step-mark { color: var(--danger); }
+.step-thinking .step-mark { color: var(--warn); }
+.step-thinking .step-body { font-style: italic; color: var(--dim); }
+
+/* ---------------------------------------------------------------- share page
+   Hosted by the daemon at /share/<token>. Same transcript chrome as the
+   main app, no session list or composer. */
+html.share, body.share {
+  overflow: auto;
+  height: auto;
+  min-height: 100%;
+}
+.share-app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+.share-head {
+  flex: none;
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 18px 20px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.share-head .brand { display: flex; align-items: center; gap: 10px; }
+.share-head .logo { width: 22px; height: 22px; }
+.share-badge {
+  font-size: 11px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.share-head h1 {
+  font-size: 20px;
+  font-weight: 650;
+  margin: 12px 0 4px;
+}
+.share-sub { color: var(--dim); font-size: 13px; }
+.share-app .transcript { flex: 1 1 auto; }
+.share-url {
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  user-select: all;
+}
+
+</style>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 108 108'%3E%3Crect width='108' height='108' rx='54' fill='%2312121a'/%3E%3Cpath d='M34 40 L48 54 L34 68' stroke='%23d97757' stroke-width='7' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M56 68 L76 68' stroke='%2300d4ff' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E">
+</head>
+<body class="share">
+<div class="share-app">
+  <header class="share-head">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 108 108" aria-hidden="true">
+        <path d="M34 40 L48 54 L34 68" stroke="#d97757" stroke-width="7"
+              fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M56 68 L76 68" stroke="#00d4ff" stroke-width="7"
+              stroke-linecap="round"/>
+      </svg>
+      <span>Agent Remote</span>
+      <span class="share-badge">Shared · read only</span>
+    </div>
+    <h1 id="share-title">Shared session</h1>
+    <div id="share-sub" class="share-sub"></div>
+  </header>
+  <div id="transcript" class="transcript">
+    <div class="empty"><p>Loading…</p></div>
+  </div>
+</div>
+<div id="toast" class="toast hidden"></div>
+<script>
+(function () {
+// ---- md.js (module scope) ----
+const __md = (function () {
+// Markdown -> DOM, deliberately incomplete.
+//
+// The daemon also ships pre-rendered `blocks` per message, but that HTML and
+// its palette exist for BlackBerry's Cascades text engine. The browser gets
+// the raw `text` and renders it here instead, so code blocks scroll and can
+// be copied, tables stay tables, and links are real links.
+//
+// Scope is what agent output actually contains: ATX headings, fenced code,
+// bullet/ordered lists, block quotes, pipe tables, thematic breaks, and
+// inline bold/italic/strike/code/links/autolinks. Anything unrecognised
+// degrades to a paragraph rather than vanishing.
+
+const FENCE = /^\s{0,3}(`{3,}|~{3,})\s*([A-Za-z0-9_+\-.#]*)\s*$/;
+const ATX = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+const RULE = /^\s{0,3}([-*_])\s*(?:\1\s*){2,}$/;
+// GFM task items before plain bullets: "- [ ] foo" / "- [x] foo".
+const TASK = /^(\s*)([-*+])\s+\[([ xX])\]\s+(.*)$/;
+const BULLET = /^(\s*)([-*+])\s+(.*)$/;
+const ORDERED = /^(\s*)(\d{1,3})[.)]\s+(.*)$/;
+const QUOTE = /^\s{0,3}>\s?(.*)$/;
+// Separator cell: --- / :--- / ---: / :---: (2+ dashes). Leading/trailing
+// pipes optional so both `|---|---|` and `---|---` parse.
+const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/;
+// Status words agents put in table cells — rendered as pills.
+const STATUS_CELL = /^(pending|todo|done|completed|complete|in[\s_-]?progress|active|blocked|cancelled|canceled|failed|error|ok|pass|passed|fail|wip|open|closed)$/i;
+
+/** Escaping is done by the DOM (textContent), never by string replacement. */
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function renderMarkdown(source) {
+  const host = el("div", "md");
+  if (!source) return host;
+  const lines = String(source).replace(/\r\n?/g, "\n").split("\n");
+  renderLines(lines, host);
+  return host;
+}
+
+function renderLines(lines, host) {
+  let para = [];
+  const flush = () => {
+    if (!para.length) return;
+    const text = para.join("\n").trim();
+    para = [];
+    if (text) host.appendChild(inlineInto(el("p"), text));
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    const fence = FENCE.exec(line);
+    if (fence) {
+      flush();
+      const marker = fence[1];
+      const lang = (fence[2] || "").toLowerCase();
+      const body = [];
+      i++;
+      for (; i < lines.length; i++) {
+        const close = FENCE.exec(lines[i]);
+        // A closing fence uses the same character and is at least as long;
+        // a shorter run inside the block stays literal.
+        if (close && close[1][0] === marker[0]
+            && close[1].length >= marker.length && !close[2]) break;
+        body.push(lines[i]);
+      }
+      host.appendChild(codeBlock(body.join("\n").replace(/\s+$/, ""), lang));
+      continue;
+    }
+
+    if (!line.trim()) { flush(); continue; }
+
+    if (RULE.test(line)) { flush(); host.appendChild(el("hr")); continue; }
+
+    const head = ATX.exec(line);
+    if (head) {
+      flush();
+      const level = Math.min(head[1].length, 6);
+      host.appendChild(inlineInto(el("h" + level), head[2]));
+      continue;
+    }
+
+    if (QUOTE.test(line)) {
+      flush();
+      const body = [];
+      for (; i < lines.length; i++) {
+        const m = QUOTE.exec(lines[i]);
+        if (!m) break;
+        body.push(m[1]);
+      }
+      i--;
+      const quote = el("blockquote");
+      renderLines(body, quote);
+      host.appendChild(quote);
+      continue;
+    }
+
+    // Pipe table: a header row followed by a |---|---| separator.
+    // Alignments come from the separator (:--- / ---: / :---:).
+    if (line.includes("|") && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1])) {
+      flush();
+      const header = splitRow(line);
+      const aligns = splitRow(lines[i + 1]).map(cellAlign);
+      i += 2;
+      const rows = [];
+      for (; i < lines.length && lines[i].includes("|") && lines[i].trim(); i++) {
+        // A second separator mid-stream ends the table (rare, but safer).
+        if (TABLE_SEP.test(lines[i])) break;
+        rows.push(splitRow(lines[i]));
+      }
+      i--;
+      host.appendChild(table(header, rows, aligns));
+      continue;
+    }
+
+    // Task list (GFM checkboxes) — grok's todo_write emits these.
+    const task = TASK.exec(line);
+    if (task) {
+      flush();
+      const list = el("ul", "task-list");
+      for (; i < lines.length; i++) {
+        const t = TASK.exec(lines[i]);
+        if (!t) break;
+        const checked = /x/i.test(t[3]);
+        const body = t[4];
+        const li = el("li", "task-item" + (checked ? " is-done" : ""));
+        // Decorative only: the transcript is read-only, so no real <input>.
+        const box = el("span", "task-check" + (checked ? " on" : ""), checked ? "✓" : "");
+        box.setAttribute("aria-hidden", "true");
+        li.appendChild(box);
+        li.appendChild(inlineInto(el("span", "task-body"), body));
+        list.appendChild(li);
+      }
+      i--;
+      host.appendChild(list);
+      continue;
+    }
+
+    const bullet = BULLET.exec(line);
+    const ordered = bullet ? null : ORDERED.exec(line);
+    if (bullet || ordered) {
+      flush();
+      const listTag = bullet ? "ul" : "ol";
+      const list = el(listTag);
+      if (ordered) list.start = parseInt(ordered[2], 10) || 1;
+      for (; i < lines.length; i++) {
+        // A task item starts a new list rather than nesting as a plain bullet.
+        if (TASK.test(lines[i])) break;
+        const b = BULLET.exec(lines[i]);
+        const o = b ? null : ORDERED.exec(lines[i]);
+        if (!b && !o) break;
+        const body = [(b || o)[3]];
+        // Continuation lines: indented, and not a new block of any kind.
+        while (i + 1 < lines.length) {
+          const next = lines[i + 1];
+          if (!next.trim() || BULLET.test(next) || ORDERED.test(next)
+              || TASK.test(next)
+              || ATX.test(next) || FENCE.test(next) || QUOTE.test(next)) break;
+          if (!/^[ \t]/.test(next)) break;
+          body.push(next.trim());
+          i++;
+        }
+        list.appendChild(inlineInto(el("li"), body.join("\n")));
+      }
+      i--;
+      host.appendChild(list);
+      continue;
+    }
+
+    para.push(line);
+  }
+  flush();
+}
+
+function cellAlign(sep) {
+  const s = String(sep || "").trim();
+  const left = s.startsWith(":");
+  const right = s.endsWith(":");
+  if (left && right) return "center";
+  if (right) return "right";
+  if (left) return "left";
+  return "";
+}
+
+/**
+ * Rank/index first column only when the header is #/n/id, or the header is
+ * empty AND every body cell is a short numeric/roman index. An empty header
+ * with long label cells (comparison tables) must stay a normal column.
+ */
+function isRankFirstColumn(header, rows) {
+  const firstHead = String(header[0] || "").trim();
+  if (/^(#|n|no\.?|id)$/i.test(firstHead)) return true;
+  if (firstHead) return false;
+  if (!rows.length) return false;
+  return rows.every((r) => {
+    const c = String(r[0] || "").trim();
+    if (!c) return true;
+    if (c.length > 6) return false;
+    return /^(#?\d{1,4}|[ivxlcdm]{1,6})$/i.test(c);
+  });
+}
+
+function table(header, rows, aligns = []) {
+  const width = Math.max(header.length, ...rows.map((r) => r.length), 0);
+  const pad = (cells) => {
+    const out = cells.slice(0, width);
+    while (out.length < width) out.push("");
+    return out;
+  };
+  // First column is often "#" / a rank — keep it narrow via a class.
+  // Do NOT treat a blank header as rank: agents often leave the row-label
+  // column untitled (e.g. | | A | B | with "PPV orders" in body cells), and
+  // max-width:4em then clips those labels into the next column.
+  const rankCol = isRankFirstColumn(header, rows);
+
+  const wrap = el("div", "md-table-wrap");
+  const t = el("table");
+  if (rankCol) t.classList.add("has-rank");
+  const thead = el("thead");
+  const hrow = el("tr");
+  pad(header).forEach((cell, i) => {
+    const th = inlineInto(el("th"), cell);
+    if (aligns[i]) th.style.textAlign = aligns[i];
+    if (rankCol && i === 0) th.classList.add("col-rank");
+    hrow.appendChild(th);
+  });
+  thead.appendChild(hrow);
+  t.appendChild(thead);
+  const tbody = el("tbody");
+  rows.forEach((row) => {
+    const tr = el("tr");
+    pad(row).forEach((cell, i) => {
+      const td = tableCell(cell);
+      if (aligns[i]) td.style.textAlign = aligns[i];
+      if (rankCol && i === 0) td.classList.add("col-rank");
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  t.appendChild(tbody);
+  wrap.appendChild(t);
+  return wrap;
+}
+
+/** Status words become pills; everything else is normal inline markdown. */
+function tableCell(text) {
+  const plain = String(text ?? "").trim();
+  if (STATUS_CELL.test(plain)) {
+    const td = el("td");
+    const kind = plain.toLowerCase().replace(/[\s_]+/g, "-");
+    const pill = el("span", "status-pill status-" + kind, plain);
+    td.appendChild(pill);
+    return td;
+  }
+  return inlineInto(el("td"), text);
+}
+
+function splitRow(line) {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+  const cells = [];
+  let cur = "";
+  let escaped = false;
+  for (const ch of s) {
+    if (escaped) { cur += ch; escaped = false; continue; }
+    if (ch === "\\") { escaped = true; continue; }
+    if (ch === "|") { cells.push(cur.trim()); cur = ""; continue; }
+    cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+function codeBlock(code, lang) {
+  const wrap = el("div", "code-wrap");
+  const bar = el("div", "code-bar");
+  const resolved = resolveLang(lang);
+  bar.appendChild(el("span", "code-lang", resolved.label || lang || "text"));
+  const copy = el("button", "code-copy", "Copy");
+  copy.type = "button";
+  copy.addEventListener("click", async () => {
+    try {
+      // Secure contexts get the real API; plain-http hosting falls back.
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(code);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = code;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand && document.execCommand("copy");
+        ta.remove();
+        if (!ok) throw new Error("clipboard unavailable");
+      }
+      copy.textContent = "Copied";
+    } catch {
+      copy.textContent = "Blocked";
+    }
+    setTimeout(() => { copy.textContent = "Copy"; }, 1400);
+  });
+  bar.appendChild(copy);
+  wrap.appendChild(bar);
+  const pre = el("pre");
+  const codeEl = el("code", resolved.id ? "lang-" + resolved.id : null);
+  highlightInto(codeEl, code, resolved.id);
+  pre.appendChild(codeEl);
+  wrap.appendChild(pre);
+  return wrap;
+}
+
+// -- syntax highlight -----------------------------------------------------
+// Self-contained tokeniser: no CDN, no npm. Covers the languages agent
+// transcripts actually emit. Unknown languages stay plain monospace text.
+
+const LANG_ALIASES = {
+  js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
+  ts: "typescript", tsx: "typescript",
+  py: "python", python3: "python", py3: "python",
+  sh: "bash", shell: "bash", zsh: "bash", bash: "bash",
+  yml: "yaml", yaml: "yaml",
+  md: "markdown", markdown: "markdown",
+  rs: "rust", go: "go", golang: "go",
+  c: "c", h: "c", cpp: "cpp", cc: "cpp", cxx: "cpp", hpp: "cpp",
+  cs: "csharp", csharp: "csharp",
+  rb: "ruby", java: "java", kt: "kotlin", kotlin: "kotlin",
+  sql: "sql", html: "html", xml: "html", svg: "html",
+  css: "css", scss: "css", less: "css",
+  json: "json", jsonc: "json",
+  toml: "toml", ini: "ini", conf: "ini", env: "ini",
+  diff: "diff", patch: "diff",
+  dockerfile: "dockerfile", docker: "dockerfile",
+  make: "makefile", makefile: "makefile",
+  text: "", plain: "", plaintext: "", txt: "",
+};
+
+const C_LIKE_KW = splitKw(
+  "if else for while do switch case break continue return try catch finally "
+  + "throw new class extends implements interface public private protected "
+  + "static final abstract void const let var function async await yield "
+  + "import export from default typeof instanceof in of this super "
+  + "true false null undefined NaN Infinity delete void with debugger "
+  + "enum package throws synchronized volatile transient native "
+  + "goto struct union typedef extern register signed unsigned sizeof "
+  + "namespace using template typename virtual override explicit friend "
+  + "operator constexpr noexcept decltype auto constexpr "
+  + "public private protected internal sealed partial readonly "
+  + "get set value where select group into orderby join on equals "
+  + "var fun val object data companion when is as in out typealias "
+  + "suspend inline reified crossinline noinline"
+);
+
+const PYTHON_KW = splitKw(
+  "False None True and as assert async await break class continue def del "
+  + "elif else except finally for from global if import in is lambda "
+  + "nonlocal not or pass raise return try while with yield match case "
+  + "self cls"
+);
+
+const BASH_KW = splitKw(
+  "if then else elif fi for while until do done case esac function select "
+  + "time coproc in return exit break continue shift export local readonly "
+  + "declare typeset unset eval exec source alias unalias set unset "
+  + "true false"
+);
+
+const SQL_KW = splitKw(
+  "select from where and or not null is in like between join left right "
+  + "inner outer full cross on group by order having limit offset as "
+  + "insert into values update set delete create table index view alter "
+  + "drop truncate distinct count sum avg min max union all exists case "
+  + "when then else end primary key foreign references constraint default "
+  + "unique check cascade restrict with recursive over partition"
+);
+
+const RUST_KW = splitKw(
+  "as async await break const continue crate dyn else enum extern false fn "
+  + "for if impl in let loop match mod move mut pub ref return self Self "
+  + "static struct super trait true type unsafe use where while yield "
+  + "abstract become box do final macro override priv typeof unsized "
+  + "virtual yield try"
+);
+
+const GO_KW = splitKw(
+  "break case chan const continue default defer else fallthrough for func "
+  + "go goto if import interface map package range return select struct "
+  + "switch type var true false nil iota"
+);
+
+const RUBY_KW = splitKw(
+  "BEGIN END alias and begin break case class def defined do else elsif "
+  + "end ensure false for if in module next nil not or redo rescue retry "
+  + "return self super then true undef unless until when while yield"
+);
+
+function splitKw(s) {
+  return new Set(s.trim().split(/\s+/).filter(Boolean));
+}
+
+function resolveLang(raw) {
+  const key = String(raw || "").toLowerCase().replace(/^\./, "");
+  if (!key) return { id: "", label: "text" };
+  const id = LANG_ALIASES[key] !== undefined ? LANG_ALIASES[key] : key;
+  if (!id) return { id: "", label: key || "text" };
+  return { id, label: key };
+}
+
+function highlightInto(codeEl, code, langId) {
+  const text = String(code ?? "");
+  if (!langId || !text) {
+    codeEl.textContent = text;
+    return;
+  }
+  if (langId === "diff") {
+    highlightDiff(codeEl, text);
+    return;
+  }
+  if (langId === "json") {
+    highlightJson(codeEl, text);
+    return;
+  }
+  const rules = rulesFor(langId);
+  if (!rules) {
+    codeEl.textContent = text;
+    return;
+  }
+  appendTokens(codeEl, tokenize(text, rules));
+}
+
+/**
+ * Paint `code` into a host element with the fenced-block tokeniser.
+ * Used by process-view step bodies when the daemon sends a `lang` hint.
+ * Unknown / empty lang → plain textContent (no token spans).
+ */
+function paintCode(host, code, lang) {
+  if (!host) return;
+  host.replaceChildren();
+  const text = String(code ?? "");
+  const id = resolveLang(lang).id;
+  if (!id || !text) {
+    host.textContent = text;
+    return;
+  }
+  highlightInto(host, text, id);
+}
+
+function highlightDiff(host, text) {
+  const lines = text.split("\n");
+  lines.forEach((line, i) => {
+    if (i) host.appendChild(document.createTextNode("\n"));
+    let cls = "";
+    if (/^\+/.test(line) && !/^\+\+\+/.test(line)) cls = "tok-ins";
+    else if (/^-/.test(line) && !/^---/.test(line)) cls = "tok-del";
+    else if (/^@@/.test(line)) cls = "tok-meta";
+    else if (/^(diff |index |--- |\+\+\+)/.test(line)) cls = "tok-meta";
+    if (cls) {
+      const s = el("span", cls);
+      s.textContent = line;
+      host.appendChild(s);
+    } else {
+      host.appendChild(document.createTextNode(line));
+    }
+  });
+}
+
+function highlightJson(host, text) {
+  // Keys ("x":), string values, numbers, bools/null, punctuation.
+  const re = /("(?:\\.|[^"\\])*")(\s*:)?|(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)|\b(true|false|null)\b|([{}[\],])/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) host.appendChild(document.createTextNode(text.slice(last, m.index)));
+    if (m[1] !== undefined) {
+      const s = el("span", m[2] !== undefined ? "tok-prop" : "tok-str");
+      s.textContent = m[1];
+      host.appendChild(s);
+      if (m[2]) {
+        const ws = m[2].slice(0, -1);
+        if (ws) host.appendChild(document.createTextNode(ws));
+        const c = el("span", "tok-punct");
+        c.textContent = ":";
+        host.appendChild(c);
+      }
+    } else if (m[3] !== undefined) {
+      const s = el("span", "tok-num");
+      s.textContent = m[3];
+      host.appendChild(s);
+    } else if (m[4] !== undefined) {
+      const s = el("span", "tok-kw");
+      s.textContent = m[4];
+      host.appendChild(s);
+    } else if (m[5] !== undefined) {
+      const s = el("span", "tok-punct");
+      s.textContent = m[5];
+      host.appendChild(s);
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) host.appendChild(document.createTextNode(text.slice(last)));
+}
+
+function rulesFor(langId) {
+  switch (langId) {
+    case "javascript":
+    case "typescript":
+      return {
+        keywords: C_LIKE_KW,
+        builtins: splitKw("console Math JSON Object Array String Number Boolean Promise Map Set Date Error fetch parseInt parseFloat isNaN"),
+        lineComment: "//",
+        blockComment: ["/*", "*/"],
+        strings: true,
+        template: true,
+        regex: true,
+        numbers: true,
+        hashbang: true,
+      };
+    case "python":
+      return {
+        keywords: PYTHON_KW,
+        builtins: splitKw("print len range open type str int float list dict set tuple bool object super property staticmethod classmethod enumerate zip map filter any all min max sum abs"),
+        lineComment: "#",
+        strings: true,
+        triple: true,
+        numbers: true,
+        hashbang: true,
+        decorators: true,
+      };
+    case "bash":
+      return {
+        keywords: BASH_KW,
+        lineComment: "#",
+        strings: true,
+        numbers: true,
+        hashbang: true,
+        shell: true,
+      };
+    case "c":
+    case "cpp":
+    case "csharp":
+    case "java":
+    case "kotlin":
+      return {
+        keywords: C_LIKE_KW,
+        lineComment: "//",
+        blockComment: ["/*", "*/"],
+        strings: true,
+        numbers: true,
+        preprocessor: true,
+      };
+    case "go":
+      return {
+        keywords: GO_KW,
+        builtins: splitKw("append cap close complex copy delete imag len make new panic print println real recover true false nil"),
+        lineComment: "//",
+        blockComment: ["/*", "*/"],
+        strings: true,
+        numbers: true,
+      };
+    case "rust":
+      return {
+        keywords: RUST_KW,
+        lineComment: "//",
+        blockComment: ["/*", "*/"],
+        strings: true,
+        numbers: true,
+        lifetime: true,
+      };
+    case "ruby":
+      return {
+        keywords: RUBY_KW,
+        lineComment: "#",
+        strings: true,
+        numbers: true,
+        symbols: true,
+      };
+    case "sql":
+      return {
+        keywords: SQL_KW,
+        lineComment: "--",
+        blockComment: ["/*", "*/"],
+        strings: true,
+        numbers: true,
+        caseInsensitiveKw: true,
+      };
+    case "css":
+      return {
+        lineComment: null,
+        blockComment: ["/*", "*/"],
+        strings: true,
+        numbers: true,
+        css: true,
+      };
+    case "html":
+      return {
+        lineComment: null,
+        blockComment: null,
+        strings: true,
+        html: true,
+      };
+    case "yaml":
+      return {
+        lineComment: "#",
+        strings: true,
+        numbers: true,
+        yaml: true,
+      };
+    case "toml":
+    case "ini":
+      return {
+        lineComment: "#",
+        strings: true,
+        numbers: true,
+        ini: true,
+      };
+    case "dockerfile":
+      return {
+        keywords: splitKw("FROM RUN CMD LABEL MAINTAINER EXPOSE ENV ADD COPY ENTRYPOINT VOLUME USER WORKDIR ARG ONBUILD STOPSIGNAL HEALTHCHECK SHELL AS"),
+        lineComment: "#",
+        strings: true,
+        numbers: true,
+        caseInsensitiveKw: true,
+      };
+    case "makefile":
+      return {
+        lineComment: "#",
+        strings: true,
+        makefile: true,
+      };
+    case "markdown":
+      return {
+        markdown: true,
+      };
+    default:
+      // Generic: comments-ish + strings + numbers for unknown fenced langs.
+      return {
+        keywords: new Set(),
+        lineComment: "//",
+        blockComment: ["/*", "*/"],
+        strings: true,
+        numbers: true,
+      };
+  }
+}
+
+function tokenize(src, rules) {
+  const out = [];
+  let i = 0;
+  const n = src.length;
+  const push = (type, text) => {
+    if (!text) return;
+    // Merge adjacent same-type tokens.
+    const last = out[out.length - 1];
+    if (last && last.type === type) last.text += text;
+    else out.push({ type, text });
+  };
+  const plain = (text) => push("", text);
+
+  while (i < n) {
+    // Hashbang
+    if (rules.hashbang && i === 0 && src.startsWith("#!")) {
+      const end = src.indexOf("\n");
+      const take = end < 0 ? src : src.slice(0, end);
+      push("tok-meta", take);
+      i += take.length;
+      continue;
+    }
+
+    // HTML tags (before comments that look like <!--)
+    if (rules.html && src[i] === "<") {
+      if (src.startsWith("<!--", i)) {
+        const end = src.indexOf("-->", i + 4);
+        const take = end < 0 ? src.slice(i) : src.slice(i, end + 3);
+        push("tok-cmt", take);
+        i += take.length;
+        continue;
+      }
+      const end = src.indexOf(">", i);
+      if (end > i) {
+        push("tok-tag", src.slice(i, end + 1));
+        i = end + 1;
+        continue;
+      }
+    }
+
+    // Block comment
+    if (rules.blockComment && src.startsWith(rules.blockComment[0], i)) {
+      const open = rules.blockComment[0];
+      const close = rules.blockComment[1];
+      const end = src.indexOf(close, i + open.length);
+      const take = end < 0 ? src.slice(i) : src.slice(i, end + close.length);
+      push("tok-cmt", take);
+      i += take.length;
+      continue;
+    }
+
+    // Line comment
+    if (rules.lineComment && src.startsWith(rules.lineComment, i)) {
+      // SQL/YAML: "--" / "#" only when not mid-token is fine for our purposes.
+      const end = src.indexOf("\n", i);
+      const take = end < 0 ? src.slice(i) : src.slice(i, end);
+      push("tok-cmt", take);
+      i += take.length;
+      continue;
+    }
+
+    // Preprocessor (#include …)
+    if (rules.preprocessor && src[i] === "#" && (i === 0 || src[i - 1] === "\n")) {
+      const end = src.indexOf("\n", i);
+      const take = end < 0 ? src.slice(i) : src.slice(i, end);
+      push("tok-meta", take);
+      i += take.length;
+      continue;
+    }
+
+    // Decorators (@foo)
+    if (rules.decorators && src[i] === "@" && /[A-Za-z_]/.test(src[i + 1] || "")) {
+      let j = i + 1;
+      while (j < n && /[A-Za-z0-9_]/.test(src[j])) j++;
+      push("tok-meta", src.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    // Rust lifetimes 'a
+    if (rules.lifetime && src[i] === "'" && /[A-Za-z_]/.test(src[i + 1] || "")) {
+      let j = i + 1;
+      while (j < n && /[A-Za-z0-9_]/.test(src[j])) j++;
+      push("tok-type", src.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    // Triple-quoted strings (python)
+    if (rules.triple && (src.startsWith('"""', i) || src.startsWith("'''", i))) {
+      const q = src.slice(i, i + 3);
+      const end = src.indexOf(q, i + 3);
+      const take = end < 0 ? src.slice(i) : src.slice(i, end + 3);
+      push("tok-str", take);
+      i += take.length;
+      continue;
+    }
+
+    // Template strings
+    if (rules.template && src[i] === "`") {
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === "\\") { j += 2; continue; }
+        if (src[j] === "`") { j++; break; }
+        j++;
+      }
+      push("tok-str", src.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    // Strings
+    if (rules.strings && (src[i] === '"' || src[i] === "'")) {
+      const q = src[i];
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === "\\") { j += 2; continue; }
+        if (src[j] === q) { j++; break; }
+        if (src[j] === "\n" && !rules.triple) break; // unclosed
+        j++;
+      }
+      push("tok-str", src.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    // Regex literals (js/ts) — heuristic after = ( [ , : ! & | ? { ; or start
+    if (rules.regex && src[i] === "/") {
+      const prev = out.length ? out[out.length - 1].text : "";
+      const prevCh = prev.replace(/\s+$/, "").slice(-1);
+      if (!prevCh || /[=(:,[\!&|?{;]/.test(prevCh) || /\b(return|case|throw|typeof|in|of)$/.test(prev.replace(/\s+$/, ""))) {
+        let j = i + 1;
+        let ok = false;
+        while (j < n) {
+          if (src[j] === "\n") break;
+          if (src[j] === "\\") { j += 2; continue; }
+          if (src[j] === "[") {
+            j++;
+            while (j < n && src[j] !== "]") {
+              if (src[j] === "\\") j++;
+              j++;
+            }
+            j++;
+            continue;
+          }
+          if (src[j] === "/") { j++; ok = true; break; }
+          j++;
+        }
+        if (ok) {
+          while (j < n && /[gimsuy]/.test(src[j])) j++;
+          push("tok-regex", src.slice(i, j));
+          i = j;
+          continue;
+        }
+      }
+    }
+
+    // Shell variables $FOO ${FOO}
+    if (rules.shell && src[i] === "$") {
+      if (src[i + 1] === "{") {
+        const end = src.indexOf("}", i + 2);
+        if (end > 0) {
+          push("tok-prop", src.slice(i, end + 1));
+          i = end + 1;
+          continue;
+        }
+      }
+      if (/[A-Za-z_?]/.test(src[i + 1] || "") || /[0-9@*#\-$!]/.test(src[i + 1] || "")) {
+        let j = i + 1;
+        if (/[0-9@*#\-$!]/.test(src[j])) j++;
+        else while (j < n && /[A-Za-z0-9_]/.test(src[j])) j++;
+        push("tok-prop", src.slice(i, j));
+        i = j;
+        continue;
+      }
+    }
+
+    // YAML keys at line start: key:
+    if (rules.yaml && (i === 0 || src[i - 1] === "\n")) {
+      const m = src.slice(i).match(/^(\s*)([A-Za-z0-9_.-]+)(:)(?=\s|$)/);
+      if (m) {
+        if (m[1]) plain(m[1]);
+        push("tok-prop", m[2]);
+        push("tok-punct", m[3]);
+        i += m[0].length;
+        continue;
+      }
+    }
+
+    // INI [section] / keys
+    if (rules.ini && (i === 0 || src[i - 1] === "\n")) {
+      if (src[i] === "[") {
+        const end = src.indexOf("]", i + 1);
+        if (end > 0) {
+          const nl = src.indexOf("\n", i);
+          if (nl < 0 || end < nl) {
+            push("tok-meta", src.slice(i, end + 1));
+            i = end + 1;
+            continue;
+          }
+        }
+      }
+      const m = src.slice(i).match(/^(\s*)([A-Za-z0-9_.-]+)(\s*=)/);
+      if (m) {
+        if (m[1]) plain(m[1]);
+        push("tok-prop", m[2]);
+        push("tok-punct", m[3]);
+        i += m[0].length;
+        continue;
+      }
+    }
+
+    // Makefile targets
+    if (rules.makefile && (i === 0 || src[i - 1] === "\n") && !/^\t/.test(src.slice(i))) {
+      const m = src.slice(i).match(/^([A-Za-z0-9_./%-]+)(:)/);
+      if (m) {
+        push("tok-fn", m[1]);
+        push("tok-punct", m[2]);
+        i += m[0].length;
+        continue;
+      }
+    }
+
+    // CSS selectors-ish and properties
+    if (rules.css) {
+      if (src[i] === "#" || src[i] === ".") {
+        let j = i + 1;
+        while (j < n && /[A-Za-z0-9_-]/.test(src[j])) j++;
+        if (j > i + 1) {
+          push("tok-fn", src.slice(i, j));
+          i = j;
+          continue;
+        }
+      }
+      const m = src.slice(i).match(/^([A-Za-z-]+)(\s*:)/);
+      if (m && !/^(if|for)$/.test(m[1])) {
+        push("tok-prop", m[1]);
+        push("tok-punct", m[2]);
+        i += m[0].length;
+        continue;
+      }
+    }
+
+    // Markdown headings / fences lightly
+    if (rules.markdown && (i === 0 || src[i - 1] === "\n")) {
+      if (src[i] === "#") {
+        const end = src.indexOf("\n", i);
+        const take = end < 0 ? src.slice(i) : src.slice(i, end);
+        push("tok-kw", take);
+        i += take.length;
+        continue;
+      }
+      if (src.startsWith("```", i) || src.startsWith("---", i)) {
+        const end = src.indexOf("\n", i);
+        const take = end < 0 ? src.slice(i) : src.slice(i, end);
+        push("tok-meta", take);
+        i += take.length;
+        continue;
+      }
+    }
+
+    // Ruby symbols :foo
+    if (rules.symbols && src[i] === ":" && /[A-Za-z_]/.test(src[i + 1] || "")) {
+      let j = i + 1;
+      while (j < n && /[A-Za-z0-9_?!]/.test(src[j])) j++;
+      push("tok-str", src.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    // Numbers
+    if (rules.numbers && /[0-9]/.test(src[i]) && (i === 0 || /[^\w.]/.test(src[i - 1]))) {
+      let j = i;
+      if (src.startsWith("0x", i) || src.startsWith("0X", i)) {
+        j += 2;
+        while (j < n && /[0-9a-fA-F_]/.test(src[j])) j++;
+      } else if (src.startsWith("0b", i) || src.startsWith("0B", i)) {
+        j += 2;
+        while (j < n && /[01_]/.test(src[j])) j++;
+      } else {
+        while (j < n && /[0-9_]/.test(src[j])) j++;
+        if (src[j] === "." && /[0-9]/.test(src[j + 1] || "")) {
+          j++;
+          while (j < n && /[0-9_]/.test(src[j])) j++;
+        }
+        if (/[eE]/.test(src[j] || "") && /[0-9+-]/.test(src[j + 1] || "")) {
+          j++;
+          if (/[+-]/.test(src[j] || "")) j++;
+          while (j < n && /[0-9_]/.test(src[j])) j++;
+        }
+      }
+      push("tok-num", src.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    // Identifiers / keywords / builtins / calls
+    if (/[A-Za-z_]/.test(src[i])) {
+      let j = i + 1;
+      while (j < n && /[A-Za-z0-9_]/.test(src[j])) j++;
+      const word = src.slice(i, j);
+      const low = rules.caseInsensitiveKw ? word.toLowerCase() : word;
+      let k = j;
+      while (k < n && /\s/.test(src[k])) k++;
+      if (rules.keywords && rules.keywords.has(low)) push("tok-kw", word);
+      else if (rules.builtins && rules.builtins.has(word)) push("tok-builtin", word);
+      else if (src[k] === "(") push("tok-fn", word);
+      else if (/^[A-Z]/.test(word) && word.length > 1) push("tok-type", word);
+      else plain(word);
+      i = j;
+      continue;
+    }
+
+    // Operators / punctuation — single char at a time for simplicity
+    if (/[{}()[\];,.:]/.test(src[i])) {
+      push("tok-punct", src[i]);
+      i++;
+      continue;
+    }
+    if (/[+\-*/%<>=!&|^~?]/.test(src[i])) {
+      let j = i + 1;
+      while (j < n && /[+\-*/%<>=!&|^~?]/.test(src[j]) && j - i < 3) j++;
+      push("tok-op", src.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    // Whitespace and everything else plain
+    plain(src[i]);
+    i++;
+  }
+  return out;
+}
+
+function appendTokens(host, tokens) {
+  for (const t of tokens) {
+    if (!t.type) {
+      host.appendChild(document.createTextNode(t.text));
+      continue;
+    }
+    const s = el("span", t.type);
+    s.textContent = t.text;
+    host.appendChild(s);
+  }
+}
+
+// -- inline ---------------------------------------------------------------
+
+/**
+ * Inline pass. Code spans win over everything (their content is literal),
+ * then links, then emphasis. Underscore emphasis only at word boundaries so
+ * `snake_case_names` survive — agent output is full of them.
+ */
+function inlineInto(node, text) {
+  emit(String(text ?? ""), node, { b: false, i: false, s: false });
+  return node;
+}
+
+function styled(style, text) {
+  let node = document.createTextNode(text);
+  if (style.s) { const w = el("s"); w.appendChild(node); node = w; }
+  if (style.i) { const w = el("em"); w.appendChild(node); node = w; }
+  if (style.b) { const w = el("strong"); w.appendChild(node); node = w; }
+  return node;
+}
+
+function emit(text, host, style) {
+  let buf = "";
+  const flush = () => {
+    if (!buf) return;
+    host.appendChild(styled(style, buf));
+    buf = "";
+  };
+
+  for (let i = 0; i < text.length; ) {
+    const c = text[i];
+
+    if (c === "\\" && i + 1 < text.length && !/[A-Za-z0-9]/.test(text[i + 1])) {
+      buf += text[i + 1];
+      i += 2;
+      continue;
+    }
+
+    if (c === "`") {
+      const ticks = runLength(text, i, "`");
+      const close = findRun(text, i + ticks, "`", ticks);
+      if (close > 0) {
+        flush();
+        host.appendChild(el("code", "inline", text.slice(i + ticks, close).trim()));
+        i = close + ticks;
+        continue;
+      }
+    }
+
+    if (c === "[" || (c === "!" && text[i + 1] === "[")) {
+      const image = c === "!";
+      const link = matchLink(text, image ? i + 1 : i);
+      if (link) {
+        flush();
+        const a = el("a", null, (image ? "🖼 " : "") + stripInline(link.label));
+        a.href = link.href;
+        a.target = "_blank";
+        a.rel = "noreferrer noopener";
+        host.appendChild(a);
+        i = link.end;
+        continue;
+      }
+    }
+
+    if (c === "*" || c === "_") {
+      const run = runLength(text, i, c);
+      if (run >= 1 && run <= 3 && canOpen(text, i, c)) {
+        const close = findEmphasisClose(text, i + run, c, run);
+        if (close > 0) {
+          flush();
+          const next = { ...style };
+          if (run === 1) next.i = true;
+          else if (run === 2) next.b = true;
+          else { next.b = true; next.i = true; }
+          emit(text.slice(i + run, close), host, next);
+          i = close + run;
+          continue;
+        }
+      }
+    }
+
+    if (c === "~" && runLength(text, i, "~") === 2) {
+      const close = findRun(text, i + 2, "~", 2);
+      if (close > 0) {
+        flush();
+        emit(text.slice(i + 2, close), host, { ...style, s: true });
+        i = close + 2;
+        continue;
+      }
+    }
+
+    if ((c === "h" || c === "w") && isBareUrl(text, i)) {
+      const end = bareUrlEnd(text, i);
+      if (end > i) {
+        flush();
+        const raw = text.slice(i, end);
+        const a = el("a", null, raw);
+        a.href = raw.startsWith("www.") ? "https://" + raw : raw;
+        a.target = "_blank";
+        a.rel = "noreferrer noopener";
+        host.appendChild(a);
+        i = end;
+        continue;
+      }
+    }
+
+    buf += c;
+    i++;
+  }
+  flush();
+}
+
+function runLength(text, at, ch) {
+  let n = 0;
+  while (at + n < text.length && text[at + n] === ch) n++;
+  return n;
+}
+
+function findRun(text, from, ch, length) {
+  for (let i = from; i < text.length; ) {
+    if (text[i] === ch) {
+      const run = runLength(text, i, ch);
+      if (run === length) return i;
+      i += run;
+    } else i++;
+  }
+  return -1;
+}
+
+function canOpen(text, at, ch) {
+  if (ch === "*") return at + 1 < text.length && !/\s/.test(text[at + 1]);
+  const before = at > 0 ? text[at - 1] : "";
+  return (!before || !/[A-Za-z0-9]/.test(before))
+      && at + 1 < text.length && !/\s/.test(text[at + 1]);
+}
+
+function findEmphasisClose(text, from, ch, length) {
+  for (let i = from; i < text.length; ) {
+    if (text[i] === "\\") { i += 2; continue; }
+    if (text[i] === ch) {
+      const run = runLength(text, i, ch);
+      const prev = i > 0 ? text[i - 1] : "";
+      const after = text[i + run] || "";
+      const closes = run >= length && prev && !/\s/.test(prev)
+          && (ch === "*" || !/[A-Za-z0-9]/.test(after));
+      if (closes) return i;
+      i += run;
+      continue;
+    }
+    i++;
+  }
+  return -1;
+}
+
+function matchLink(text, start) {
+  let depth = 0;
+  let i = start;
+  for (; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\") { i++; continue; }
+    if (c === "[") depth++;
+    else if (c === "]") { depth--; if (!depth) break; }
+  }
+  if (i >= text.length || depth !== 0) return null;
+  const label = text.slice(start + 1, i);
+  if (text[i + 1] !== "(") return null;
+  let j = i + 2;
+  let paren = 1;
+  for (; j < text.length; j++) {
+    const c = text[j];
+    if (c === "\\") { j++; continue; }
+    if (c === "(") paren++;
+    else if (c === ")") { paren--; if (!paren) break; }
+  }
+  if (j >= text.length) return null;
+  const target = text.slice(i + 2, j).trim();
+  const href = target.split(" ")[0].replace(/^<|>$/g, "");
+  if (!href) return null;
+  // Only navigable schemes: a javascript: URL in agent output must not
+  // become a clickable link.
+  if (!/^(https?:|mailto:|#|\/)/i.test(href)) return null;
+  return { label, href, end: j + 1 };
+}
+
+function stripInline(label) {
+  return label.replace(/[*_`~]/g, "").trim();
+}
+
+function isBareUrl(text, at) {
+  if (at > 0 && /[A-Za-z0-9/]/.test(text[at - 1])) return false;
+  return text.startsWith("http://", at) || text.startsWith("https://", at)
+      || text.startsWith("www.", at);
+}
+
+function bareUrlEnd(text, at) {
+  let end = at;
+  while (end < text.length && !/[\s`<>|]/.test(text[end])) end++;
+  while (end > at && ".,;:!?)]}\"'".includes(text[end - 1])) end--;
+  return end - at > 8 ? end : -1;
+}
+
+return { renderMarkdown, paintCode, inlineInto };
+})();
+const { renderMarkdown, inlineInto } = __md;
+// ---- share.js (module scope) ----
+(function () {
+// Read-only transcript viewer for a daemon-hosted share link.
+//
+// Reuses the web client's markdown renderer (md.js) so a shared session
+// reads like the Agent Remote transcript pane — no composer, no list, no
+// daemon token. The share token in the URL is the only credential.
+
+
+const $ = (id) => document.getElementById(id);
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function toast(message) {
+  const box = $("toast");
+  if (!box) return;
+  box.textContent = message;
+  box.classList.remove("hidden");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => box.classList.add("hidden"), 2600);
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand && document.execCommand("copy");
+  ta.remove();
+  if (!ok) throw new Error("clipboard unavailable");
+}
+
+function tokenFromPath() {
+  const parts = location.pathname.replace(/\/+$/, "").split("/");
+  return parts[parts.length - 1] || "";
+}
+
+function expandMessages(messages, offset) {
+  const out = [];
+  messages.forEach((m, i) => {
+    const id = `${offset + i}:${m.uuid || ""}`;
+    const text = m.text || "";
+    const ts = m.ts || m.timestamp || "";
+    if (m.role === "user" && text.startsWith("[shell] ! ") && text.includes("\n[output]\n")) {
+      const command = text.split("\n[output]\n")[0].replace(/^\[shell\] /, "").trim();
+      const body = text.split("\n[output]\n")[1].split("\n[silent]")[0].trim();
+      out.push({ id, role: "user", text: command, ts });
+      if (body) out.push({ id: id + ":out", role: "assistant", text: body, ts });
+      return;
+    }
+    out.push({ id, role: m.role, text, metaKind: m.metaKind || "", ts });
+  });
+  return out;
+}
+
+function copyButton(text) {
+  const b = el("button", null, "Copy");
+  b.type = "button";
+  b.addEventListener("click", async () => {
+    try {
+      await copyText(text);
+      toast("Copied");
+    } catch {
+      toast("Clipboard blocked by the browser");
+    }
+  });
+  return b;
+}
+
+function renderMessage(item) {
+  const wrap = el("div", `msg ${item.role}`);
+  if (item.role === "user") {
+    wrap.appendChild(inlineInto(el("span", "body"), item.text));
+    const tools = el("div", "msg-tools");
+    tools.appendChild(copyButton(item.text));
+    wrap.appendChild(tools);
+    return wrap;
+  }
+  if (item.role === "status" || item.role === "notice") {
+    wrap.textContent = item.text;
+    return wrap;
+  }
+  wrap.appendChild(renderMarkdown(item.text));
+  const tools = el("div", "msg-tools");
+  tools.appendChild(copyButton(item.text));
+  wrap.appendChild(tools);
+  return wrap;
+}
+
+function empty(title, detail) {
+  const box = el("div", "empty");
+  box.appendChild(el("h2", null, title));
+  if (detail) box.appendChild(el("p", null, detail));
+  return box;
+}
+
+function applyAccent(provider) {
+  const p = String(provider || "").toLowerCase();
+  const accent = p === "grok" ? "#00d4ff"
+    : p === "claude" ? "#d97757"
+    : p === "codex" ? "#9aa4b2"
+    : "#9aa4b2";
+  document.documentElement.style.setProperty("--accent", accent);
+}
+
+function expiresLabel(expiresIn) {
+  const s = Number(expiresIn) || 0;
+  if (s <= 0) return "expired";
+  const days = Math.max(1, Math.round(s / 86400));
+  return days === 1 ? "expires in 1 day" : `expires in ${days} days`;
+}
+
+async function load() {
+  const token = tokenFromPath();
+  const view = $("transcript");
+  if (!token) {
+    $("share-title").textContent = "Link not found";
+    view.textContent = "";
+    view.appendChild(empty("Link not found",
+      "This address is not a share link."));
+    return;
+  }
+  let data;
+  try {
+    const res = await fetch("/api/share/" + encodeURIComponent(token), {
+      headers: { Accept: "application/json" },
+    });
+    data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("share-title").textContent = "Link not found";
+      view.textContent = "";
+      view.appendChild(empty(
+        res.status === 404 ? "Link not found" : "Could not open this session",
+        data.error || "This share link is invalid or has expired.",
+      ));
+      return;
+    }
+  } catch {
+    $("share-title").textContent = "Could not open this session";
+    view.textContent = "";
+    view.appendChild(empty("Could not open this session",
+      "The daemon did not respond."));
+    return;
+  }
+
+  applyAccent(data.provider);
+  $("share-title").textContent = data.title || "Shared session";
+  document.title = (data.title || "Shared session") + " · Agent Remote";
+  const bits = [];
+  if (data.provider) bits.push(data.provider);
+  bits.push("read only");
+  bits.push(expiresLabel(data.expires_in));
+  $("share-sub").textContent = bits.join(" · ");
+
+  const items = expandMessages(data.messages || [], data.offset || 0);
+  view.textContent = "";
+  const thread = el("div", "thread");
+  if ((data.offset || 0) > 0) {
+    const btn = el("button", "load-older", "Load earlier messages");
+    btn.type = "button";
+    btn.addEventListener("click", () => loadOlder(token, data.offset, items, btn));
+    thread.appendChild(btn);
+  }
+  items.forEach((item) => thread.appendChild(renderMessage(item)));
+  if (!items.length)
+    thread.appendChild(el("p", "empty", "This session has no messages yet."));
+  view.appendChild(thread);
+  view.scrollTop = view.scrollHeight;
+}
+
+async function loadOlder(token, earliest, items, btn) {
+  if (earliest <= 0) return;
+  const from = Math.max(0, earliest - 200);
+  const count = earliest - from;
+  btn.disabled = true;
+  btn.textContent = "Loading…";
+  try {
+    const res = await fetch(
+      "/api/share/" + encodeURIComponent(token)
+      + "/messages?offset=" + from + "&limit=" + count,
+      { headers: { Accept: "application/json" } },
+    );
+    const page = await res.json();
+    if (!res.ok) throw new Error(page.error || "Could not load");
+    const older = expandMessages(page.messages || [], page.offset || 0);
+    const view = $("transcript");
+    const before = view.scrollHeight - view.scrollTop;
+    const thread = el("div", "thread");
+    if ((page.offset || 0) > 0) {
+      const next = el("button", "load-older", "Load earlier messages");
+      next.type = "button";
+      next.addEventListener("click", () => loadOlder(token, page.offset, older.concat(items), next));
+      thread.appendChild(next);
+    }
+    older.concat(items).forEach((item) => thread.appendChild(renderMessage(item)));
+    view.textContent = "";
+    view.appendChild(thread);
+    view.scrollTop = view.scrollHeight - before;
+  } catch (e) {
+    toast(e.message || "Could not load earlier messages");
+    btn.disabled = false;
+    btn.textContent = "Load earlier messages";
+  }
+}
+
+load();
+
+})();
+
+})();
+</script>
+</body>
+</html>

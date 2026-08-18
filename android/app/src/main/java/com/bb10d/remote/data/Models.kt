@@ -101,6 +101,8 @@ data class PingDto(
     val multi: Boolean = false,
     /** Focus support (agentremoted ≥ 2.6); gates Focus mode. */
     val focus: Boolean = false,
+    /** Session share (agentremoted ≥ 2.7); gates the share-link action. */
+    val share: Boolean = false,
     @SerialName("focus_states") val focusStates: List<String> = emptyList(),
     val providers: List<String> = emptyList(),
     @SerialName("provider_details")
@@ -182,6 +184,18 @@ data class TitleDto(
     val id: String = "",
     val title: String = "",
     val manual: Boolean = false,
+)
+
+/** POST /api/sessions/<id>/share — a 7-day read-only URL hosted by the daemon. */
+@Serializable
+data class ShareDto(
+    val ok: Boolean = false,
+    val token: String = "",
+    val url: String = "",
+    val path: String = "",
+    @SerialName("session_id") val sessionId: String = "",
+    @SerialName("expires_at") val expiresAt: Double = 0.0,
+    @SerialName("expires_in") val expiresIn: Long = 0,
 )
 
 /** POST /api/focus/<key>/{done,restore,seen}. */
@@ -475,6 +489,8 @@ data class Caps(
     val multi: Boolean = false,
     /** Focus support (agentremoted >= 2.6); gates Focus mode. */
     val focus: Boolean = false,
+    /** Session share (agentremoted >= 2.7). */
+    val share: Boolean = false,
     val providers: List<String> = emptyList(),
     val providerDetails: Map<String, ProviderDetailDto> = emptyMap(),
     val auth: AuthHealthDto? = null,
@@ -599,6 +615,7 @@ data class Caps(
             fetchedAtMs = nowMs,
             multi = ping.multi,
             focus = ping.focus,
+            share = ping.share,
             providers = ping.providers,
             providerDetails = ping.providerDetails,
             auth = ping.auth,

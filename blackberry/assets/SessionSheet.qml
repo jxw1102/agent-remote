@@ -214,6 +214,57 @@ Sheet {
                     textStyle.color: Color.create("#666666")
                 }
 
+                // ---- Share (open session, daemon ≥ 2.7) ----------------
+                Label {
+                    text: qsTr("Share")
+                    visible: sessionSheet.api
+                             ? (sessionSheet.api.capShare
+                                && sessionSheet.api.currentSessionId != "")
+                             : false
+                    topMargin: 24
+                    textStyle.fontSize: FontSize.XSmall
+                    textStyle.color: Color.create("#888888")
+                }
+                Button {
+                    visible: sessionSheet.api
+                             ? (sessionSheet.api.capShare
+                                && sessionSheet.api.currentSessionId != "")
+                             : false
+                    text: qsTr("Create read-only link")
+                    horizontalAlignment: HorizontalAlignment.Fill
+                    onClicked: {
+                        if (sessionSheet.api)
+                            sessionSheet.api.shareCurrentSession();
+                    }
+                }
+                Label {
+                    visible: sessionSheet.api
+                             ? (sessionSheet.api.shareStatus != "") : false
+                    text: sessionSheet.api ? sessionSheet.api.shareStatus : ""
+                    multiline: true
+                    textStyle.fontSize: FontSize.XXSmall
+                    textStyle.color: Color.create("#888888")
+                }
+                Label {
+                    visible: sessionSheet.api
+                             ? (sessionSheet.api.shareUrl != "") : false
+                    text: sessionSheet.api ? sessionSheet.api.shareUrl : ""
+                    multiline: true
+                    textStyle.fontSize: FontSize.XXSmall
+                    textStyle.color: Color.create("#aaaaaa")
+                }
+                Label {
+                    visible: sessionSheet.api
+                             ? (sessionSheet.api.capShare
+                                && sessionSheet.api.currentSessionId != "")
+                             : false
+                    text: qsTr("Anyone with the link can read this transcript for 7 days. They cannot send messages or see other sessions.")
+                    multiline: true
+                    topMargin: 0
+                    textStyle.fontSize: FontSize.XXSmall
+                    textStyle.color: Color.create("#666666")
+                }
+
                 // ---- Progress cues (Chime) -----------------------------
                 Label {
                     text: qsTr("Alerts")

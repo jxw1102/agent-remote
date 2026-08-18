@@ -286,6 +286,33 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
         }
     }
 
+    /**
+     * Mint a 7-day read-only URL. The client builds the public address from
+     * this profile's base URL so a tunnel hostname is what gets shared.
+     */
+    suspend fun shareSession(ref: SessionRef): Result<String> {
+        val profile = profile(ref.profileId) ?: return Result.failure(
+            IllegalStateException("unknown daemon"),
+        )
+        if (!profile.share) {
+            return Result.failure(
+                IllegalStateException("This daemon is too old to share sessions"),
+            )
+        }
+        return runCatching {
+            val res = client(profile).shareSession(ref.sessionId)
+            val path = res.path.ifBlank {
+                if (res.token.isNotBlank()) "/share/${res.token}" else ""
+            }
+            val origin = profile.baseUrl.trimEnd('/')
+            when {
+                origin.isNotEmpty() && path.isNotEmpty() -> origin + path
+                res.url.isNotBlank() -> res.url
+                else -> throw IllegalStateException("Daemon did not return a share link")
+            }
+        }
+    }
+
     /** Ask the daemon to derive a fresh title from the transcript. */
     suspend fun regenerateTitle(ref: SessionRef): Result<String> {
         val profile = profile(ref.profileId) ?: return Result.failure(

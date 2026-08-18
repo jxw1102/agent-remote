@@ -18,6 +18,20 @@ Treat the token like a password.
 Rotate by replacing the file and restarting the daemon; update every client
 profile.
 
+## Session share links
+
+`POST /api/sessions/<id>/share` (daemon token required) mints a random
+token bound to that session. `GET /share/<token>` and
+`GET /api/share/<token>` are public and **read-only**: they return that
+session's transcript, nothing else.
+
+- The share token is not the daemon token and is rejected as `X-Auth-Token`
+- Tokens expire after 7 days
+- Only the SHA-256 of the token is stored (`$AGENTREMOTED_HOME/shares.json`)
+- Changing the URL to another session (or another token) returns no data
+
+A share link is as public as the URL. Treat it like a document you emailed.
+
 ## Network
 
 - Default examples bind `0.0.0.0` so phones on the LAN can connect. On a VPS,

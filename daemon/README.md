@@ -19,6 +19,11 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.7.0** session share: `POST /api/sessions/<id>/share` mints a 7-day
+read-only token; `GET /share/<token>` is a hosted transcript viewer (same
+look as the web client) and `GET /api/share/<token>` returns that session
+only. Ping advertises `"share": true`. The token is not the daemon auth
+token and cannot be pointed at another session. LILYGO does not mint links.
 **2.6.5** drop Inbox: skip macOS `~/Public/Drop Box` in listings; allow
 recursive folder delete via `POST /api/drop/<name>/delete` (still confined to
 the drop dir; Drop Box and the drop root itself are protected).

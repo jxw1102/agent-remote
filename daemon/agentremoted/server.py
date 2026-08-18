@@ -3,7 +3,11 @@
 Three clients share this API: the BlackBerry and Android apps, and the
 standalone browser client in ../web (one page, wherever it is hosted, talking
 to every daemon at once). That last one is why CORS is enabled on every
-response — see _cors_headers. No daemon serves a UI itself.
+response — see _cors_headers.
+
+The daemon also hosts one public page: ``GET /share/<token>``, a read-only
+transcript viewer for a session someone chose to share. Everything else still
+requires the daemon token.
 
 Design constraints from the client side (BlackBerry 10, Qt 4.8 / Cascades):
   - plain HTTP + JSON, no SSE — the app polls (plus one optional WebSocket)
@@ -37,6 +41,10 @@ Endpoints (all under /api, all JSON):
                                                   turn lit vs dim; not a state)
   POST /api/sessions/<id>/title {title}           rename ("" clears override)
   POST /api/sessions/<id>/title/regenerate        re-derive the title via Haiku
+  POST /api/sessions/<id>/share                    mint a 7-day read-only URL
+  GET  /share/<token>                             hosted read-only transcript
+  GET  /api/share/<token>                         public session + messages
+  GET  /api/share/<token>/messages?offset=&limit= public transcript window
   GET  /api/jobs                                  running/recent jobs
   GET  /ws/status                                 WebSocket: active-job status pushes
   GET  /sse/status                                SSE: active-job status pushes
@@ -84,6 +92,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 from . import __version__
 from . import accounts
 from . import focus as focus_store
+from . import shares as share_store
 from . import ssestream
 from . import wstream
 
@@ -107,6 +116,10 @@ _DROP_FILE = re.compile(r"^/api/drop/([^/]+)$")
 _DROP_DELETE = re.compile(r"^/api/drop/([^/]+)/delete$")
 _SESSION_TITLE = re.compile(r"^/api/sessions/([^/]+)/title$")
 _SESSION_RETITLE = re.compile(r"^/api/sessions/([^/]+)/title/regenerate$")
+_SESSION_SHARE = re.compile(r"^/api/sessions/([^/]+)/share$")
+_SHARE_PAGE = re.compile(r"^/share/([A-Za-z0-9_-]{20,64})$")
+_SHARE_API = re.compile(r"^/api/share/([A-Za-z0-9_-]{20,64})$")
+_SHARE_MSGS = re.compile(r"^/api/share/([A-Za-z0-9_-]{20,64})/messages$")
 _FOCUS_DONE = re.compile(r"^/api/focus/([^/]+)/done$")
 _FOCUS_RESTORE = re.compile(r"^/api/focus/([^/]+)/restore$")
 _FOCUS_SEEN = re.compile(r"^/api/focus/([^/]+)/seen$")
@@ -166,6 +179,9 @@ class ApiHandler(BaseHTTPRequestHandler):
     # Focus-list membership + title overrides, shared across every provider
     # and every client of this daemon (focus.Focus).
     focus = None
+    # Read-only share tokens (shares.ShareStore). Public /share/<token> pages
+    # resolve through this table — never through the daemon auth token.
+    shares = None
     # Set per-request by _authorize(); never share data across principals.
     principal = None
 
@@ -833,6 +849,19 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _error(self, status, message):
         self._send_json({"error": message}, status=status, close=True)
 
+    def _send_html(self, body, status=200):
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
     def _extract_token(self, query) -> str:
         supplied = self.headers.get("X-Auth-Token", "")
         if not supplied:
@@ -1205,6 +1234,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         if m:
             self._handle_session_title(m.group(1), body)
             return True
+        m = _SESSION_SHARE.match(path)
+        if m:
+            self._handle_session_share(m.group(1))
+            return True
         for pattern, action in ((_FOCUS_DONE, "done"),
                                 (_FOCUS_RESTORE, "restore"),
                                 (_FOCUS_SEEN, "seen")):
@@ -1300,6 +1333,176 @@ class ApiHandler(BaseHTTPRequestHandler):
         b.set_title(key, title, manual=False)
         self._send_json({"ok": True, "id": key, "title": title,
                          "manual": False})
+
+    # ---- session share ------------------------------------------------
+    #
+    # A share token is a capability for ONE session. It is not the daemon
+    # auth token, is not accepted as X-Auth-Token, and never names the
+    # session in the public URL — swapping path segments cannot point it
+    # at a different transcript.
+
+    def _route_share_get(self, path, query) -> bool:
+        """Public share routes. True when this request was answered."""
+        m = _SHARE_PAGE.match(path)
+        if m:
+            self._handle_share_page(m.group(1))
+            return True
+        m = _SHARE_MSGS.match(path)
+        if m:
+            self._handle_share_messages(m.group(1), query)
+            return True
+        m = _SHARE_API.match(path)
+        if m:
+            self._handle_share_get(m.group(1), query)
+            return True
+        return False
+
+    def _handle_session_share(self, raw_id: str):
+        """POST /api/sessions/<id>/share — mint a 7-day read-only URL."""
+        table = self.shares
+        if table is None:
+            self._error(503, "sharing unavailable")
+            return
+        key = self._focus_key_from_path(raw_id)
+        if not key:
+            self._error(400, "session id required")
+            return
+        name, bundle, session = self._find_session(key)
+        if session is None or not self._session_in_scope(session):
+            self._error(404, "session not found")
+            return
+        provider = name or (
+            (session or {}).get("provider")
+            or (getattr(self.runner, "name", "") if self.runner else "")
+            or ""
+        )
+        guest_root = ""
+        p = self.principal
+        if p is not None and p.is_guest:
+            guest_root = p.root or ""
+        rec = table.create(
+            session_id=key,
+            provider=str(provider or ""),
+            guest_root=guest_root,
+            title=str((session or {}).get("title") or ""),
+        )
+        path = rec.get("path") or ("/share/" + rec["token"])
+        rec["ok"] = True
+        rec["url"] = self._public_origin() + path
+        self._send_json(rec)
+
+    def _public_origin(self) -> str:
+        """Best-effort public origin from this request (tunnels via X-Forwarded-*).
+
+        Clients that already know the daemon URL should prefer their configured
+        origin + ``path``; this is for curl and the hosted page itself.
+        """
+        proto = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip()
+        host = (self.headers.get("X-Forwarded-Host") or "").split(",")[0].strip()
+        if not host:
+            host = (self.headers.get("Host") or "").strip()
+        xfssl = (self.headers.get("X-Forwarded-Ssl") or "").strip().lower()
+        if xfssl in ("on", "1"):
+            proto = proto or "https"
+        if not proto:
+            cert = str(getattr(self.config, "tls_cert", "") or "")
+            key = str(getattr(self.config, "tls_key", "") or "")
+            proto = "https" if (cert and key) else "http"
+        if host:
+            return "%s://%s" % (proto, host)
+        bind = str(getattr(self.config, "bind", "") or "127.0.0.1")
+        if bind in ("0.0.0.0", "::", "[::]"):
+            bind = "127.0.0.1"
+        port = int(getattr(self.config, "port", 8473) or 8473)
+        return "%s://%s:%s" % (proto, bind, port)
+
+    def _share_record(self, token: str):
+        table = self.shares
+        if table is None:
+            return None
+        return table.resolve(token)
+
+    def _store_for_share(self, rec):
+        """Harness store the share was minted against (guest-scoped if needed)."""
+        provider = str((rec or {}).get("provider") or "").strip()
+        guest_root = str((rec or {}).get("guest_root") or "").strip()
+        if guest_root:
+            store = self._make_guest_store(provider, guest_root)
+            if store is not None:
+                return store
+        if provider and self.bundles:
+            b = self.bundles.get(provider)
+            if b is not None:
+                return b.store
+        if self.store is not None:
+            return self.store
+        if provider:
+            return None
+        for b in (self.bundles or {}).values():
+            return b.store
+        return None
+
+    def _share_payload(self, rec, query):
+        """Read-only session + message window for a resolved share record.
+
+        Returns (payload_dict, None) or (None, (status, message)).
+        """
+        store = self._store_for_share(rec)
+        if store is None:
+            return None, (404, "not found")
+        session_id = rec["session_id"]
+        session = store.get_session(session_id)
+        if session is None:
+            return None, (404, "not found")
+        offset = self._int_param(query, "offset", None)
+        limit = min(max(self._int_param(query, "limit", 200), 1), 500)
+        result = store.get_messages(session_id, offset, limit)
+        if result is None:
+            return None, (404, "not found")
+        messages = []
+        for m in (result.get("messages") or []):
+            if not isinstance(m, dict):
+                continue
+            messages.append({
+                "uuid": m.get("uuid") or "",
+                "role": m.get("role") or "",
+                "ts": m.get("ts") or m.get("timestamp") or "",
+                "text": m.get("text") or "",
+                "metaKind": m.get("metaKind") or "",
+            })
+        title = str(session.get("title") or rec.get("title") or "").strip()
+        return {
+            "ok": True,
+            "title": title or "Shared session",
+            "provider": rec.get("provider") or session.get("provider") or "",
+            "last_active": session.get("last_active") or "",
+            "expires_at": rec["expires_at"],
+            "expires_in": max(0, int(rec["expires_at"] - time.time())),
+            "offset": result.get("offset") or 0,
+            "total": result.get("total") or len(messages),
+            "messages": messages,
+        }, None
+
+    def _handle_share_page(self, token: str):
+        rec = self._share_record(token)
+        if rec is None:
+            self._send_html(_share_missing_html(), status=404)
+            return
+        self._send_html(_share_page_html())
+
+    def _handle_share_get(self, token: str, query):
+        rec = self._share_record(token)
+        if rec is None:
+            self._error(404, "not found")
+            return
+        payload, err = self._share_payload(rec, query)
+        if err is not None:
+            self._error(err[0], err[1])
+            return
+        self._send_json(payload)
+
+    def _handle_share_messages(self, token: str, query):
+        self._handle_share_get(token, query)
 
     def _retitle_source_text(self, store, session_id: str, session: dict) -> str:
         """Text to summarise: the opening ask plus the latest exchange.
@@ -1487,6 +1690,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 pass  # client already gone
 
     def _route_get(self):
+        # Public share links use the raw path so a harness named "share"
+        # cannot steal /share/<token> via the multi-provider prefix bind.
+        raw = urlparse(self.path)
+        raw_path = raw.path.rstrip("/") or "/"
+        if self._route_share_get(raw_path, parse_qs(raw.query)):
+            return
+
         path, query, bundle = self._bind_path()
         multi = bool(self.bundles) and len(self.bundles) > 1
 
@@ -1579,6 +1789,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 # rename, and regenerate on this flag.
                 payload["focus"] = self.focus is not None
                 payload["focus_states"] = list(focus_store.STATES)
+                payload["share"] = self.shares is not None
                 self._send_json(payload)
                 return
             if self.runner is None:
@@ -1626,6 +1837,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             # rename, and regenerate on this flag.
             payload["focus"] = self.focus is not None
             payload["focus_states"] = list(focus_store.STATES)
+            payload["share"] = self.shares is not None
             self._send_json(payload)
             return
 
@@ -3207,6 +3419,35 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._send_json(decision, close=True)
 
 
+def _share_page_html() -> bytes:
+    """Built web share viewer, or the stdlib fallback if it was not packaged."""
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "static", "share.html")
+    try:
+        with open(here, "rb") as f:
+            body = f.read()
+        if body:
+            return body
+    except OSError:
+        pass
+    return share_store.FALLBACK_HTML.encode("utf-8")
+
+
+def _share_missing_html() -> bytes:
+    return (
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>Link not found · Agent Remote</title>"
+        "<style>body{margin:0;background:#0b0b0d;color:#e6e8ec;"
+        "font:15px/1.5 system-ui,sans-serif;}"
+        ".empty{max-width:420px;margin:18vh auto;text-align:center;color:#7a8394;}"
+        "h1{color:#e6e8ec;font-size:20px;}</style></head><body>"
+        "<div class=\"empty\"><h1>Link not found</h1>"
+        "<p>This share link is invalid or has expired.</p></div>"
+        "</body></html>"
+    ).encode("utf-8")
+
+
 def make_server(config, token, bundles) -> ThreadingHTTPServer:
     """bundles: OrderedDict name → ProviderBundle (at least one)."""
     bundles = bundles or {}
@@ -3224,6 +3465,7 @@ def make_server(config, token, bundles) -> ThreadingHTTPServer:
         "bundles": bundles,
         # One focus list per daemon, shared by every harness and every client.
         "focus": focus_store.Focus(),
+        "shares": share_store.ShareStore(),
     })
     server = ThreadingHTTPServer((config.bind, int(config.port)), handler)
     cert = str(getattr(config, "tls_cert", "") or "")
