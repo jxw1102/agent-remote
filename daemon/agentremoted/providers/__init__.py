@@ -79,7 +79,10 @@ def build_one(config, name: str):
         store, runner = CodexStore(config.codex_home_path, config), CodexRunner(config)
     elif name in ("deepseek", "dsh"):
         from .deepseek import DeepseekRunner, DeepseekStore
-        store, runner = DeepseekStore(config), DeepseekRunner(config)
+        from .dsh_host import DshHost
+        host = DshHost(config)
+        store = DeepseekStore(config, host=host)
+        runner = DeepseekRunner(config, host=host)
     if store is not None:
         titler = getattr(runner, "title_for", None)
         if callable(titler):

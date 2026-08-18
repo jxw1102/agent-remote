@@ -2651,6 +2651,20 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(403, cerr)
             return
         try:
+            # If this session already has an in-flight turn, route the new
+            # prompt into that job's queue rather than starting a second
+            # concurrent dsh prompt (which dsh rejects as agent-busy). This is
+            # what the web's /queue does; /continue only lands here when the
+            # client does not have the running job pinned to the open session.
+            running = self.jobs.running_for_session(session_id)
+            if running is not None:
+                queued, reason = self.jobs.enqueue(running.id, body["prompt"])
+                if queued is None:
+                    self._error(409, reason)
+                    return
+                self._focus_enroll(running)
+                self._send_json({"job_id": running.id}, status=200)
+                return
             job = self._start_job_for_principal(
                 prompt=body["prompt"],
                 cwd=cwd or session.get("cwd", ""),

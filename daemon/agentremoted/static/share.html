@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <meta name="referrer" content="no-referrer">
 <title>Shared session · Agent Remote</title>
-<!-- built 2026-08-18 07:54 from web/src -->
+<!-- built 2026-08-18 13:32 from web/src -->
 <style>
 /* Agent Remote, browser client.
  *
@@ -2703,7 +2703,8 @@ function applyAccent(provider) {
   const p = String(provider || "").toLowerCase();
   const accent = p === "grok" ? "#00d4ff"
     : p === "claude" ? "#d97757"
-    : p === "codex" ? "#9aa4b2"
+    : p === "codex" ? "#10a37f"
+    : (p === "deepseek" || p === "dsh") ? "#4d6bfe"
     : "#9aa4b2";
   document.documentElement.style.setProperty("--accent", accent);
 }

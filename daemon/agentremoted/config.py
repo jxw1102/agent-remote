@@ -216,8 +216,12 @@ DEFAULTS = {
     # ---- deepseek harness (dsh web on localhost) ------------------------
     # The official UI is `npx @deepseek-ai/dsh web`. Agent Remote talks to
     # that process over loopback HTTP — never expose :3080 to the phone.
+    # If the URL is already up we adopt it; otherwise we start `dsh web`
+    # ourselves (set dsh_manage false to keep "start it yourself").
     "dsh_url": "http://127.0.0.1:3080",
     "dsh_home": str(Path.home() / ".dsh"),
+    "dsh_bin": "dsh",
+    "dsh_manage": True,
 }
 
 

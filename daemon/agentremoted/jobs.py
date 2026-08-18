@@ -682,6 +682,28 @@ class JobManager:
                     return [dict(q) for q in job.queued], removed["prompt"]
         return None
 
+    def running_for_session(self, session_id: str) -> Job:
+        """The active (starting/running) job bound to a session, or None.
+
+        Matches either the session the job was created against or the session
+        it created (deepseek/new sessions put the dsh id in new_session_id).
+        Used to route a `/continue` into the running job's queue instead of
+        starting a second concurrent dsh turn that would be rejected as busy.
+        """
+        want = str(session_id or "").strip()
+        if not want:
+            return None
+        for job in self.jobs.values():
+            with job.lock:
+                st = job.status
+                sid = str(job.session_id or "")
+                nid = str(job.new_session_id or "")
+            if st not in ("starting", "running"):
+                continue
+            if sid == want or nid == want:
+                return job
+        return None
+
     def _chain_head(self, job_id: str) -> Job:
         """Follow next_job_id links to the currently active job, if any.
 

@@ -99,6 +99,7 @@ def main():
 
     # Force interactive managers to adopt surviving tmux TUIs *before*
     # rehydrating mid-turn jobs so resume can rebind by session id.
+    # DeepSeek: adopt a live `dsh web` or start one so resume can talk to it.
     for name, bundle in bundles.items():
         force = getattr(bundle.runner, "_interactive_mgr", None)
         if callable(force):
@@ -106,6 +107,20 @@ def main():
                 force()
             except Exception as e:  # noqa: BLE001
                 log.warning("interactive adopt for %s failed: %s", name, e)
+        ensure = getattr(bundle.runner, "ensure_host", None)
+        if callable(ensure):
+            try:
+                ok = ensure()
+                host = getattr(bundle.runner, "host", None)
+                if ok:
+                    src = getattr(host, "source", "") or "ready"
+                    log.info("dsh web %s at %s", src,
+                             getattr(getattr(host, "client", None), "base", ""))
+                else:
+                    log.warning("dsh web not ready for %s: %s", name,
+                                getattr(host, "last_error", "") or "unknown")
+            except Exception as e:  # noqa: BLE001
+                log.warning("dsh web ensure for %s failed: %s", name, e)
         try:
             bundle.jobs.resume_jobs()
         except Exception as e:  # noqa: BLE001

@@ -19,10 +19,33 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.8.2** DeepSeek no longer requires you to start `dsh web` yourself: if the
+configured loopback URL (`dsh_url`, default `http://127.0.0.1:3080`) already
+answers `session.list`, the daemon adopts it; otherwise it starts
+`dsh web --host 127.0.0.1 --port …` (log `~/.agentremoted/dsh-web.log`, pid
+file so a daemon restart re-attaches). A remote `dsh_url` is adopt-only.
+Set `"dsh_manage": false` to keep the old "start it yourself" behaviour.
+
+**2.8.1** DeepSeek transcript + process view: dsh injects `<system-reminder>` /
+`<task-notification>` / `<monitor-event>` blocks as user-role history events
+the human never typed — the DeepSeek provider now strips them (matching the
+Claude / Grok providers) so the transcript, previews, and share links only
+show real user text. Process view (`?detail=steps`) is now wired to dsh's real
+content-block model: tool calls live inside `assistant/message` blocks and
+results arrive as `tool/result` events, so the phone shows tool_use /
+tool_result / thinking rows (canonical `steps` format) and can expand truncated
+bodies via `GET /api/sessions/<id>/steps/<ref>`. The live transcript stream
+shows only user-visible text — dsh `reasoning` blocks no longer leak into
+normal view (they stay thinking steps in process view). Sending a new prompt
+while a DeepSeek turn is running now queues it behind that job instead of
+starting a second concurrent dsh turn: `/api/sessions/<id>/continue` routes
+into the in-flight job's queue (`running_for_session`), so a follow-up prompt
+is no longer dropped with `agent-busy`.
 **2.8.0** DeepSeek Harness (`dsh web`) as a fourth provider: the daemon is a
 localhost client of `http://127.0.0.1:3080/api` (list / history / prompt /
-cancel / models). Add `"deepseek"` to `providers`. Keep `dsh web` running on
-the host; do not expose :3080. No TUI / Live TUI.
+cancel / models). Add `"deepseek"` to `providers`. Do not expose :3080. No
+TUI / Live TUI. From 2.8.2 the daemon starts `dsh web` when it is not
+already running.
 **2.7.0** session share: `POST /api/sessions/<id>/share` mints a 7-day
 read-only token; `GET /share/<token>` is a hosted transcript viewer (same
 look as the web client) and `GET /api/share/<token>` returns that session
@@ -69,7 +92,7 @@ state tags on session rows, session rename / retitle, and `"focus": true` on
 | `claude` | `~/.claude/projects/**/*.jsonl` | `claude` (headless or interactive TUI) |
 | `grok`   | `~/.grok/sessions/<group>/<id>/` | `grok` (headless or interactive TUI) |
 | `codex`  | `~/.codex` state / rollouts | `codex exec` / interactive TUI |
-| `deepseek` | `dsh web` `/api` on localhost | `session.prompt` / `session.cancel` |
+| `deepseek` | `dsh web` `/api` on localhost (adopted or daemon-started) | `session.prompt` / `session.cancel` |
 
 Everything CLI-specific lives in `agentremoted/providers/`. Queue, stop,
 permission bridge, and status streams are shared.
