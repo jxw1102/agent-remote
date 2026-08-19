@@ -2368,6 +2368,12 @@ void tick() {
     }
   }
 
+  // A new session appeared on some daemon (sessions_rev bumped, daemon >= 2.21)
+  // — re-list so it shows without a manual refresh. This catches brand-new
+  // sessions with no active job yet, which the "!jobs.empty()" trigger misses.
+  // Rate-limited (20 s floor) so it never thrashes the sockets.
+  if (statusfeed::takeSessionsChanged()) refreshSessionsRateLimited();
+
   // BLE buddy snapshot changes: same chime rules, desktop-side counters.
   static uint32_t lastBleGen = 0;
   static int blePrevRunning = 0;

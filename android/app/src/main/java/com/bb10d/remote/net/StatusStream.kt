@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit
 class StatusStream(private val client: DaemonClient) {
 
     sealed interface Event {
-        data class Frame(val active: List<ActiveJobDto>) : Event
+        data class Frame(val active: List<ActiveJobDto>, val sessionsRev: Int) : Event
         data class Down(val reason: String) : Event
         data object Up : Event
     }
@@ -69,7 +69,7 @@ class StatusStream(private val client: DaemonClient) {
                         val frame = runCatching {
                             Json.decodeFromString(StatusFrameDto.serializer(), data)
                         }.getOrNull() ?: return
-                        trySend(Event.Frame(frame.active))
+                        trySend(Event.Frame(frame.active, frame.sessionsRev))
                     }
 
                     override fun onClosed(eventSource: EventSource) {

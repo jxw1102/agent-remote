@@ -404,6 +404,9 @@ data class ActiveJobDto(
 data class StatusFrameDto(
     val type: String = "",
     val active: List<ActiveJobDto> = emptyList(),
+    // Daemon ≥ 2.21: bumps when a new session appears so the client re-lists.
+    // Absent (0) on older daemons.
+    @SerialName("sessions_rev") val sessionsRev: Int = 0,
 )
 
 @Serializable

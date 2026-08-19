@@ -403,6 +403,7 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
             val tag = "${profile.id}@$signature"
             if (streamTags[profile.id] == tag && streams[profile.id]?.isActive == true) return@forEach
             streams.remove(profile.id)?.cancel()
+            lastSessionsRev.remove(profile.id)
             streamTags[profile.id] = tag
             streams[profile.id] = scope.launch {
                 StatusStream(client(profile)).events().collect { event ->
@@ -410,6 +411,14 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
                         is StatusStream.Event.Frame -> {
                             _active.value = _active.value + (profile.id to event.active)
                             _streamsUp.value = _streamsUp.value + profile.id
+                            // sessions_rev (daemon ≥ 2.21) bumps when a new
+                            // session appears — re-list so it shows without a
+                            // manual refresh. The first frame per (re)connect
+                            // only baselines: connecting must not reload.
+                            val prev = lastSessionsRev.put(profile.id, event.sessionsRev)
+                            if (prev != null && prev != event.sessionsRev) {
+                                scope.launch { refreshSessions(_sessions.value.searchQuery) }
+                            }
                         }
 
                         is StatusStream.Event.Up -> {
@@ -419,6 +428,10 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
                         is StatusStream.Event.Down -> {
                             _streamsUp.value = _streamsUp.value - profile.id
                             _active.value = _active.value + (profile.id to emptyList())
+                            // Keep the rev baseline: if a session appeared while
+                            // the stream was down, the reconnect's first frame
+                            // differs and re-lists (a daemon restart resets the
+                            // rev to 0, which costs one harmless re-list).
                         }
                     }
                 }
@@ -427,6 +440,9 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
     }
 
     private val streamTags = ConcurrentHashMap<String, String>()
+
+    /** Last `sessions_rev` seen per profile's status stream (daemon ≥ 2.21). */
+    private val lastSessionsRev = ConcurrentHashMap<String, Int>()
 
     /** Every session id any daemon is working on right now. */
     val workingKeys: StateFlow<Set<String>> = active

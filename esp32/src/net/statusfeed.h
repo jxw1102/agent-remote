@@ -43,6 +43,9 @@ State state(int idx);
 State aggregate();
 // Bumps every time any feed gets a new snapshot; cheap change detection.
 uint32_t generation();
+// True (and clears) if any feed's sessions_rev changed since last checked —
+// a new session appeared (daemon >= 2.21). Drives a session-list re-fetch.
+bool takeSessionsChanged();
 // Merged jobs across every feed (rebuilt lazily on generation change).
 const std::vector<JobStat> &jobs();
 

@@ -24,6 +24,11 @@ final class DaemonClient: ObservableObject {
     private(set) var agentClient: AgentRemoteClient?
     private var statusTask: Task<Void, Never>?
 
+    /// Called when the status stream reports a new `sessions_rev` (daemon ≥ 2.21)
+    /// — a session appeared here — so the owner can re-list. Never fires on the
+    /// first frame of a stream (that only establishes the baseline).
+    var onNewSession: (() -> Void)?
+
     var isConnected: Bool { if case .connected = state { return true }; return false }
     var caps: PingResponse.Capabilities? { if case .connected(let ping) = state { return ping.caps }; return nil }
     var availableModels: [String] { if case .connected(let ping) = state { return ping.models ?? [] }; return [] }
@@ -70,12 +75,19 @@ final class DaemonClient: ObservableObject {
 
     private func startStatusStream(_ client: AgentRemoteClient) {
         statusTask = Task { [weak self] in
+            // Per-stream baseline: the first frame only records the rev, so a
+            // reconnect (e.g. on foreground) never triggers a spurious re-list.
+            var lastRev: Int?
             do {
                 for try await push in client.statusStream() {
                     guard let self, !Task.isCancelled else { return }
                     var map: [String: ActiveJobStatus] = [:]
                     for job in push.active { map[job.jobId] = job }
                     self.activeJobs = map
+                    if let prev = lastRev, push.sessionsRev != prev {
+                        self.onNewSession?()
+                    }
+                    lastRev = push.sessionsRev
                 }
             } catch {
                 // Best-effort feed — a dropped status stream doesn't affect core chat functionality
