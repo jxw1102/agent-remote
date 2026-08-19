@@ -90,6 +90,11 @@ final class AppModel: ObservableObject {
         for profile in profiles {
             if clients[profile.id] == nil {
                 let dc = DaemonClient()
+                // A new session appeared on this daemon (host TUI, another
+                // client, headless turn) — re-list so it shows immediately.
+                dc.onNewSession = { [weak self] in
+                    Task { @MainActor in await self?.refreshSessions() }
+                }
                 clients[profile.id] = dc
                 clientObservers[profile.id] = dc.objectWillChange.sink { [weak self] _ in
                     Task { @MainActor in

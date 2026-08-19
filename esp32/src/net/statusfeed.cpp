@@ -25,6 +25,10 @@ TaskHandle_t feedTask = nullptr;
 // long a connect() was holding the lock (the "Web screen lags" report).
 volatile uint32_t pauseUntil[kMaxFeeds] = {0, 0, 0};
 
+// Set (under dataMx) when any feed sees its sessions_rev change; the UI thread
+// consumes it via takeSessionsChanged() to re-list.
+bool sessionsDirty = false;
+
 struct Feed {
   int idx = 0;
   String host;
@@ -41,6 +45,8 @@ struct Feed {
   State st = State::Off;
   uint32_t gen = 0;
   std::vector<JobStat> jobs;
+  uint32_t sessionsRev = 0;  // daemon >= 2.21: bumps when a new session appears
+  bool revSeeded = false;    // first frame after (re)configure only baselines
 
   uint32_t nextConnectAt = 0;
   uint32_t lastByteAt = 0;
@@ -91,6 +97,8 @@ struct Feed {
     configured = false;
     st = State::Off;
     jobs.clear();
+    sessionsRev = 0;
+    revSeeded = false;
     gen++;
   }
 
@@ -104,6 +112,8 @@ struct Feed {
     st = State::Connecting;
     headersDone = false;
     lineBuf = "";
+    // Keep the sessions_rev baseline across reconnects: a session created
+    // while the feed was down still differs on the first frame and re-lists.
     if (!cli->connect(host.c_str(), port, 1500)) {
       if (failStreak < 250) failStreak++;
       dlog::logf("[feed%d] connect failed (retry in %u ms)", idx,
@@ -148,9 +158,18 @@ struct Feed {
       next.push_back(j);
       if (next.size() >= 8) break;  // screen fits 4; keep memory bounded
     }
+    // sessions_rev (daemon >= 2.21) bumps when a new session appears; a brand
+    // new session may have no active job, so this is a more precise "re-list"
+    // trigger than gen (which ticks every second from elapsed_s). Older
+    // daemons omit the field -> stays 0 -> never fires. First frame per
+    // configure only baselines (revSeeded), so connecting never re-lists.
+    uint32_t rev = doc["sessions_rev"] | 0;
     xSemaphoreTake(dataMx, portMAX_DELAY);
     jobs.swap(next);
     gen++;
+    if (revSeeded && rev != sessionsRev) sessionsDirty = true;
+    sessionsRev = rev;
+    revSeeded = true;
     xSemaphoreGive(dataMx);
   }
 
@@ -312,6 +331,15 @@ uint32_t generation() {
   for (int i = 0; i < feedCount; i++) g += feeds[i].gen;
   xSemaphoreGive(dataMx);
   return g;
+}
+
+bool takeSessionsChanged() {
+  if (!dataMx) return false;
+  xSemaphoreTake(dataMx, portMAX_DELAY);
+  bool dirty = sessionsDirty;
+  sessionsDirty = false;
+  xSemaphoreGive(dataMx);
+  return dirty;
 }
 
 const std::vector<JobStat> &jobs() {
