@@ -2900,7 +2900,11 @@ function attachJob(jobId, sessionId = null) {
     state.job.openGen = state.openGen;
     return;
   }
-  stopJobWatch();
+  // Silent teardown only: stopJobWatch() re-renders the banner, and with
+  // state.job momentarily null the banner's auto-attach path would call back
+  // into attachJob — mutual recursion until the stack blew, leaving no job
+  // attached and no Answer UI for a pending question.
+  detachJobWatch();
   // Pin the job to the session that owned it when we attached — never to
   // whatever happens to be open later if the user switches rows mid-turn.
   state.job = {
@@ -2927,13 +2931,18 @@ function attachJob(jobId, sessionId = null) {
   pollJob();
 }
 
-function stopJobWatch() {
+/** Tear down the job watch without touching the banner (see attachJob). */
+function detachJobWatch() {
   if (state.jobTimer) clearInterval(state.jobTimer);
   state.jobTimer = null;
   state.job = null;
   state.jobLastFetch = 0;
   // Keep the 34×34 Stop slot empty — do not collapse the row.
   setIconIdle($("btn-stop"), true);
+}
+
+function stopJobWatch() {
+  detachJobWatch();
   renderBanner();
 }
 
