@@ -1446,10 +1446,53 @@ class GrokRunner:
             "detail": "`grok` not on PATH",
         }
 
+    # `grok models` output, cached: (fetched_at_monotonic, [ids]).
+    _MODELS_TTL_S = 900
+    _models_cache = (0.0, None)
+
+    def _cli_models(self) -> list:
+        """Model ids straight from `grok models`, so the pickers can never
+        drift from what the CLI actually accepts. Cached — the command checks
+        login state and is too slow for every ping. Returns [] on any failure.
+
+        Output shape parsed (2026-08 CLI):
+            Available models:
+              * grok-4.6 (default)
+              - grok-4.5
+        """
+        now = time.monotonic()
+        at, cached = type(self)._models_cache
+        if cached is not None and now - at < self._MODELS_TTL_S:
+            return list(cached)
+        ids = []
+        try:
+            out = subprocess.run(
+                [self.config.grok_bin, "models"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout or ""
+            listing = False
+            for line in out.splitlines():
+                stripped = line.strip()
+                if stripped.lower().startswith("available models"):
+                    listing = True
+                    continue
+                if not listing or not stripped:
+                    continue
+                m = re.match(r"^[*-]\s+(\S+)", stripped)
+                if m:
+                    ids.append(m.group(1))
+        except (OSError, subprocess.SubprocessError):
+            ids = []
+        # Cache misses too (short TTL would hammer a broken CLI otherwise).
+        type(self)._models_cache = (now, ids)
+        return list(ids)
+
     def models(self) -> list:
-        """Model ids the app offers for -m/--model. Config `models` extends
-        the known grok families."""
-        default = ["default", "grok-4.5", "grok-4"]
+        """Model ids the app offers for -m/--model: "default" (let the CLI
+        pick), then whatever `grok models` reports — hardcoded families only
+        when the CLI can't answer. Config `models` extends the list."""
+        live = self._cli_models()
+        default = ["default"] + (live or ["grok-4.5", "grok-4"])
         extra = [str(m).strip() for m in
                  (getattr(self.config, "models", None) or []) if str(m).strip()]
         out = []
