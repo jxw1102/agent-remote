@@ -1010,7 +1010,9 @@ function setEffortFor(profile, harness, effort) {
 
 // ----------------------------------------------------------- onboarding
 
-const DAEMON_RELEASES = "https://github.com/jxw1102/agent-remote/releases";
+const DAEMON_INSTALL_CMD =
+  "curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.sh | bash";
+const OTHER_CLIENTS_URL = "https://github.com/jxw1102/agent-remote#clients";
 
 /** Shared empty-state mark (chevron + underscore on a disc). */
 function appendEmptyLogo(parent) {
@@ -1046,8 +1048,7 @@ function buildDaemonGuide(opts = {}) {
   const steps = document.createElement("ol");
   steps.className = "welcome-steps";
   [
-    "Download the daemon package from Releases.",
-    "Run it (<code>cd daemon && PYTHONPATH=. python3 -m agentremoted</code> or the launchd/systemd install).",
+    "Install the daemon: <code>" + DAEMON_INSTALL_CMD + "</code>",
     "Copy the token from <code>~/.agentremoted/token</code> and add a profile.",
   ].forEach((html) => {
     const li = document.createElement("li");
@@ -1062,10 +1063,10 @@ function buildDaemonGuide(opts = {}) {
   actions.appendChild(add);
   const link = document.createElement("a");
   link.className = "welcome-link";
-  link.href = DAEMON_RELEASES;
+  link.href = OTHER_CLIENTS_URL;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
-  link.textContent = "Get the daemon →";
+  link.textContent = "Agent Remote on other platforms →";
   actions.appendChild(link);
   empty.appendChild(actions);
   return empty;

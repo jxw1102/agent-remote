@@ -142,7 +142,7 @@ CLI bills the **API key** — unset the key to stay on Max. Full notes:
 
 | Client | Location | Intended use |
 | --- | --- | --- |
-| Web | [`web/`](web/) | Browser; no build step |
+| Web | [`web/`](web/) · [hosted client](https://nice-dune-0415af003.7.azurestaticapps.net/) | Browser; no build step — or just open the hosted page |
 | Android | [`android/`](android/) | Full mobile client + notifications |
 | iOS | community / releases | Native remote (contributor) |
 | BlackBerry 10 | [`blackberry/`](blackberry/) | Cascades app for BB10 devices |

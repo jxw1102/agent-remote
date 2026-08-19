@@ -636,6 +636,8 @@ button.icon-btn.icon-idle {
 }
 .welcome-steps li { margin: 6px 0; }
 .welcome-steps strong { color: var(--text); }
+/* The install one-liner is long; break it rather than overflow the card. */
+.welcome-steps code { word-break: break-all; }
 .welcome-actions {
   display: flex;
   flex-wrap: wrap;
