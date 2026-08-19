@@ -19,6 +19,14 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.21.0** New sessions show up on every client without a refresh. The
+status stream (`/sse/status`, `/ws/status`) carries `sessions_rev`, which
+goes up when a session is created or removed anywhere on the host - its own
+TUI, another phone, a headless turn - and clients re-list when it changes.
+One shared watcher fingerprints each store's per-project session counts at
+most every 2 s, so N connected clients cost one scan. Guests get a watcher
+over their own harness home. New capability `session_events` on every
+provider.
 **2.20.12** An interactive Claude turn in a folder Claude has never trusted
 starts. Claude Code 2.1.3xx lists "No, exit" first on its folder-trust
 dialog, so the blind Enter that dismisses startup screens picked it and the
@@ -802,9 +810,16 @@ GET  /api/drop                                  files and folders (type=file|dir
                                                 skips macOS "Drop Box")
 GET  /api/drop/<name>                           a folder downloads as <name>.zip
 POST /api/drop/<name>/delete                    file or folder (recursive)
-GET  /ws/status
-GET  /sse/status
+GET  /ws/status                                 {type, active, sessions_rev}
+GET  /sse/status                                same frame as /ws/status
 ```
+
+`sessions_rev` (capability `session_events`) is a counter that goes up when
+the set of sessions changes - one started from the host TUI, another client or
+a headless turn, or one removed - but not on activity inside a session. A
+client keeps the last value per daemon, ignores the first frame after it
+connects, and re-lists when the value changes. It restarts at 0 with the
+daemon. A guest's stream counts only the guest's own sessions.
 
 ### Focus
 

@@ -366,6 +366,7 @@ class CodebuddyRunner:
             "stop": True,
             "projects": True,
             "ws_status": True,
+            "session_events": True,
             # Headless turns auto-approve. Interactive can still lift a
             # pane dialog onto the phone; that does not need this flag.
             "permissions": False,

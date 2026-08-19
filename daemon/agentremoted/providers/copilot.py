@@ -686,6 +686,7 @@ class CopilotRunner:
             "stop": True,
             "projects": True,
             "ws_status": True,
+            "session_events": True,
             "permissions": False,
             "permission_modes": False,
             "requires_cwd": True,

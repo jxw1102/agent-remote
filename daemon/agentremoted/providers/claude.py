@@ -2369,6 +2369,9 @@ class ClaudeRunner:
             "stop": True,
             "projects": True,
             "ws_status": True,
+            # Status stream carries `sessions_rev`; it bumps when a new
+            # session appears so clients re-list without a manual refresh.
+            "session_events": True,
             "permissions": True,
             "permission_modes": True,
             "requires_cwd": True,

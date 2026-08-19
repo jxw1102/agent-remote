@@ -254,6 +254,7 @@ const state = {
   query: "",
   filter: null,          // profileId or null
   active: {},            // profileId -> [activeJobDto]
+  sessionsRev: {},       // profileId -> last sessions_rev seen on its stream
   streams: {},           // profileId -> EventSource
   open: null,            // {profileId, sessionId, session}
   items: [],             // transcript rows
@@ -4094,6 +4095,7 @@ function syncStreams() {
       src.close();
       delete state.streams[id];
       delete state.active[id];
+      delete state.sessionsRev[id];
       // Tear-down is not "job finished" — forget without end-chimes.
       chimeForgetProfile(id);
     }
@@ -4107,16 +4109,27 @@ function syncStreams() {
     src._url = url;
     src.onmessage = (ev) => {
       let jobs = [];
+      let newSession = false;
       try {
         const frame = JSON.parse(ev.data);
         jobs = frame.active || [];
         state.active[id] = jobs;
+        // sessions_rev (daemon ≥ 2.21) bumps when a new session appears —
+        // started from the host TUI, another client, or a headless turn.
+        // Re-list so it shows without a manual refresh. The first frame only
+        // records the baseline: connecting must not trigger a reload.
+        if (typeof frame.sessions_rev === "number") {
+          const prev = state.sessionsRev[id];
+          state.sessionsRev[id] = frame.sessions_rev;
+          if (prev !== undefined && frame.sessions_rev !== prev) newSession = true;
+        }
       } catch { return; }
       // Chimes for every session on this daemon, open or not.
       chimeFromActive(id, jobs);
       renderStatus();
       renderSessions();
       renderBanner();
+      if (newSession) refreshSessions();
     };
     src.onerror = () => {
       // EventSource reconnects on its own; drop the stale view meanwhile.

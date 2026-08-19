@@ -100,6 +100,7 @@ from . import accounts
 from . import focus as focus_store
 from . import linked_files
 from . import shares as share_store
+from . import session_watch
 from . import ssestream
 from . import wstream
 from .live_tui import TUI_COLS, TUI_ROWS
@@ -1858,6 +1859,29 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _merged_active_status_scoped(self):
         return self._active_status_scoped()
 
+    def _sessions_rev(self):
+        """Session revision for the status stream; bumps on a new session.
+
+        A guest gets a watcher over its own harness home, so it neither
+        misses its own new sessions nor learns when the host starts one.
+        """
+        p = self.principal
+        if p is not None and p.is_guest and p.root:
+            return self._guest_session_watcher(p.root).rev()
+        watcher = getattr(self, "session_watcher", None)
+        return watcher.rev() if watcher is not None else 0
+
+    def _guest_session_watcher(self, root: str):
+        watchers = self.guest_session_watchers
+        with self.guest_session_watchers_lock:
+            w = watchers.get(root)
+            if w is None:
+                w = session_watch.SessionWatcher(
+                    {n: self._make_guest_store(n, root)
+                     for n in (self.bundles or {})})
+                watchers[root] = w
+            return w
+
     def _read_body(self):
         """Read and parse the request body.
 
@@ -2032,6 +2056,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "stop": True,
                     "projects": True,
                     "ws_status": True,
+                    "session_events": True,
                 }
                 for _n, b in bundle_items:
                     for key, val in (b.runner.capabilities() or {}).items():
@@ -2132,12 +2157,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             # Hijacks the connection until the client leaves; nothing may
             # be written through the normal HTTP path afterwards.
             self.close_connection = True
-            wstream.serve_status(self, None, active_fn=self._active_status_scoped)
+            wstream.serve_status(self, None, active_fn=self._active_status_scoped,
+                                 rev_fn=self._sessions_rev)
             return
 
         if path == "/sse/status":
             self.close_connection = True
-            ssestream.serve_status(self, None, active_fn=self._active_status_scoped)
+            ssestream.serve_status(self, None, active_fn=self._active_status_scoped,
+                                   rev_fn=self._sessions_rev)
             return
 
         if path == "/api/usage":
@@ -2275,12 +2302,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/ws/status" and wstream.is_upgrade(self.headers):
             self.close_connection = True
             wstream.serve_status(
-                self, None, active_fn=self._merged_active_status_scoped)
+                self, None, active_fn=self._merged_active_status_scoped,
+                rev_fn=self._sessions_rev)
             return
         if path == "/sse/status":
             self.close_connection = True
             ssestream.serve_status(
-                self, None, active_fn=self._merged_active_status_scoped)
+                self, None, active_fn=self._merged_active_status_scoped,
+                rev_fn=self._sessions_rev)
             return
         if path == "/api/goals":
             out = []
@@ -4188,6 +4217,12 @@ def make_server(config, token, bundles) -> ThreadingHTTPServer:
         # One focus list per daemon, shared by every harness and every client.
         "focus": focus_store.Focus(),
         "shares": share_store.ShareStore(),
+        # Detects newly created sessions and drives `sessions_rev` on the
+        # status streams so clients re-list. One watcher, every connection.
+        "session_watcher": session_watch.SessionWatcher(
+            {n: b.store for n, b in (bundles or {}).items()}),
+        "guest_session_watchers": {},
+        "guest_session_watchers_lock": threading.Lock(),
     })
     server = _HttpServer((config.bind, int(config.port)), handler)
     cert = str(getattr(config, "tls_cert", "") or "")
