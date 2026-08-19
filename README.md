@@ -144,7 +144,7 @@ CLI bills the **API key** — unset the key to stay on Max. Full notes:
 | --- | --- | --- |
 | Web | [`web/`](web/) · [hosted client](https://nice-dune-0415af003.7.azurestaticapps.net/) | Browser; no build step — or just open the hosted page |
 | Android | [`android/`](android/) | Full mobile client + notifications |
-| iOS | community / releases | Native remote (contributor) |
+| iOS | [`ios/`](ios/) | SwiftUI app for iPhone + iPad |
 | BlackBerry 10 | [`blackberry/`](blackberry/) | Cascades app for BB10 devices |
 | LILYGO T-LoRa Pager | [`esp32/`](esp32/) | Small-screen, keyboard-driven remote |
 
