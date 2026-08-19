@@ -38,11 +38,13 @@ def is_upgrade(headers) -> bool:
     return "websocket" in (headers.get("Upgrade", "") or "").lower()
 
 
-def serve_status(handler, jobs, active_fn=None):
+def serve_status(handler, jobs, active_fn=None, rev_fn=None):
     """Handshake on the handler's socket, then stream until the client
     leaves. Runs on the request's own thread (ThreadingHTTPServer).
 
     active_fn: optional callable → list of active job dicts (multi root).
+    rev_fn: optional callable → int session revision; included as
+    `sessions_rev` so a client re-lists when a new session appears.
     """
     key = handler.headers.get("Sec-WebSocket-Key", "")
     if not key:
@@ -105,7 +107,10 @@ def serve_status(handler, jobs, active_fn=None):
     try:
         while not closed.is_set():
             active = active_fn() if active_fn is not None else jobs.active_status()
-            payload = json.dumps({"type": "status", "active": active})
+            msg = {"type": "status", "active": active}
+            if rev_fn is not None:
+                msg["sessions_rev"] = rev_fn()
+            payload = json.dumps(msg)
             if payload != last_sent:
                 send(_OP_TEXT, payload.encode("utf-8"))
                 last_sent = payload
