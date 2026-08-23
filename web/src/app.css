@@ -653,6 +653,8 @@ button.icon-btn.icon-idle {
   font-weight: 600;
 }
 .welcome-link:hover { text-decoration: underline; }
+/* Variant that sits on its own line under the primary action. */
+.welcome-link.below { display: block; margin-top: 10px; }
 /* Session-list empty (no daemons): short note only — full guide is in transcript. */
 .empty.list-quiet {
   max-width: none;

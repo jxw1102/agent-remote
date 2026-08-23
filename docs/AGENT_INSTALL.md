@@ -13,9 +13,9 @@ Instruction they were told to paste:
 
 ## Goal
 
-Install **agentremoted** (the Agent Remote daemon) so this computer’s AI coding CLI sessions (Claude Code, Grok, Codex) can be controlled from a phone, browser, BlackBerry 10, or ESP32 pager.
+Install **agentremoted** (the Agent Remote daemon) so this computer’s AI coding CLI sessions (Claude Code, Grok, Codex, DeepSeek) can be controlled from a phone, browser, BlackBerry 10, or ESP32 pager.
 
-The daemon does **not** sell LLM tokens. It runs the host’s existing CLIs. The human must already be able to run `claude`, `grok`, and/or `codex` interactively on this machine (subscription login **or** API key).
+The daemon does **not** sell LLM tokens. It runs the host’s existing CLIs. The human must already be able to run `claude`, `grok`, `codex`, and/or `dsh` (DeepSeek) interactively on this machine (subscription login **or** API key).
 
 ## Non-goals
 
@@ -27,7 +27,7 @@ The daemon does **not** sell LLM tokens. It runs the host’s existing CLIs. The
 ## Prerequisites (check first)
 
 1. `python3` on `PATH` (3.9+ is fine).
-2. At least one of: `claude`, `grok`, `codex` on `PATH` (warn if missing; still install).
+2. At least one of: `claude`, `grok`, `codex`, `dsh` on `PATH` (warn if missing; still install).
 3. macOS or Linux. Windows: WSL2 or manual Python run is acceptable; document it.
 
 ## Preferred install (one command)

@@ -19,6 +19,19 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.8.6** Chunked attachments: `POST /api/attachments?name=&upload_id=&index=&total=`
+assembles a file from short POSTs so a Cloudflare ~100s HTTP timeout no
+longer kills an 11 MB upload as a browser "Network error during upload".
+Ping advertises `"chunked_upload": true` and `max_upload_mb`. Truncated
+uploads no longer 500 with BrokenPipe after the tunnel cancels.
+
+**2.8.5** Guest Grok sessions: `GET/POST /api/sessions/job:<jobid>` (and
+`…/messages`, `…/continue`) resolve to the harness uuid once the job knows
+it, so a client that stays on the new-session placeholder no longer 404s
+"session not found" after the turn. Grok session discovery reads the guest
+``<root>/.grok`` store (not the host ``~/.grok``) when ``--session-id`` is
+ignored inside the sandbox.
+
 **2.8.2** DeepSeek no longer requires you to start `dsh web` yourself: if the
 configured loopback URL (`dsh_url`, default `http://127.0.0.1:3080`) already
 answers `session.list`, the daemon adopts it; otherwise it starts

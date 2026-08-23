@@ -688,6 +688,30 @@ def run_claude_suite(token):
     except urllib.error.HTTPError as e:
         check("upload requires token", e.code == 401)
 
+    print("chunked attachments:")
+    check("ping advertises chunked_upload",
+          authed_ping.get("chunked_upload") is True, authed_ping)
+    blob = os.urandom(1200 * 1024)
+    uid = "testdeadbeef0123456789ab"
+    chunk = 512 * 1024
+    nchunks = (len(blob) + chunk - 1) // chunk
+    last = None
+    for i in range(nchunks):
+        piece = blob[i * chunk:(i + 1) * chunk]
+        req = urllib.request.Request(
+            base + "/api/attachments?name=big.bin&upload_id=%s&index=%d&total=%d"
+            % (uid, i, nchunks),
+            data=piece,
+            headers={"X-Auth-Token": token,
+                     "Content-Type": "application/octet-stream"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            last = json.loads(resp.read().decode())
+            check("chunk %d ok" % i, last.get("ok") is True, last)
+    check("chunked complete", last.get("complete") is True and last.get("path"), last)
+    check("chunked size", last.get("size") == len(blob), last)
+    with open(last["path"], "rb") as f:
+        check("chunked bytes match", f.read() == blob, last["path"])
+
     print("drop (host→phone):")
     # The server under test uses AGENTREMOTED_HOME; write a file into its drop dir.
     drop_dir = os.path.join(os.environ["AGENTREMOTED_HOME"], "drop")

@@ -156,6 +156,8 @@ const PAGE = 60;
 const POLL_IDLE_MS = 6000;   // stream healthy: timer is only a safety net
 const POLL_ACTIVE_MS = 1500; // no usable stream: this is the real rate
 const MAX_UPLOAD_BYTES = 16 * 1024 * 1024; // matches daemon max_upload_mb default
+// Stay well under Cloudflare's ~100s HTTP timeout on a slow link.
+const UPLOAD_CHUNK_BYTES = 512 * 1024;
 // Phone photos are often 1.5–4 MB; the slow path is usually CF tunnel +
 // cellular, not the daemon (localhost 4 MB lands in ~3 ms). Downscale +
 // re-encode before POST so a typical shot is a few hundred KB.
@@ -510,6 +512,7 @@ function jobMatchesOpen(profileId, jobId, snap, meta = {}) {
   if (state.job && state.job.id === jobId) return true;
   const openSid = open.sessionId || "";
   if (!openSid) return false;
+  if (sessionIsJobPlaceholder(openSid, jobId)) return true;
   const candidates = [
     snap && snap.session_id,
     snap && snap.new_session_id,
@@ -897,6 +900,11 @@ async function pingProfile(profile) {
     profile.focus = !!ping.focus;
     // Session share (agentremoted ≥ 2.7): hosted read-only /share/<token>.
     profile.share = !!ping.share;
+    profile.chunkedUpload = !!ping.chunked_upload
+      || !!(ping.caps && ping.caps.chunked_upload);
+    if (typeof ping.max_upload_mb === "number" && ping.max_upload_mb > 0) {
+      profile.maxUploadMb = ping.max_upload_mb;
+    }
     store.save();
     syncShareButton();
     return true;
@@ -1042,8 +1050,8 @@ function buildDaemonGuide(opts = {}) {
   empty.appendChild(el("h2", null, "Connect a daemon to start"));
   const lead = el("p");
   lead.innerHTML = "This page is only a <strong>client</strong>. Install "
-    + "<strong>agentremoted</strong> next to Claude Code, Grok, or Codex on "
-    + "your Mac or a server, then add it here with its URL and token.";
+    + "<strong>agentremoted</strong> next to Claude Code, Grok, Codex, or "
+    + "DeepSeek on your Mac or a server, then add it here with its URL and token.";
   empty.appendChild(lead);
   const steps = document.createElement("ol");
   steps.className = "welcome-steps";
@@ -1061,14 +1069,16 @@ function buildDaemonGuide(opts = {}) {
   add.type = "button";
   add.addEventListener("click", openProfiles);
   actions.appendChild(add);
+  empty.appendChild(actions);
+  // Own line under the button — riding in the actions row it fought the
+  // button for width and the long label wrapped badly.
   const link = document.createElement("a");
-  link.className = "welcome-link";
+  link.className = "welcome-link below";
   link.href = OTHER_CLIENTS_URL;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
-  link.textContent = "Agent Remote on other platforms →";
-  actions.appendChild(link);
-  empty.appendChild(actions);
+  link.textContent = "Other platforms →";
+  empty.appendChild(link);
   return empty;
 }
 
@@ -1085,7 +1095,7 @@ function showWelcomeIfNeeded() {
     appendEmptyLogo(empty);
     empty.appendChild(el("h2", null, "Pick a session"));
     empty.appendChild(el("p", null,
-      "Every daemon you add shows up in one list on the left — Claude, Grok, and Codex side by side."));
+      "Every daemon you add shows up in one list on the left — Claude, Grok, Codex, and DeepSeek side by side."));
     tr.appendChild(empty);
   }
 }
@@ -1276,6 +1286,26 @@ function finalizeSessionRows(collected) {
   };
 
   collected.forEach(put);
+
+  // A new session is listed as job:<id> until the harness names it. If that
+  // placeholder is still the open transcript, follow the real uuid so
+  // messages/continue stop 404ing after the turn.
+  if (state.open && isJobPlaceholder(state.open.sessionId)) {
+    const jid = String(state.open.sessionId).slice(4);
+    for (const row of collected) {
+      if (row.profileId !== state.open.profileId || !row.session) continue;
+      const sid = String(row.session.id || "");
+      if (!sid || isJobPlaceholder(sid)) continue;
+      if (String(row.session.job_id || "") === jid) {
+        state.open.sessionId = sid;
+        state.open.session = { ...state.open.session, ...row.session, id: sid };
+        if (state.job && sessionIsJobPlaceholder(state.job.sessionId, jid)) {
+          state.job.sessionId = sid;
+        }
+        break;
+      }
+    }
+  }
 
   // Inject sessions known from the live status stream but missing in /api/sessions.
   for (const [pid, jobs] of Object.entries(state.active || {})) {
@@ -1909,7 +1939,10 @@ async function openSession(row) {
   // the desktop TUI, or on another device). Prefer a job blocked on the human
   // so Answer/Respond can reappear after a dismissed modal.
   const frames = state.active[row.profileId] || [];
-  const match = (j) => j.session_id === sessionId || j.new_session_id === sessionId;
+  const match = (j) => j.session_id === sessionId || j.new_session_id === sessionId
+    || sessionIsJobPlaceholder(sessionId, j.job_id || j.id)
+    || (row.session && row.session.job_id
+      && (j.job_id === row.session.job_id || j.id === row.session.job_id));
   const blocked = frames.find((j) => match(j) && !isSyntheticJobId(j.job_id)
     && (j.pending_question || j.pending_permission));
   const running = frames.find((j) => match(j) && !isSyntheticJobId(j.job_id));
@@ -2173,6 +2206,23 @@ function isSyntheticJobId(id) {
   return !id || String(id).startsWith("tui-");
 }
 
+/** New-session list id before the harness reports a uuid (`job:<jobid>`). */
+function jobPlaceholder(jobId) {
+  const id = String(jobId || "").trim();
+  if (!id) return "";
+  return id.startsWith("job:") ? id : `job:${id}`;
+}
+
+function isJobPlaceholder(sessionId) {
+  return String(sessionId || "").startsWith("job:");
+}
+
+function sessionIsJobPlaceholder(sessionId, jobId) {
+  const sid = String(sessionId || "");
+  const key = jobPlaceholder(jobId);
+  return !!(sid && key && (sid === key || sid === String(jobId || "")));
+}
+
 /**
  * Is state.job safe to use for the currently open transcript?
  * Mid-turn send used to POST /api/jobs/<id>/input without this check — so a
@@ -2182,8 +2232,11 @@ function jobBelongsToOpen(job = state.job) {
   if (!job || !job.id || isSyntheticJobId(job.id) || !state.open) return false;
   if (job.profileId && job.profileId !== state.open.profileId) return false;
   if (typeof job.openGen === "number" && job.openGen !== state.openGen) return false;
+  const openSid = state.open.sessionId || "";
+  if (sessionIsJobPlaceholder(openSid, job.id)
+      && sessionIsJobPlaceholder(job.sessionId, job.id)) return true;
   // Require an explicit pin: never guess from a stale attachment.
-  if (!job.sessionId || job.sessionId !== state.open.sessionId) return false;
+  if (!job.sessionId || job.sessionId !== openSid) return false;
   return true;
 }
 
@@ -2967,6 +3020,7 @@ function jobSnapBelongsToOpen(job, snap) {
   const snapSid = (snap && snap.session_id) || "";
   const snapNew = (snap && snap.new_session_id) || "";
   const reported = [snapSid, snapNew].filter(Boolean);
+  if (sessionIsJobPlaceholder(openSid, job.id)) return true;
   if (reported.length) {
     // Open row is already this job's session (or its fork target).
     if (reported.includes(openSid)) return true;
@@ -3111,6 +3165,7 @@ async function pollJob() {
       && jobSnapBelongsToOpen(job, snap)
       && (state.open.sessionId === job.sessionId
         || state.open.sessionId === snap.session_id
+        || sessionIsJobPlaceholder(state.open.sessionId, job.id)
         || !job.sessionId)) {
     state.open.sessionId = snap.new_session_id;
     if (state.open.session) state.open.session.id = snap.new_session_id;
@@ -3501,7 +3556,7 @@ function paintProfilesModal() {
       body.appendChild(list);
       if (!state.profiles.length) {
         body.appendChild(el("p", null,
-          "One agentremoted host can front Claude, Grok and Codex at once — add the host once, then pick the harness when you start a session. Add a second profile only for another machine."));
+          "One agentremoted host can front Claude, Grok, Codex and DeepSeek at once — add the host once, then pick the harness when you start a session. Add a second profile only for another machine."));
       }
     },
     actions: [
@@ -4161,7 +4216,7 @@ function postAttachment(url, token, blob, onProgress, signal) {
     xhr.setRequestHeader("X-Auth-Token", token);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
     xhr.responseType = "text";
-    xhr.timeout = 180000;
+    xhr.timeout = 120000;
     if (signal) {
       if (signal.aborted) {
         reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
@@ -4186,54 +4241,142 @@ function postAttachment(url, token, blob, onProgress, signal) {
   });
 }
 
+function uploadId() {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === "function") {
+    return c.randomUUID().replace(/-/g, "");
+  }
+  let s = "";
+  for (let i = 0; i < 32; i++) s += Math.floor(Math.random() * 16).toString(16);
+  return s;
+}
+
+function sleepMs(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function postAttachmentRetry(url, token, blob, onProgress, signal, tries = 4) {
+  let last = null;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    if (signal && signal.aborted) {
+      throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    }
+    try {
+      const res = await postAttachment(url, token, blob, onProgress, signal);
+      if (res.status >= 200 && res.status < 300) return res;
+      if (res.status >= 400 && res.status < 500 && res.status !== 408) {
+        throw new DaemonError(res.status,
+          (res.data && res.data.error) || (res.status === 413
+            ? "Attachment too large" : `HTTP ${res.status}`));
+      }
+      last = new DaemonError(res.status,
+        (res.data && res.data.error) || `HTTP ${res.status}`);
+    } catch (e) {
+      if (e instanceof DaemonError && e.status >= 400 && e.status < 500 && e.status !== 408) {
+        throw e;
+      }
+      last = e;
+    }
+    await sleepMs(400 * (attempt + 1) * (attempt + 1));
+  }
+  throw last || new Error("Network error during upload");
+}
+
+function attachPathToPrompt(path) {
+  const prompt = $("prompt");
+  const sep = prompt.value && !/\s$/.test(prompt.value) ? " " : "";
+  prompt.value = prompt.value + sep + "[attached: " + path + "]";
+  prompt.dispatchEvent(new Event("input"));
+  prompt.focus();
+}
+
+async function uploadBlobSingle(profile, name, blob, onProgress, signal) {
+  const url = profile.baseUrl.replace(/\/+$/, "")
+    + "/api/attachments?name=" + encodeURIComponent(name);
+  const { status, data } = await postAttachmentRetry(
+    url, profile.token, blob, onProgress, signal);
+  if (status < 200 || status >= 300) {
+    throw new DaemonError(status,
+      (data && data.error) || (status === 413
+        ? "Attachment too large" : `HTTP ${status}`));
+  }
+  const path = data && data.path;
+  if (!path) throw new DaemonError(0, "Daemon did not return a path");
+  return { path, size: (data && data.size) || blob.size };
+}
+
+async function uploadBlobChunked(profile, name, blob, onProgress, signal) {
+  const totalBytes = blob.size;
+  const chunkSize = UPLOAD_CHUNK_BYTES;
+  const total = Math.max(1, Math.ceil(totalBytes / chunkSize));
+  const id = uploadId();
+  let sent = 0;
+  let path = "";
+  let size = totalBytes;
+  for (let index = 0; index < total; index++) {
+    const start = index * chunkSize;
+    const end = Math.min(totalBytes, start + chunkSize);
+    const piece = blob.slice(start, end);
+    const url = profile.baseUrl.replace(/\/+$/, "")
+      + "/api/attachments?name=" + encodeURIComponent(name)
+      + "&upload_id=" + encodeURIComponent(id)
+      + "&index=" + index
+      + "&total=" + total;
+    const { data } = await postAttachmentRetry(
+      url,
+      profile.token,
+      piece,
+      (loaded, pieceTotal) => {
+        const n = sent + loaded;
+        if (onProgress) onProgress(n, totalBytes);
+      },
+      signal,
+    );
+    sent = end;
+    if (onProgress) onProgress(sent, totalBytes);
+    if (data && data.complete && data.path) {
+      path = data.path;
+      size = data.size || size;
+    }
+  }
+  if (!path) throw new DaemonError(0, "Daemon did not return a path");
+  return { path, size };
+}
+
 async function uploadAttachment(file) {
   if (!state.open || !file) return;
   const profile = profileById(state.open.profileId);
   if (!profile) return;
   if (file.size <= 0) { toast("Empty file"); return; }
-  if (file.size > MAX_UPLOAD_BYTES) {
-    toast(`${file.name} is too large (max ${humanSize(MAX_UPLOAD_BYTES)})`);
+  const maxBytes = (Number(profile.maxUploadMb) > 0
+    ? Number(profile.maxUploadMb) : 16) * 1024 * 1024;
+  if (file.size > maxBytes) {
+    toast(`${file.name} is too large (max ${humanSize(maxBytes)})`);
     return;
   }
   const originalName = file.name || "file";
   composerNote(`Preparing ${originalName}…`);
   const prepared = await prepareUploadBlob(file);
-  if (prepared.blob.size > MAX_UPLOAD_BYTES) {
-    toast(`${originalName} is too large after prepare (max ${humanSize(MAX_UPLOAD_BYTES)})`);
+  if (prepared.blob.size > maxBytes) {
+    toast(`${originalName} is too large after prepare (max ${humanSize(maxBytes)})`);
     return;
   }
   const name = prepared.name;
-  const url = profile.baseUrl.replace(/\/+$/, "")
-    + "/api/attachments?name=" + encodeURIComponent(name);
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 180000);
+  const timer = setTimeout(() => ctrl.abort(), 15 * 60 * 1000);
+  const chunked = !!profile.chunkedUpload && prepared.blob.size > UPLOAD_CHUNK_BYTES;
   try {
     if (prepared.note) composerNote(`Uploading ${name} (${prepared.note})…`);
     else composerNote(`Uploading ${name} (${humanSize(prepared.blob.size)})…`);
-    const { status, data } = await postAttachment(
-      url,
-      profile.token,
-      prepared.blob,
-      (loaded, total) => {
-        const pct = total ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
-        composerNote(`Uploading ${name}… ${pct}%`);
-      },
-      ctrl.signal,
-    );
-    if (status < 200 || status >= 300) {
-      throw new DaemonError(status,
-        (data && data.error) || (status === 413
-          ? "Attachment too large" : `HTTP ${status}`));
-    }
-    const path = data && data.path;
-    if (!path) throw new DaemonError(0, "Daemon did not return a path");
-    // Prefill like TranscriptPage.qml: [attached: /host/path]
-    const prompt = $("prompt");
-    const sep = prompt.value && !/\s$/.test(prompt.value) ? " " : "";
-    prompt.value = prompt.value + sep + "[attached: " + path + "]";
-    prompt.dispatchEvent(new Event("input"));
-    prompt.focus();
-    const saved = humanSize(data.size || prepared.blob.size);
+    const onProgress = (loaded, total) => {
+      const pct = total ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
+      composerNote(`Uploading ${name}… ${pct}%`);
+    };
+    const result = chunked
+      ? await uploadBlobChunked(profile, name, prepared.blob, onProgress, ctrl.signal)
+      : await uploadBlobSingle(profile, name, prepared.blob, onProgress, ctrl.signal);
+    attachPathToPrompt(result.path);
+    const saved = humanSize(result.size || prepared.blob.size);
     composerNote(prepared.note
       ? `Attached ${name} (${saved}, ${prepared.note})`
       : `Attached ${name} (${saved})`);

@@ -9,7 +9,7 @@ tokens and does not hold Anthropic/OpenAI/xAI API keys in its own config
 | Credential | Who issues it | Purpose |
 |------------|---------------|---------|
 | **Daemon token** (`~/.agentremoted/token`) | agentremoted on first start | Authenticates clients to the HTTP API |
-| **Harness login / API key** | Claude, Codex, Grok CLIs | Pays for model usage |
+| **Harness login / API key** | Claude, Codex, Grok, DeepSeek CLIs | Pays for model usage |
 
 Clients only ever send the **daemon token**. LLM billing stays with the host
 CLIs.

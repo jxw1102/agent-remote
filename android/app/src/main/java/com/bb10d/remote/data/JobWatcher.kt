@@ -221,9 +221,14 @@ class JobWatcher(
             }
         }
         val fork = snapshot.newSessionId
-        if (fork.isNotEmpty() && fork != _state.value.sessionId) {
-            _state.value = _state.value.copy(sessionId = fork)
-            sessionIdChanged.emit(fork)
+        val currentSid = _state.value.sessionId
+        val placeholder = currentSid == "job:${_state.value.jobId}"
+                || currentSid == _state.value.jobId
+        if (fork.isNotEmpty() && (fork != currentSid || placeholder)) {
+            if (fork != currentSid) {
+                _state.value = _state.value.copy(sessionId = fork)
+                sessionIdChanged.emit(fork)
+            }
         }
         val pendingQ = snapshot.pendingQuestion?.let { q ->
             if (q.requestId.isNotBlank() && q.requestId in dismissedQuestionIds) null else q

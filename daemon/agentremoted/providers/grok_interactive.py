@@ -481,6 +481,13 @@ class GrokInteractiveManager:
                 del self._tuis[victim.name]
                 self._save_state()
             tui = _Tui(self._tui_name(cwd), cwd, isolate_root=iso)
+            # Snapshot the (guest) session tree before grok starts so we can
+            # pick up a minted id when --session-id is ignored.
+            try:
+                tui.before_ids = self.runner._store_for(
+                    isolate_root=iso).known_session_ids()
+            except Exception:
+                tui.before_ids = set()
             self._tuis[tui.name] = tui
         err = self._launch(tui, session_id, model, effort)
         if err:
@@ -752,12 +759,13 @@ class GrokInteractiveManager:
                 job.status = "error"
                 job.error = message
 
-    def _journal_submits(self, session_id: str) -> int:
+    def _journal_submits(self, session_id: str, isolate_root: str = "") -> int:
         """How many messages this session has ever submitted, per its journal.
 
         grok appends a user_message_chunk the moment it accepts input, so this
         is the file-based proof that a paste+Enter actually went through."""
-        sdir = self.runner.store.find_session_dir(session_id) if session_id else None
+        sdir = self.runner._session_dir(
+            session_id, isolate_root=isolate_root) if session_id else None
         if sdir is None:
             return -1
         n = 0
@@ -780,7 +788,8 @@ class GrokInteractiveManager:
         Enter on an already-empty box is a no-op, so a retry cannot duplicate
         a message that did land — and when the TUI is busy the message is
         queued, which the confirmation simply misses (harmless)."""
-        before = self._journal_submits(tui.session_id)
+        iso = str(getattr(tui, "isolate_root", "") or "")
+        before = self._journal_submits(tui.session_id, isolate_root=iso)
         err = self._send_prompt(tui, prompt)
         if err or before < 0:
             return err
@@ -789,10 +798,11 @@ class GrokInteractiveManager:
 
     def _confirm_submit(self, tui: _Tui, before: int):
         """Poll for proof the input was accepted, re-pressing Enter if not."""
+        iso = str(getattr(tui, "isolate_root", "") or "")
         for attempt in range(_SUBMIT_RETRIES + 1):
             end = time.time() + _SUBMIT_CONFIRM_S
             while time.time() < end:
-                if self._journal_submits(tui.session_id) > before:
+                if self._journal_submits(tui.session_id, isolate_root=iso) > before:
                     return ""
                 time.sleep(_POLL_S)
             if attempt >= _SUBMIT_RETRIES:
@@ -832,7 +842,8 @@ class GrokInteractiveManager:
         # next few milliseconds, and if typed_ahead were still 0 the job would
         # end and this message's reply would stream to nobody.
         tui.typed_ahead += 1
-        before = self._journal_submits(tui.session_id)
+        before = self._journal_submits(
+            tui.session_id, isolate_root=str(getattr(tui, "isolate_root", "") or ""))
         err = self._send_prompt(tui, text)
         if err:
             tui.typed_ahead = max(0, tui.typed_ahead - 1)
@@ -1203,7 +1214,19 @@ class GrokInteractiveManager:
         iso = str(getattr(tui, "isolate_root", "") or getattr(job, "isolate_root", "") or "")
         if iso and not getattr(job, "isolate_root", ""):
             job.isolate_root = iso
+        # Interactive skips runner.prepare(), so snapshot the store here for
+        # fs-diff discovery when grok ignores --session-id (guest homes).
+        if "before_ids" not in state:
+            before = getattr(tui, "before_ids", None)
+            state["before_ids"] = set(before) if before is not None else (
+                runner._store_for(job=job, isolate_root=iso).known_session_ids())
+            state["last_scan"] = 0.0
         runner._bind_updates(job, from_start=False)
+        if not job.runner_state.get("updates_path"):
+            runner._scan_new_session(job)
+            if job.new_session_id and job.new_session_id != tui.session_id:
+                tui.session_id = job.new_session_id
+            runner._bind_updates(job, from_start=False)
 
         # An ask_user_question panel left open by an earlier turn intercepts
         # keys, so a pasted prompt would be read as option keystrokes (a "1"
@@ -1299,6 +1322,8 @@ class GrokInteractiveManager:
             time.sleep(_POLL_S)
             before = state.get("updates_offset")
             runner._poll_updates(job)
+            if job.new_session_id and job.new_session_id != tui.session_id:
+                tui.session_id = job.new_session_id
             if state.get("updates_offset") != before:
                 quiet_since = time.time()
             # exit_plan_mode opened the approval panel: no turn_completed will

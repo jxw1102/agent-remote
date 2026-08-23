@@ -26,6 +26,7 @@
 #include <QSettings>
 #include <QStringList>
 #include <QUrl>
+#include <QUuid>
 #include <bb/device/DisplayInfo>
 
 #include "brand.hpp"
@@ -50,6 +51,7 @@ const int USAGE_TIMEOUT_MS = 90 * 1000;
 // Keystroke coalesce for the sessions search field.
 const int SEARCH_DEBOUNCE_MS = 50;
 const int UPLOAD_TIMEOUT_MS = 90 * 1000;
+const int UPLOAD_CHUNK_BYTES = 512 * 1024;
 const int DOWNLOAD_TIMEOUT_MS = 120 * 1000;
 const int MAX_UPLOAD_BYTES = 16 * 1024 * 1024;
 const int MAX_DROP_BYTES = 64 * 1024 * 1024;
@@ -324,6 +326,8 @@ ApiClient::ApiClient(QObject *parent)
     , m_wsPendingPerm(false)
     , m_newSessionRequestRev(0)
     , m_attachRev(0)
+    , m_uploadIndex(0)
+    , m_uploadTotal(0)
     , m_screenWidth(REF_SCREEN_W)
     , m_largeDisplay(false)
     , m_paintWidthBody(REF_SCREEN_W - PAINT_INSET_BODY)
@@ -2852,6 +2856,45 @@ void ApiClient::sendTuiLine(const QString &text)
     post(path, body, "tui_keys");
 }
 
+void ApiClient::clearUpload()
+{
+    m_uploadPayload.clear();
+    m_uploadName.clear();
+    m_uploadId.clear();
+    m_uploadSid.clear();
+    m_uploadIndex = 0;
+    m_uploadTotal = 0;
+}
+
+void ApiClient::postNextUploadChunk()
+{
+    if (m_uploadIndex >= m_uploadTotal || m_uploadPayload.isEmpty()) {
+        clearUpload();
+        return;
+    }
+    const int from = m_uploadIndex * UPLOAD_CHUNK_BYTES;
+    const int len = qMin(UPLOAD_CHUNK_BYTES, m_uploadPayload.size() - from);
+    const QByteArray slice = m_uploadPayload.mid(from, len);
+    QString path = QString("/api/attachments?name=%1&upload_id=%2&index=%3&total=%4")
+            .arg(QString::fromUtf8(QUrl::toPercentEncoding(m_uploadName)),
+                 m_uploadId)
+            .arg(m_uploadIndex)
+            .arg(m_uploadTotal);
+    QNetworkRequest request = makeRequest(path);
+    request.setHeader(QNetworkRequest::ContentTypeHeader,
+                      "application/octet-stream");
+    QNetworkReply *reply = m_nam.post(request, slice);
+    reply->setProperty("kind", QString("attach_chunk"));
+    reply->setProperty("localName", m_uploadName);
+    reply->setProperty("sid", m_uploadSid);
+    reply->setProperty("uploadIndex", m_uploadIndex);
+    QTimer::singleShot(UPLOAD_TIMEOUT_MS, reply, SLOT(abort()));
+    setTranscriptStatus(tr("Uploading %1... %2/%3")
+                        .arg(m_uploadName)
+                        .arg(m_uploadIndex + 1)
+                        .arg(m_uploadTotal));
+}
+
 void ApiClient::uploadAttachment(const QString &fileUrl)
 {
     QString localPath = fileUrl;
@@ -2875,6 +2918,27 @@ void ApiClient::uploadAttachment(const QString &fileUrl)
     f.close();
 
     setTranscriptStatus(tr("Uploading %1...").arg(info.fileName()));
+    bool chunked = false;
+    if (m_activeProfile >= 0 && m_activeProfile < m_profiles.size()) {
+        QVariantMap prof = m_profiles.at(m_activeProfile).toMap();
+        chunked = prof.value("chunked_upload").toBool()
+                || prof.value("caps").toMap().value("chunked_upload").toBool();
+    }
+    if (chunked && payload.size() > UPLOAD_CHUNK_BYTES) {
+        clearUpload();
+        m_uploadPayload = payload;
+        m_uploadName = info.fileName();
+        m_uploadId = QUuid::createUuid().toString();
+        m_uploadId.remove(QLatin1Char('{'));
+        m_uploadId.remove(QLatin1Char('}'));
+        m_uploadId.remove(QLatin1Char('-'));
+        m_uploadSid = m_currentSessionId;
+        m_uploadIndex = 0;
+        m_uploadTotal = (payload.size() + UPLOAD_CHUNK_BYTES - 1)
+                / UPLOAD_CHUNK_BYTES;
+        postNextUploadChunk();
+        return;
+    }
     QNetworkRequest request = makeRequest(
             "/api/attachments?name="
             + QString::fromUtf8(QUrl::toPercentEncoding(info.fileName())));
@@ -3473,9 +3537,13 @@ void ApiClient::handleJobPoll(int httpStatus, const QVariant &data, bool parseOk
     QString forkId = snap["new_session_id"].toString();
     if (!forkId.isEmpty()) {
         m_sessionJobs[forkId] = m_jobId;
-        if (m_currentSessionId.isEmpty()) {
-            m_currentSessionId = forkId;
-            emit currentSessionChanged();
+        const bool jobPlaceholder = m_currentSessionId.startsWith(QLatin1String("job:"))
+                && m_currentSessionId.mid(4) == m_jobId;
+        if (m_currentSessionId.isEmpty() || jobPlaceholder) {
+            if (m_currentSessionId != forkId) {
+                m_currentSessionId = forkId;
+                emit currentSessionChanged();
+            }
         }
     }
 
@@ -3679,13 +3747,17 @@ void ApiClient::onFinished(QNetworkReply *reply)
             const QVariantMap newCaps = map["caps"].toMap();
             const QVariantMap newDetails = map.value("provider_details").toMap();
             const QVariantList newProviders = map.value("providers").toList();
+            const bool chunkedUpload = map.value("chunked_upload").toBool()
+                    || newCaps.value("chunked_upload").toBool();
             if (prof.value("provider").toString() != provider
                     || prof.value("caps").toMap() != newCaps
                     || prof.value("multi").toBool() != multi
                     || prof.value("providers").toList() != newProviders
+                    || prof.value("chunked_upload").toBool() != chunkedUpload
                     || prof.value("provider_details").toMap() != newDetails) {
                 prof["provider"] = provider;
                 prof["caps"] = newCaps;
+                prof["chunked_upload"] = chunkedUpload;
                 // Always store multi catalogue so New Session can pick harnesses
                 // even if an earlier code path only cached "provider".
                 prof["multi"] = multi || newProviders.size() > 1;
@@ -3983,10 +4055,13 @@ void ApiClient::onFinished(QNetworkReply *reply)
         QVariantMap prof = m_profiles.at(profileIndex).toMap();
         const QVariantList newProviders = map.value("providers").toList();
         const bool focus = map.value("focus", QVariant(false)).toBool();
+        const bool chunkedUpload = map.value("chunked_upload").toBool()
+                || map.value("caps").toMap().value("chunked_upload").toBool();
         if (prof.value("provider").toString() != provider
                 || prof.value("caps").toMap() != map.value("caps").toMap()
                 || prof.value("multi").toBool() != multi
                 || prof.value("focus").toBool() != focus
+                || prof.value("chunked_upload").toBool() != chunkedUpload
                 || prof.value("providers").toList() != newProviders
                 || prof.value("provider_details").toMap()
                    != map.value("provider_details").toMap()) {
@@ -3995,6 +4070,7 @@ void ApiClient::onFinished(QNetworkReply *reply)
             // Focus support is per daemon, cached so Focus mode knows which
             // profiles can answer /api/focus before it fans out.
             prof["focus"] = focus;
+            prof["chunked_upload"] = chunkedUpload;
             prof["multi"] = multi || newProviders.size() > 1;
             prof["providers"] = newProviders;
             prof["provider_details"] = map.value("provider_details").toMap();
@@ -4248,22 +4324,30 @@ void ApiClient::onFinished(QNetworkReply *reply)
         return;
     }
 
-    if (kind == "attach") {
-        if (ok) {
-            if (reply->property("sid").toString() != m_currentSessionId) {
-                // Finished after the user moved to another session - don't
-                // prefill someone else's compose field with it.
-                return;
-            }
-            m_lastAttachmentPath = data.toMap()["path"].toString();
-            m_attachRev++;
-            emit attachChanged();
-            setTranscriptStatus(QString());
-        } else {
+    if (kind == "attach" || kind == "attach_chunk") {
+        if (!ok) {
+            clearUpload();
             setTranscriptStatus(tr("Upload failed: ")
                                 + httpErrorText(httpStatus, data, parseOk,
                                                 networkError));
+            return;
         }
+        QVariantMap map = data.toMap();
+        if (kind == "attach_chunk" && !map.value("complete").toBool()
+                && map.value("path").toString().isEmpty()) {
+            m_uploadIndex++;
+            postNextUploadChunk();
+            return;
+        }
+        if (reply->property("sid").toString() != m_currentSessionId) {
+            clearUpload();
+            return;
+        }
+        m_lastAttachmentPath = map.value("path").toString();
+        m_attachRev++;
+        emit attachChanged();
+        setTranscriptStatus(QString());
+        clearUpload();
         return;
     }
 

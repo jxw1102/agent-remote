@@ -870,6 +870,14 @@ private:
 
     int m_attachRev;
     QString m_lastAttachmentPath;
+    QByteArray m_uploadPayload;
+    QString m_uploadName;
+    QString m_uploadId;
+    QString m_uploadSid;
+    int m_uploadIndex;
+    int m_uploadTotal;
+    void postNextUploadChunk();
+    void clearUpload();
 
     // Display metrics (Classic 720 / Passport 1440).
     int m_screenWidth;

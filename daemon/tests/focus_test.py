@@ -115,6 +115,8 @@ def test_rekey():
     check("placeholder is gone", not b.is_member(placeholder))
     check("session id is a member", b.is_member("real-sid"))
     check("title follows the card", b.title("real-sid") == "My new thing")
+    check("key_for_job finds the session", b.key_for_job("job7") == "real-sid")
+    check("key_for_job empty on unknown", b.key_for_job("nope") == "")
     check("rekey of an unknown key is a no-op",
           b.rekey(focus.JOB_KEY_PREFIX + "nope", "x") is False)
     check("rekey to itself is a no-op", b.rekey("real-sid", "real-sid") is False)

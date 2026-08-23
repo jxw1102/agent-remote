@@ -97,9 +97,11 @@ else:
         providers.append("grok")
     if has_bin("codex", "~/.local/bin/codex"):
         providers.append("codex")
+    if has_bin("dsh", "/opt/homebrew/bin/dsh", "~/.local/bin/dsh"):
+        providers.append("deepseek")
     if not providers:
-        providers = ["claude", "grok", "codex"]
-        print("warn: no claude/grok/codex on PATH; wrote all three — install a CLI and restart")
+        providers = ["claude", "grok", "codex", "deepseek"]
+        print("warn: no claude/grok/codex/dsh on PATH; wrote all four — install a CLI and restart")
 
 cfg = {}
 path = home / "config.json"

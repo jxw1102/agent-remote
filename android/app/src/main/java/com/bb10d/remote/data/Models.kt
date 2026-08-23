@@ -103,6 +103,9 @@ data class PingDto(
     val focus: Boolean = false,
     /** Session share (agentremoted ≥ 2.7); gates the share-link action. */
     val share: Boolean = false,
+    /** Chunked POST /api/attachments (agentremoted ≥ 2.8.6). */
+    @SerialName("chunked_upload") val chunkedUpload: Boolean = false,
+    @SerialName("max_upload_mb") val maxUploadMb: Int = 16,
     @SerialName("focus_states") val focusStates: List<String> = emptyList(),
     val providers: List<String> = emptyList(),
     @SerialName("provider_details")
@@ -442,6 +445,7 @@ data class AttachmentDto(
     val ok: Boolean = false,
     val path: String = "",
     val size: Long = 0,
+    val complete: Boolean = true,
 )
 
 @Serializable
@@ -491,6 +495,8 @@ data class Caps(
     val focus: Boolean = false,
     /** Session share (agentremoted >= 2.7). */
     val share: Boolean = false,
+    /** Chunked attachments (agentremoted >= 2.8.6). */
+    val chunkedUpload: Boolean = false,
     val providers: List<String> = emptyList(),
     val providerDetails: Map<String, ProviderDetailDto> = emptyMap(),
     val auth: AuthHealthDto? = null,
@@ -616,6 +622,7 @@ data class Caps(
             multi = ping.multi,
             focus = ping.focus,
             share = ping.share,
+            chunkedUpload = ping.chunkedUpload || ping.caps["chunked_upload"] == true,
             providers = ping.providers,
             providerDetails = ping.providerDetails,
             auth = ping.auth,

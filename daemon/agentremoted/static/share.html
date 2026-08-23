@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <meta name="referrer" content="no-referrer">
 <title>Shared session · Agent Remote</title>
-<!-- built 2026-08-19 10:53 from web/src -->
+<!-- built 2026-08-22 23:26 from web/src -->
 <style>
 /* Agent Remote, browser client.
  *
@@ -646,6 +646,8 @@ button.icon-btn.icon-idle {
 }
 .welcome-steps li { margin: 6px 0; }
 .welcome-steps strong { color: var(--text); }
+/* The install one-liner is long; break it rather than overflow the card. */
+.welcome-steps code { word-break: break-all; }
 .welcome-actions {
   display: flex;
   flex-wrap: wrap;
@@ -661,6 +663,8 @@ button.icon-btn.icon-idle {
   font-weight: 600;
 }
 .welcome-link:hover { text-decoration: underline; }
+/* Variant that sits on its own line under the primary action. */
+.welcome-link.below { display: block; margin-top: 10px; }
 /* Session-list empty (no daemons): short note only — full guide is in transcript. */
 .empty.list-quiet {
   max-width: none;

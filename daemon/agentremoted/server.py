@@ -57,6 +57,8 @@ Endpoints (all under /api, all JSON):
   POST /api/jobs/<id>/question {request_id, answers|cancel}  answer AskUserQuestion
   POST /api/shell {command, cwd?}                      run a shell command
   POST /api/attachments?name=<filename>                raw file body -> {path}
+                                                       optional chunked:
+                                                       upload_id=&index=&total=
   GET  /api/drop                                       host→phone drop listing
                                                        (files and folders;
                                                        type=file|dir, dirs also
@@ -83,6 +85,7 @@ import shutil
 import ssl
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -123,6 +126,12 @@ _SHARE_MSGS = re.compile(r"^/api/share/([A-Za-z0-9_-]{20,64})/messages$")
 _FOCUS_DONE = re.compile(r"^/api/focus/([^/]+)/done$")
 _FOCUS_RESTORE = re.compile(r"^/api/focus/([^/]+)/restore$")
 _FOCUS_SEEN = re.compile(r"^/api/focus/([^/]+)/seen$")
+_CHUNK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_MAX_CHUNKS = 512
+_MAX_CHUNK_BYTES = 2 * 1024 * 1024
+_PARTIAL_TTL_S = 2 * 3600
+_UPLOAD_LOCKS_GUARD = threading.Lock()
+_UPLOAD_LOCKS = {}  # type: dict
 
 
 MAX_BODY = 256 * 1024
@@ -148,6 +157,37 @@ def _safe_drop_name(raw: str) -> str:
     if any(ord(ch) < 32 for ch in name):
         return ""
     return name
+
+
+def _upload_lock(upload_id: str):
+    with _UPLOAD_LOCKS_GUARD:
+        lock = _UPLOAD_LOCKS.get(upload_id)
+        if lock is None:
+            lock = threading.Lock()
+            _UPLOAD_LOCKS[upload_id] = lock
+        return lock
+
+
+def _sweep_partial_uploads(upload_dir, now: float = None):
+    """Drop abandoned chunked-upload dirs so a failed 11 MB pcap does not linger."""
+    from pathlib import Path
+    upload_dir = Path(upload_dir)
+    root = upload_dir / ".partial"
+    if not root.is_dir():
+        return
+    if now is None:
+        now = time.time()
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    for p in entries:
+        try:
+            age = now - p.stat().st_mtime
+        except OSError:
+            continue
+        if age > _PARTIAL_TTL_S:
+            shutil.rmtree(str(p), ignore_errors=True)
 
 
 def _sanitize(obj):
@@ -236,8 +276,42 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.runner = b.runner
         return b
 
+    def _canonical_session_id(self, session_id: str) -> str:
+        """Map ``job:<id>`` placeholders to the harness session uuid.
+
+        A new turn is listed as ``job:<jobid>`` until the CLI reports a
+        session id. Clients that stay on that row (Focus, an open transcript)
+        would 404 on messages/continue once the turn finished. Percent-encoded
+        colons from ``encodeURIComponent`` are accepted too.
+        """
+        raw = unquote(str(session_id or "")).strip()
+        if not raw:
+            return raw
+        prefix = focus_store.JOB_KEY_PREFIX
+        if not raw.startswith(prefix):
+            return raw
+        jid = raw[len(prefix):].strip()
+        if not jid:
+            return raw
+        _name, _bundle, job = self._find_job(jid)
+        if job is not None and accounts.job_in_scope(job, self.principal):
+            sid = (getattr(job, "new_session_id", None)
+                   or getattr(job, "session_id", None) or "")
+            sid = str(sid).strip()
+            if sid:
+                return sid
+        # Done jobs are dropped from memory on restart; Focus still has the
+        # job_id stamped on the card from enroll/rekey.
+        b = self.focus
+        if b is not None:
+            mapped = b.key_for_job(jid)
+            if mapped:
+                return mapped
+        return raw
+
     def _find_session(self, session_id):
         """(provider_name, bundle, session_dict) or (None, None, None)."""
+        session_id = self._canonical_session_id(session_id)
         if self.store is not None and (not self.bundles or len(self.bundles) <= 1):
             name = self.runner.name if self.runner else ""
             store = self._store_for_provider(name) if name else self.store
@@ -847,7 +921,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _error(self, status, message):
-        self._send_json({"error": message}, status=status, close=True)
+        try:
+            self._send_json({"error": message}, status=status, close=True)
+        except OSError:
+            # Client already gone (CF tunnel canceled a truncated upload).
+            self.close_connection = True
 
     def _send_html(self, body, status=200):
         if isinstance(body, str):
@@ -1579,6 +1657,19 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self.config.drop_path
         return p.drop_path()
 
+    def _stamp_upload_caps(self, payload: dict) -> None:
+        """Advertise chunked uploads so clients split large files under the
+        Cloudflare ~100s HTTP timeout (an 11 MB pcap from a slow link used
+        to die as a generic browser 'Network error during upload')."""
+        mb = int(getattr(self.config, "max_upload_mb", 16) or 16)
+        payload["chunked_upload"] = True
+        payload["max_upload_mb"] = mb
+        caps = payload.get("caps")
+        if isinstance(caps, dict):
+            caps = dict(caps)
+            caps["chunked_upload"] = True
+            payload["caps"] = caps
+
     def _scoped_upload_path(self):
         p = self.principal
         if p is None:
@@ -1793,6 +1884,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 payload["focus"] = self.focus is not None
                 payload["focus_states"] = list(focus_store.STATES)
                 payload["share"] = self.shares is not None
+                self._stamp_upload_caps(payload)
                 self._send_json(payload)
                 return
             if self.runner is None:
@@ -1841,6 +1933,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             payload["focus"] = self.focus is not None
             payload["focus_states"] = list(focus_store.STATES)
             payload["share"] = self.shares is not None
+            self._stamp_upload_caps(payload)
             self._send_json(payload)
             return
 
@@ -1956,10 +2049,13 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         m = _SESSION_ONE.match(path)
         if m:
-            session = self.store.get_session(m.group(1))
+            name, _b, session = self._find_session(m.group(1))
             if session is None or not self._session_in_scope(session):
                 self._error(404, "session not found")
             else:
+                session = dict(session)
+                if name and not session.get("provider"):
+                    session["provider"] = name
                 self._send_json(self._decorate_focus([session])[0])
             return
 
@@ -2220,6 +2316,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _send_session_step(self, session_id, ref):
         """Full text behind a truncated step, fetched only when expanded —
         this is what keeps a 200KB tool result out of the window fetch."""
+        session_id = self._canonical_session_id(session_id)
         session = None
         if self.store is not None:
             session = self.store.get_session(session_id)
@@ -2228,6 +2325,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if session is None or not self._session_in_scope(session):
             self._error(404, "session not found")
             return
+        session_id = str((session or {}).get("id") or session_id)
         getter = getattr(self.store, "get_step", None)
         if not callable(getter):
             self._error(404, "not supported by this harness")
@@ -2239,6 +2337,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._send_json(result)
 
     def _send_session_messages(self, session_id, query):
+        session_id = self._canonical_session_id(session_id)
         session = None
         if self.store is not None:
             session = self.store.get_session(session_id)
@@ -2247,6 +2346,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if session is None or not self._session_in_scope(session):
             self._error(404, "session not found")
             return
+        session_id = str((session or {}).get("id") or session_id)
         offset = self._int_param(query, "offset", None)
         limit = min(max(self._int_param(query, "limit", 50), 1), 500)
         # Opt-in process view. Without it the response is byte-identical to
@@ -2639,12 +2739,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 or not body["prompt"].strip():
             self._error(400, "body must be JSON with a non-empty 'prompt'")
             return
+        session_id = self._canonical_session_id(session_id)
         session = self.store.get_session(session_id) if self.store else None
         if session is None:
             _n, _b, session = self._find_session(session_id)
         if session is None or not self._session_in_scope(session):
             self._error(404, "session not found")
             return
+        session_id = str((session or {}).get("id") or session_id)
         p = self.principal or accounts.main_principal()
         cwd, cerr = accounts.confine_cwd(session.get("cwd", "") or "", p)
         if cerr:
@@ -3038,109 +3140,188 @@ class ApiHandler(BaseHTTPRequestHandler):
         else:
             self._error(404, "no matching pending question")
 
+    def _sanitize_upload_name(self, query) -> str:
+        name = os.path.basename((query.get("name") or ["file"])[0]).strip()
+        name = "".join(ch if (ch.isalnum() or ch in "-_.") else "_"
+                       for ch in name) or "file"
+        return name
+
+    def _upload_max_bytes(self) -> int:
+        return int(getattr(self.config, "max_upload_mb", 16) or 16) * 1024 * 1024
+
+    def _read_upload_body(self, length: int, max_bytes: int):
+        """Read the request body. Returns (bytes, err_status, err_message)."""
+        import socket
+        if length > max_bytes:
+            return b"", 413, "attachment too large (max %d MB)" % (
+                max_bytes // (1024 * 1024))
+        buf = bytearray()
+        if length > 0:
+            remaining = length
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 256 * 1024))
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                remaining -= len(chunk)
+            if remaining > 0:
+                return bytes(buf), 400, (
+                    "upload truncated (%d of %d bytes) — network dropped mid-transfer"
+                    % (len(buf), length))
+            return bytes(buf), None, None
+        sock = getattr(self, "connection", None)
+        prev_to = None
+        if sock is not None:
+            try:
+                prev_to = sock.gettimeout()
+                sock.settimeout(30.0)
+            except (OSError, AttributeError):
+                prev_to = None
+        try:
+            while len(buf) <= max_bytes:
+                try:
+                    chunk = self.rfile.read(256 * 1024)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                buf.extend(chunk)
+        finally:
+            if sock is not None and prev_to is not None:
+                try:
+                    sock.settimeout(prev_to)
+                except (OSError, AttributeError):
+                    pass
+        if not buf:
+            return b"", 400, "empty upload (missing Content-Length and no body)"
+        if len(buf) > max_bytes:
+            return b"", 413, "attachment too large (max %d MB)" % (
+                max_bytes // (1024 * 1024))
+        return bytes(buf), None, None
+
+    def _commit_upload(self, upload_dir, name: str, data: bytes):
+        from pathlib import Path
+        upload_dir = Path(upload_dir)
+        dest = upload_dir / ("%s-%s" % (uuid.uuid4().hex[:8], name))
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(str(tmp), str(dest))
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        return dest
+
+    def _handle_chunked_attachment(self, query, name: str, data: bytes,
+                                   max_bytes: int):
+        """Assemble POST /api/attachments?upload_id=&index=&total= chunks."""
+        from pathlib import Path
+        upload_id = str((query.get("upload_id") or [""])[0]).strip()
+        if not _CHUNK_ID_RE.match(upload_id):
+            self._error(400, "invalid upload_id")
+            return
+        try:
+            index = int((query.get("index") or ["-1"])[0])
+            total = int((query.get("total") or ["0"])[0])
+        except (TypeError, ValueError):
+            self._error(400, "index and total must be integers")
+            return
+        if total < 1 or total > _MAX_CHUNKS or index < 0 or index >= total:
+            self._error(400, "invalid chunk index/total")
+            return
+        if len(data) > _MAX_CHUNK_BYTES:
+            self._error(413, "chunk too large (max %d KB)" % (
+                _MAX_CHUNK_BYTES // 1024))
+            return
+        upload_dir = self._scoped_upload_path()
+        try:
+            upload_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self._error(500, "could not store attachment: %s" % e)
+            return
+        _sweep_partial_uploads(upload_dir)
+        partial = Path(upload_dir) / ".partial" / upload_id
+        lock = _upload_lock(upload_id)
+        with lock:
+            try:
+                partial.mkdir(parents=True, exist_ok=True)
+                part = partial / ("%04d" % index)
+                with open(part, "wb") as f:
+                    f.write(data)
+                present = []
+                for i in range(total):
+                    p = partial / ("%04d" % i)
+                    if not p.is_file():
+                        # 200 not 202: some mobile HTTP stacks mishandle 202.
+                        self._send_json({
+                            "ok": True,
+                            "complete": False,
+                            "index": index,
+                            "total": total,
+                            "received": i,
+                        })
+                        return
+                    present.append(p)
+                size = 0
+                for p in present:
+                    size += p.stat().st_size
+                    if size > max_bytes:
+                        shutil.rmtree(str(partial), ignore_errors=True)
+                        self._error(413, "attachment too large (max %d MB)"
+                                    % (max_bytes // (1024 * 1024)))
+                        return
+                blob = bytearray()
+                for p in present:
+                    blob.extend(p.read_bytes())
+                dest = self._commit_upload(Path(upload_dir), name, bytes(blob))
+                shutil.rmtree(str(partial), ignore_errors=True)
+            except OSError as e:
+                self._error(500, "could not store attachment: %s" % e)
+                return
+        self._send_json({"ok": True, "complete": True,
+                         "path": str(dest), "size": len(blob)},
+                        status=201)
+
     def _handle_attachment(self, query):
         """Store a phone upload where the agent CLI can read it by path.
 
         Prefers Content-Length (Android/OkHttp always set it after 2.4.7).
         Without a length, read with a short socket timeout so keep-alive
         connections cannot hang the worker forever.
+
+        Optional chunked mode (``upload_id``, ``index``, ``total``) splits a
+        large file into short POSTs so a Cloudflare tunnel does not kill an
+        11 MB transfer at the ~100 s HTTP timeout.
         """
-        import socket
-        name = os.path.basename((query.get("name") or ["file"])[0]).strip()
-        name = "".join(ch if (ch.isalnum() or ch in "-_.") else "_"
-                       for ch in name) or "file"
+        name = self._sanitize_upload_name(query)
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
             length = 0
-        max_bytes = int(getattr(self.config, "max_upload_mb", 16) or 16) * 1024 * 1024
-        if length > max_bytes:
+        max_bytes = self._upload_max_bytes()
+        chunk_max = max_bytes
+        if (query.get("upload_id") or [""])[0]:
+            chunk_max = min(max_bytes, _MAX_CHUNK_BYTES)
+        data, err_status, err_msg = self._read_upload_body(length, chunk_max)
+        if err_status:
             self.close_connection = True
-            self._error(413, "attachment too large (max %d MB)"
-                        % (max_bytes // (1024 * 1024)))
+            self._error(err_status, err_msg)
+            return
+        if (query.get("upload_id") or [""])[0]:
+            self._handle_chunked_attachment(query, name, data, max_bytes)
             return
         upload_dir = self._scoped_upload_path()
-        dest = None
         try:
             upload_dir.mkdir(parents=True, exist_ok=True)
-            dest = upload_dir / ("%s-%s" % (uuid.uuid4().hex[:8], name))
-            written = 0
-            with open(dest, "wb") as f:
-                if length > 0:
-                    remaining = length
-                    while remaining > 0:
-                        chunk = self.rfile.read(min(remaining, 256 * 1024))
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        remaining -= len(chunk)
-                        written += len(chunk)
-                    if remaining > 0:
-                        try:
-                            dest.unlink()
-                        except OSError:
-                            pass
-                        self._error(
-                            400,
-                            "upload truncated (%d of %d bytes) — network dropped mid-transfer"
-                            % (written, length),
-                        )
-                        return
-                else:
-                    # No Content-Length: drain with a timeout so HTTP keep-alive
-                    # does not block forever waiting for a body that never ends.
-                    sock = getattr(self, "connection", None)
-                    prev_to = None
-                    if sock is not None:
-                        try:
-                            prev_to = sock.gettimeout()
-                            sock.settimeout(30.0)
-                        except (OSError, AttributeError):
-                            prev_to = None
-                    try:
-                        while written <= max_bytes:
-                            try:
-                                chunk = self.rfile.read(256 * 1024)
-                            except socket.timeout:
-                                break
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            written += len(chunk)
-                    finally:
-                        if sock is not None and prev_to is not None:
-                            try:
-                                sock.settimeout(prev_to)
-                            except (OSError, AttributeError):
-                                pass
-                    if written == 0:
-                        try:
-                            dest.unlink()
-                        except OSError:
-                            pass
-                        self._error(
-                            400,
-                            "empty upload (missing Content-Length and no body)",
-                        )
-                        return
-                    if written > max_bytes:
-                        try:
-                            dest.unlink()
-                        except OSError:
-                            pass
-                        self.close_connection = True
-                        self._error(413, "attachment too large (max %d MB)"
-                                    % (max_bytes // (1024 * 1024)))
-                        return
+            dest = self._commit_upload(upload_dir, name, data)
         except OSError as e:
-            if dest is not None:
-                try:
-                    dest.unlink()
-                except OSError:
-                    pass
             self._error(500, "could not store attachment: %s" % e)
             return
-        self._send_json({"ok": True, "path": str(dest), "size": written},
+        self._send_json({"ok": True, "path": str(dest), "size": len(data)},
                         status=201)
 
     def _resolve_drop_entry(self, raw_name, *, dirs_ok=True):

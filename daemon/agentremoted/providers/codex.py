@@ -1618,11 +1618,11 @@ class CodexRunner:
                        + ("" if on_path else "; `codex` not on PATH")),
         }
 
-    # Verified in codex's own TUI command list: /compact and /exit are
-    # there. /rewind is served by the DAEMON (rollout truncation in
-    # jobs.py), so it works on headless turns too.
+    # Verified in codex's own TUI command list: /compact, /exit and /fork
+    # (codex.thread.fork) are there. /rewind is served by the DAEMON
+    # (rollout truncation in jobs.py), so it works on headless turns too.
     # /goal is always advertised so phone/web clients do not refuse it.
-    _BUILTIN_SLASH = ["/compact", "/exit", "/goal", "/rewind"]
+    _BUILTIN_SLASH = ["/compact", "/exit", "/fork", "/goal", "/rewind"]
 
     def slash_commands(self):
         out = list(self._BUILTIN_SLASH)

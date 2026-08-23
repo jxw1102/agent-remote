@@ -1565,7 +1565,8 @@ class GrokRunner:
         if not job.session_id:
             # The CLI doesn't reliably report the new session id; diff the
             # session tree against this snapshot while the job runs.
-            state["before_ids"] = self.store.known_session_ids()
+            # Guest jobs write under <isolate_root>/.grok, not the host store.
+            state["before_ids"] = self._store_for(job).known_session_ids()
             state["last_scan"] = 0.0
         else:
             # Resume: tail updates.jsonl from the current end so historical
@@ -1651,10 +1652,24 @@ class GrokRunner:
                         job.error = err_text or "Grok turn failed"
         # unknown kinds are keep-alives — ignore
 
+    def _needs_session_scan(self, job) -> bool:
+        """True when we still need an on-disk session id for this job.
+
+        Guest TUIs often ignore ``--session-id`` and mint their own uuid under
+        ``<isolate_root>/.grok``. A claimed id that is not on that store must
+        be replaced, not kept.
+        """
+        if job.session_id:
+            return False
+        claimed = str(job.new_session_id or "").strip()
+        if not claimed:
+            return True
+        return self._store_for(job).find_session_dir(claimed) is None
+
     def tick(self, job):
         state = job.runner_state
         # Session-id discovery for new sessions (fs-diff scan).
-        if not job.session_id and not job.new_session_id and "before_ids" in state:
+        if self._needs_session_scan(job) and "before_ids" in state:
             now_m = time.monotonic()
             if now_m - state.get("last_scan", 0.0) >= self._SCAN_INTERVAL:
                 state["last_scan"] = now_m
@@ -1664,7 +1679,7 @@ class GrokRunner:
 
     def finalize(self, job, returncode, stderr_tail):
         state = job.runner_state
-        if not job.session_id and not job.new_session_id and "before_ids" in state:
+        if self._needs_session_scan(job) and "before_ids" in state:
             self._scan_new_session(job)
         # Catch any tool_calls that landed just before exit.
         self._poll_updates(job)
@@ -1713,17 +1728,29 @@ class GrokRunner:
                 return
 
     def _note_session_id(self, job, sid: str):
-        """First valid session id wins; mirrors the claude init event."""
+        """First *on-disk* session id wins; mirrors the claude init event.
+
+        A claimed ``--session-id`` that grok ignored (common for guest
+        sandboxes) is replaced by the directory that actually appeared.
+        """
         if not _is_session_id(sid):
             return
+        store = self._store_for(job)
         first = False
+        replaced = False
         with job.lock:
-            if job.new_session_id:
+            current = str(job.new_session_id or "").strip()
+            if current == sid:
                 return
+            if current:
+                if store.find_session_dir(current) is not None:
+                    return
+                replaced = True
             job.new_session_id = sid
             first = True
         if first:
-            job.add_event("init", session_id=sid, model="")
+            if not replaced:
+                job.add_event("init", session_id=sid, model="")
             # New session: read updates from the start so tools that already
             # landed before we discovered the id still drive the banner.
             self._bind_updates(job, from_start=True)
@@ -1731,7 +1758,8 @@ class GrokRunner:
     def _scan_new_session(self, job):
         state = job.runner_state
         before = state.get("before_ids") or set()
-        fresh = self.store.known_session_ids() - before
+        store = self._store_for(job)
+        fresh = store.known_session_ids() - before
         if not fresh:
             return
         if len(fresh) == 1:
@@ -1743,7 +1771,7 @@ class GrokRunner:
         # them and the phone would attach to a subagent's transcript.
         best, best_mtime = None, -1.0
         for sid in fresh:
-            sdir = self.store.find_session_dir(sid)
+            sdir = store.find_session_dir(sid)
             if sdir is None:
                 continue
             try:
@@ -1782,6 +1810,11 @@ class GrokRunner:
         state = job.runner_state
         if not state.get("updates_path"):
             # Session may have appeared via fs-diff / end sniff since prepare.
+            if self._needs_session_scan(job) and "before_ids" in state:
+                now_m = time.monotonic()
+                if now_m - state.get("last_scan", 0.0) >= self._SCAN_INTERVAL:
+                    state["last_scan"] = now_m
+                    self._scan_new_session(job)
             if job.new_session_id or job.session_id:
                 # Resume jobs already bound from end; late discovery = new.
                 self._bind_updates(job, from_start=not bool(job.session_id))

@@ -993,7 +993,8 @@ class TranscriptViewModel(
         _attachments.value = _attachments.value + chip
         viewModelScope.launch {
             try {
-                val dto = c.uploadAttachment(safeName, bytes)
+                val chunked = profile.value?.caps?.chunkedUpload == true
+                val dto = c.uploadAttachment(safeName, bytes, chunked = chunked)
                 val path = dto.path.trim()
                 if (path.isEmpty()) throw DaemonException(0, "daemon returned no path")
                 _attachments.value = _attachments.value.map {

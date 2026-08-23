@@ -103,7 +103,7 @@ Test connection should show host name, version, harness list, and (daemon ≥ 2.
 
 1. **New session**
 2. Pick **which daemon** (if you have more than one profile)
-3. Pick **provider** if the host runs multi (Claude / Grok / Codex)
+3. Pick **provider** if the host runs multi (Claude / Grok / Codex / DeepSeek)
 4. Project/cwd if required, then send a prompt
 
 You should see live status, permissions / questions when the harness asks, and the same sessions that appear in the host CLI history.

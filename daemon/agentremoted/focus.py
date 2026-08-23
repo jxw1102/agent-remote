@@ -259,6 +259,25 @@ class Focus:
             self._save_locked()
         return True
 
+    def key_for_job(self, job_id: str) -> str:
+        """Session id enrolled for *job_id*, after the job:<id> placeholder rekeyed.
+
+        Finished jobs leave memory on restart; Focus still remembers the
+        mapping so ``/api/sessions/job:<id>`` can resolve the transcript.
+        """
+        want = str(job_id or "").strip()
+        if not want:
+            return ""
+        prefix = JOB_KEY_PREFIX + want
+        with self._lock:
+            for key, member in self._members.items():
+                k = str(key or "")
+                if k == prefix:
+                    continue
+                if str((member or {}).get("job_id") or "") == want:
+                    return k
+        return ""
+
     def is_member(self, key: str) -> bool:
         with self._lock:
             member = self._members.get(str(key or ""))

@@ -328,6 +328,14 @@ def main():
           cards and cards[0].get("id") == NEW_SID, cards)
     check("no job: placeholder left behind",
           not any(str(c.get("id", "")).startswith("job:") for c in cards), cards)
+    _, alias = api(base, token, "/api/sessions/job:%s" % new_job)
+    check("job: alias GET session", alias.get("id") == NEW_SID, alias)
+    _, alias_msgs = api(base, token, "/api/sessions/job:%s/messages" % new_job)
+    check("job: alias GET messages",
+          alias_msgs.get("session_id") == NEW_SID
+          or int(alias_msgs.get("total") or 0) >= 1, alias_msgs)
+    _, encoded = api(base, token, "/api/sessions/job%%3A%s" % new_job)
+    check("job%%3A alias GET session", encoded.get("id") == NEW_SID, encoded)
 
     print("a failed turn is visible:")
     _, res = api(base, token, "/api/sessions/%s/continue" % SESSION_ID,

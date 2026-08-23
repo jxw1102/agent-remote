@@ -86,6 +86,8 @@ class DaemonClient(
 
         /** Multi-MB uploads over cellular / CF need a long *write* budget. */
         private const val UPLOAD_TIMEOUT_SEC = 180
+        /** Stay under Cloudflare's ~100s HTTP timeout on a slow link. */
+        private const val UPLOAD_CHUNK_BYTES = 512 * 1024
 
         /**
          * Accept what a person types: "10.0.0.5", "10.0.0.5:8473",
@@ -561,11 +563,45 @@ class DaemonClient(
      * daemon never sees "empty upload", and uses a long write timeout for
      * multi-MB photos over cellular. One automatic retry on transport errors.
      */
-    suspend fun uploadAttachment(name: String, bytes: ByteArray): AttachmentDto {
+    suspend fun uploadAttachment(
+        name: String,
+        bytes: ByteArray,
+        chunked: Boolean = false,
+    ): AttachmentDto {
         val safe = name.ifBlank { "file" }
         require(bytes.isNotEmpty()) { "empty file" }
-        // Fixed-length body: Content-Length = size. Chunked uploads hit the
-        // daemon as length 0 ("empty upload") behind some proxies.
+        if (chunked && bytes.size > UPLOAD_CHUNK_BYTES) {
+            val id = java.util.UUID.randomUUID().toString().replace("-", "")
+            val total = (bytes.size + UPLOAD_CHUNK_BYTES - 1) / UPLOAD_CHUNK_BYTES
+            var last: AttachmentDto? = null
+            for (i in 0 until total) {
+                val from = i * UPLOAD_CHUNK_BYTES
+                val to = minOf(bytes.size, from + UPLOAD_CHUNK_BYTES)
+                last = postAttachmentBytes(
+                    safe,
+                    bytes.copyOfRange(from, to),
+                    mapOf(
+                        "name" to safe,
+                        "upload_id" to id,
+                        "index" to i.toString(),
+                        "total" to total.toString(),
+                    ),
+                )
+            }
+            val done = last
+            if (done == null || done.path.isBlank()) {
+                throw DaemonException(0, "daemon returned no path")
+            }
+            return done
+        }
+        return postAttachmentBytes(safe, bytes, mapOf("name" to safe))
+    }
+
+    private suspend fun postAttachmentBytes(
+        name: String,
+        bytes: ByteArray,
+        query: Map<String, String>,
+    ): AttachmentDto {
         val body = object : RequestBody() {
             override fun contentType() = OCTET_MEDIA
             override fun contentLength() = bytes.size.toLong()
@@ -573,13 +609,13 @@ class DaemonClient(
                 sink.write(bytes)
             }
         }
-        val req = request(url("api/attachments", mapOf("name" to safe)))
+        val req = request(url("api/attachments", query))
             .post(body)
             .header("Content-Type", "application/octet-stream")
             .header("Content-Length", bytes.size.toString())
             .build()
         var last: Exception? = null
-        repeat(2) { attempt ->
+        repeat(4) { attempt ->
             try {
                 val raw = raw(
                     req,
@@ -589,11 +625,10 @@ class DaemonClient(
                 return parseAttachment(raw)
             } catch (e: DaemonException) {
                 last = e
-                // Retry only transport / timeout; 4xx means the daemon understood.
-                if (!e.transport || attempt == 1) throw e
+                if (!e.transport || attempt == 3) throw e
             } catch (e: Exception) {
                 last = e
-                if (attempt == 1) throw e
+                if (attempt == 3) throw e
             }
         }
         throw last ?: DaemonException(0, "Upload failed", transport = true)

@@ -45,7 +45,7 @@ A share link is as public as the URL. Treat it like a document you emailed.
 
 ## Host power
 
-The daemon runs harness CLIs (**Claude / Grok / Codex**) as the service user.
+The daemon runs harness CLIs (**Claude / Grok / Codex / DeepSeek**) as the service user.
 Interactive and headless modes can execute tools with that user’s privileges.
 Run it only on machines you control; do not expose an open token on a shared
 host.

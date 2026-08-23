@@ -18,16 +18,16 @@
   <img src="docs/cover.jpg" alt="Agent Remote — control your AI sessions from anywhere" width="100%">
 </p>
 
-Start, watch, and steer Claude Code, Grok, and Codex from your phone or
-browser — even when you are away from the desk. A small daemon on your Mac or
+Start, watch, and steer Claude Code, Grok, Codex, and DeepSeek from your
+phone or browser — even when you are away from the desk. A small daemon on your Mac or
 VPS talks to the CLIs you already use. Clients merge every host into **one
 list**.
 
 ## Get started
 
 You need **Python 3** and at least one working CLI on the machine you install
-on: `claude`, `grok`, and/or `codex` (subscription login or API key). Confirm
-the CLI works in a normal terminal first.
+on: `claude`, `grok`, `codex`, and/or `dsh` (DeepSeek Harness) — subscription
+login or API key. Confirm the CLI works in a normal terminal first.
 
 ### 1. Install the daemon
 
@@ -131,6 +131,7 @@ Anthropic / OpenAI / xAI account.
 | Claude Pro/Max (or API key) | Host `claude` CLI login / env |
 | ChatGPT / Codex (or API key) | Host `codex` CLI |
 | xAI / Grok | Host `grok` CLI |
+| DeepSeek (or API key) | Host `dsh` harness |
 | Nothing extra for AR | Only a local daemon **token** for clients |
 
 Log into each CLI **on the host** once. Clients only store the daemon URL +
@@ -193,7 +194,7 @@ CLI bills the **API key** — unset the key to stay on Max. Full notes:
 ```bash
 mkdir -p ~/.agentremoted
 cp deploy/config.example.json ~/.agentremoted/config.json
-# providers: ["claude","grok","codex"] — trim to CLIs on PATH
+# providers: ["claude","grok","codex","deepseek"] — trim to CLIs on PATH
 cd daemon && PYTHONPATH=. python3 -m agentremoted
 curl -s http://127.0.0.1:8473/api/ping
 ```

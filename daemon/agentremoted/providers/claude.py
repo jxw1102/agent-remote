@@ -2441,7 +2441,9 @@ class ClaudeRunner:
     # unlike the TUI built-ins it also works on headless turns.
     # /goal is a multi-client control/skill entry — always advertised so
     # BB/Android/web/iOS allow it (they refuse anything not on this list).
-    _BUILTIN_SLASH = ["/compact", "/exit", "/goal", "/rewind"]
+    # /fork is a Claude Code TUI built-in (fork the session), typed into the
+    # pane like any other slash turn.
+    _BUILTIN_SLASH = ["/compact", "/exit", "/fork", "/goal", "/rewind"]
 
     def slash_commands(self) -> list:
         """Everything a phone-typed /command can reach: config extras,
