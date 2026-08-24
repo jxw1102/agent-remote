@@ -41,6 +41,7 @@ import uuid
 from pathlib import Path
 
 from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
+from ..live_tui import idle_eviction_victim
 from ..render_blocks import markdown_to_blocks
 
 log = logging.getLogger(__name__)
@@ -359,6 +360,11 @@ class GrokInteractiveManager:
         # pinned prompt region stable for pasting.
         parts = [grok, "--minimal",
                  "--permission-mode", "bypassPermissions", "--trust-folder"]
+        if tui.isolate_root:
+            # Do not pass --sandbox workspace: grok then applies a second
+            # seatbelt, fails to canonicalize the guest root, and exits.
+            # Outer sandbox-exec / bwrap is the jail.
+            parts += ["--sandbox", "off"]
         if resume_sid:
             # grok reuses the id on resume (only --fork-session makes a new
             # one), so the session the phone is looking at stays intact.
@@ -469,13 +475,12 @@ class GrokInteractiveManager:
                             break
                         t.last_used = time.time()
                         return t, ""
-            # Cap the fleet: evict the least-recently-used idle TUIs (never
-            # one with a turn in flight) before adding another.
+            # Cap the fleet: evict LRU idle TUIs (never a turn in flight,
+            # never a guest pane to make room for the host account).
             while len(self._tuis) >= _MAX_TUIS:
-                idle = [t for t in self._tuis.values() if t.job is None]
-                if not idle:
-                    break  # everything is mid-turn; allow the overflow
-                victim = min(idle, key=lambda t: t.last_used)
+                victim = idle_eviction_victim(self._tuis.values(), iso)
+                if victim is None:
+                    break  # mid-turn, or only guests left for a host slot
                 log.info("evicting idle grok TUI %s (cap %d)", victim.name, _MAX_TUIS)
                 self._kill(victim)
                 del self._tuis[victim.name]

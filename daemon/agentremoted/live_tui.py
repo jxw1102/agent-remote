@@ -164,6 +164,30 @@ def plain_tui_text(text: str) -> str:
     return "".join(out)
 
 
+def idle_eviction_victim(tuis, incoming_isolate_root: str = ""):
+    """Pick an idle TUI to kill for the fleet cap, or None to overflow.
+
+    Guest panes (``isolate_root`` set) are never evicted to make room for
+    the host account. An incoming guest may evict idle host TUIs first,
+    then the least-recently-used guest if the fleet is all guests.
+    A TUI with ``job`` set is mid-turn and is never a candidate.
+    """
+    items = list(tuis or [])
+    idle = [t for t in items if getattr(t, "job", None) is None]
+    if not idle:
+        return None
+    incoming_guest = bool((incoming_isolate_root or "").strip())
+    host_idle = [t for t in idle
+                 if not str(getattr(t, "isolate_root", "") or "").strip()]
+    if incoming_guest:
+        pool = host_idle or idle
+    else:
+        pool = host_idle
+        if not pool:
+            return None
+    return min(pool, key=lambda t: float(getattr(t, "last_used", 0) or 0))
+
+
 def frame_payload(session_id: str, text: str, attached: bool,
                   job_id: str = "", error: str = "",
                   *, ansi: bool = False) -> dict:

@@ -61,6 +61,7 @@ import time
 import uuid
 
 from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
+from ..live_tui import idle_eviction_victim
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +119,69 @@ _OLD_PREFIXES = ("cld-", "bb10i-")
 # The AskUserQuestion panel's footer, i.e. "the panel is still up". Used to
 # tell "submitted, panel gone" from "still waiting" after the last pick.
 _ASK_PANEL_MARKER = "to navigate"
+
+# Guest first-run parks on theme picker / login ("Let's get started") when
+# $HOME/.claude.json is missing. SessionStart does not fire until that is
+# gone. Waiting only on the hook used to kill the pane after 90s.
+_SPLASH_MARKERS = (
+    "Let's get started",
+    "Choose the text style",
+    "Select login method",
+    "Paste code here",
+    "Browser didn't open",
+    "Syntax theme:",
+    "ctrl+t to disable",
+    "I trust this folder",
+    "Quick safety check",
+    "Yes, I trust this folder",
+)
+_SPLASH_NUDGE_KEYS = ("Enter", "Escape", "C-t")
+_SPLASH_NUDGE_S = 1.5
+
+
+def _claude_splash(text: str) -> bool:
+    if not text:
+        return False
+    return any(m in text for m in _SPLASH_MARKERS)
+
+
+def _claude_pane_ready(text: str) -> bool:
+    """True when the input chrome is up and the first-run splash is gone.
+
+    The theme picker also draws ❯, so that chevron alone is not ready.
+    """
+    if not text or not text.strip() or _claude_splash(text):
+        return False
+    rows = [l for l in text.splitlines() if l.strip()][-8:]
+    t = "\n".join(rows)
+    return ("esc to interrupt" in t.lower()) or "⏵⏵" in t
+
+
+def _claude_project_dir(cwd: str, isolate_root: str = "") -> str:
+    """~/.claude/projects/<munged-cwd> — guest uses CLAUDE_CONFIG_DIR."""
+    iso = (isolate_root or "").strip()
+    cfg = os.path.join(iso, ".claude") if iso else os.path.expanduser("~/.claude")
+    real = os.path.realpath(cwd or iso or os.path.expanduser("~"))
+    slug = real.replace("/", "-")
+    return os.path.join(cfg, "projects", slug)
+
+
+def _newest_jsonl(project_dir: str, after_mtime: float = 0.0) -> str:
+    newest, newest_m = "", after_mtime
+    try:
+        for name in os.listdir(project_dir):
+            if not name.endswith(".jsonl"):
+                continue
+            path = os.path.join(project_dir, name)
+            try:
+                m = os.path.getmtime(path)
+            except OSError:
+                continue
+            if m >= newest_m:
+                newest, newest_m = path, m
+    except OSError:
+        pass
+    return newest
 
 
 def _tag_text(s: str, tag: str) -> str:
@@ -196,7 +260,8 @@ class InteractiveManager:
         """Persist the name->session mapping (see _adopt_or_reap). Only
         launched TUIs: a registered-but-unlaunched one has no tmux session."""
         rows = [{"name": t.name, "cwd": t.cwd, "session_id": t.session_id,
-                 "transcript": t.transcript, "last_used": t.last_used}
+                 "transcript": t.transcript, "last_used": t.last_used,
+                 "isolate_root": getattr(t, "isolate_root", "") or ""}
                 for t in list(self._tuis.values()) if t.spawned]
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -240,7 +305,8 @@ class InteractiveManager:
                              name, _STATE_FILE.name)
                     continue
                 tui = _Tui(name, str(entry.get("cwd", ""))
-                           or os.path.expanduser("~"))
+                           or os.path.expanduser("~"),
+                           isolate_root=str(entry.get("isolate_root") or ""))
                 tui.session_id = str(entry.get("session_id", ""))
                 tui.transcript = str(entry.get("transcript", ""))
                 tui.spawned = True
@@ -546,8 +612,12 @@ class InteractiveManager:
     def _launch(self, tui: _Tui, resume_sid: str, model: str) -> str:
         """Start the TUI in a fresh tmux session. Returns "" or an error."""
         claude = str(getattr(self.config, "claude_bin", "claude") or "claude")
+        plugin = _PLUGIN_DIR
+        if tui.isolate_root:
+            from .. import accounts as _accounts
+            plugin = _accounts.guest_claude_plugin_dir(tui.isolate_root) or plugin
         parts = [claude, "--permission-mode", "bypassPermissions",
-                 "--plugin-dir", _PLUGIN_DIR]
+                 "--plugin-dir", plugin]
         if resume_sid:
             parts += ["--resume", resume_sid]
         if model and model != "default":
@@ -587,6 +657,11 @@ class InteractiveManager:
         # would each try to spawn the server, and the loser's teardown takes
         # every other session with it (see config.ensure_tmux_server).
         ensure_tmux_server(self._tmux_bin)
+        proj = _claude_project_dir(launch_cwd, tui.isolate_root)
+        try:
+            before_mtime = os.path.getmtime(proj)
+        except OSError:
+            before_mtime = time.time()
         try:
             r = self._tmux("new-session", "-d", "-s", tui.name,
                            "-x", "220", "-y", "50", "-c", launch_cwd, shell_cmd)
@@ -602,12 +677,71 @@ class InteractiveManager:
         # corpse instead, so the exit status and final screen survive.
         self._tmux("set-option", "-t", tui.name, "remain-on-exit", "on")
         tui.spawned = True
-        if not tui.start_event.wait(_START_TIMEOUT_S):
-            tail = self._pane_tail(tui.name)
-            self._kill(tui)
-            return ("claude TUI did not become ready" +
-                    (" — screen: %s" % tail if tail else ""))
+        err = self._wait_tui_ready(tui, resume_sid, before_mtime)
+        if err:
+            return err
         time.sleep(_READY_SETTLE_S)
+        return ""
+
+    def _bind_transcript(self, tui: _Tui, resume_sid: str,
+                         before_mtime: float) -> None:
+        """Fill session_id/transcript when SessionStart never POSTed."""
+        if tui.session_id and tui.transcript:
+            return
+        launch_cwd = tui.isolate_root or tui.cwd
+        proj = _claude_project_dir(launch_cwd, tui.isolate_root)
+        if resume_sid:
+            p = os.path.join(proj, resume_sid + ".jsonl")
+            if os.path.isfile(p):
+                tui.session_id = resume_sid
+                tui.transcript = p
+                return
+        path = _newest_jsonl(proj, after_mtime=before_mtime - 0.05)
+        if path:
+            tui.session_id = os.path.splitext(os.path.basename(path))[0]
+            tui.transcript = path
+
+    def _wait_tui_ready(self, tui: _Tui, resume_sid: str,
+                        before_mtime: float) -> str:
+        """Wait for SessionStart or a ready prompt. Dismiss the splash.
+
+        Returns "" or an error (and kills the pane on timeout/death).
+        """
+        deadline = time.time() + _START_TIMEOUT_S
+        last_nudge = 0.0
+        nudge_i = 0
+        while True:
+            if tui.start_event.is_set():
+                break
+            text = self._pane_text(tui.name)
+            if _claude_pane_ready(text):
+                log.info("TUI %s ready without SessionStart (pane chrome)",
+                         tui.name)
+                break
+            dead, why = self._pane_dead(tui.name)
+            if (time.time() > deadline or not self._tmux_alive(tui.name)
+                    or dead):
+                tail = self._pane_tail(tui.name)
+                self._kill(tui)
+                extra = why or tail
+                return ("claude TUI did not become ready" +
+                        (" — screen: %s" % extra if extra else ""))
+            if _claude_splash(text) and (time.time() - last_nudge) >= _SPLASH_NUDGE_S:
+                key = _SPLASH_NUDGE_KEYS[nudge_i % len(_SPLASH_NUDGE_KEYS)]
+                log.info("TUI %s dismissing splash with %s", tui.name, key)
+                self._tmux("send-keys", "-t", tui.name, key)
+                nudge_i += 1
+                last_nudge = time.time()
+            time.sleep(_POLL_S)
+        if not tui.session_id:
+            bind_end = time.time() + 8.0
+            while time.time() < bind_end and not tui.session_id:
+                self._bind_transcript(tui, resume_sid, before_mtime)
+                if tui.session_id:
+                    break
+                time.sleep(_POLL_S)
+        if resume_sid and not tui.session_id:
+            tui.session_id = resume_sid
         return ""
 
     def _pane_dead(self, name: str):
@@ -697,13 +831,12 @@ class InteractiveManager:
                         self._kill(t)
                         del self._tuis[t.name]
                         break
-            # Cap the fleet: evict the least-recently-used idle TUIs (never
-            # one with a turn in flight) before adding another.
+            # Cap the fleet: evict LRU idle TUIs (never a turn in flight,
+            # never a guest pane to make room for the host account).
             while len(self._tuis) >= _MAX_TUIS:
-                idle = [t for t in self._tuis.values() if t.job is None]
-                if not idle:
-                    break  # everything is mid-turn; allow the overflow
-                victim = min(idle, key=lambda t: t.last_used)
+                victim = idle_eviction_victim(self._tuis.values(), iso)
+                if victim is None:
+                    break  # mid-turn, or only guests left for a host slot
                 log.info("evicting idle TUI %s (cap %d)", victim.name, _MAX_TUIS)
                 self._kill(victim)
                 del self._tuis[victim.name]

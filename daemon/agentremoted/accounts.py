@@ -26,15 +26,22 @@ Each guest token is a full API credential for that folder only:
 projects/sessions/jobs outside the root are invisible, harnesses not in
 ``providers`` are hidden, and new work is forced under the root.
 
-Process confinement (agent CLIs + ``/api/shell``) uses the best backend
-available on the host:
+Process confinement (agent CLIs + ``/api/shell``, including client ``!``
+shell escapes) uses the best backend available on the host:
 
   * **Linux** — ``bwrap`` (bubblewrap); install via distro packages
   * **macOS** — ``sandbox-exec`` (Seatbelt, ships with the OS)
   * **root** — ``chroot`` jail as a last resort
 
+macOS: every guest child (``!`` / ``/api/shell``, harness CLI, TUI) is
+launched with ``sandbox-exec``. The profile is **deny default** (plus
+Apple's ``system.sb`` so dyld/mach still work), then an allow-list of
+system paths, the guest root, and read-only harness install trees. A
+folder denylist under ``(allow default)`` is not a jail.
+
 If none of those backends is available, guest jobs/shells are refused
 rather than run with a soft ``cd``-only "isolation".
+Guest roots equal to the host home (or a parent of it) are rejected.
 
 This module is intentionally quiet in user-facing docs.
 """
@@ -160,6 +167,35 @@ def path_under(path: str, root: str) -> bool:
         return True
     prefix = rr if rr.endswith(os.sep) else rr + os.sep
     return rp.startswith(prefix)
+
+
+def guest_root_allowed(root: str) -> bool:
+    """False if *root* is the host home, a parent of it, or a system root.
+
+    ``root: "~"`` or ``root: "/Users"`` would except the entire home tree
+    from the seatbelt and is not isolation.
+    """
+    rr = _realpath(root)
+    if not rr or rr == os.sep:
+        return False
+    if rr in ("/Users", "/Volumes", "/home", "/root", "/private"):
+        return False
+    homes = []
+    try:
+        homes.append(_realpath(str(Path.home())))
+    except (OSError, TypeError):
+        pass
+    try:
+        import pwd
+        homes.append(_realpath(pwd.getpwuid(os.getuid()).pw_dir))
+    except Exception:
+        pass
+    for h in homes:
+        if not h:
+            continue
+        if rr == h or path_under(h, rr):
+            return False
+    return True
 
 
 def ensure_root_dir(root: str) -> Optional[str]:
@@ -375,6 +411,10 @@ def _parse_guests(data) -> list:
             continue
         if not name:
             name = os.path.basename(root.rstrip(os.sep)) or "guest"
+        if not guest_root_allowed(root):
+            log.warning("guests.json: ignoring %r — root %s is too broad",
+                        name, root)
+            continue
         providers = _parse_providers(item)
         seen_tokens.add(token)
         # Store token on a lightweight holder via closure in resolve —
@@ -672,7 +712,7 @@ _GUEST_SEED_FILES = (
     # Grok Build
     ".grok/auth.json",
     ".grok/config.toml",
-    ".grok/trusted_folders.toml",
+    # trusted_folders.toml is rewritten guest-only in seed_guest_home.
     ".grok/models_cache.json",
     ".grok/agent_id",
     ".grok/version.json",
@@ -685,6 +725,12 @@ _GUEST_SEED_FILES = (
     ".codex/installation_id",
     ".codex/.sandbox_migration",
 )
+
+# $HOME/.claude.json is *outside* ~/.claude/. Copy host keys so the TUI
+# skips first-run login, but never the host `projects` / github path maps.
+_GUEST_CLAUDE_JSON_SKIP = frozenset({
+    "projects", "githubRepoPaths",
+})
 
 # Directories to copy recursively (config/skills/plugins), not sessions.
 _GUEST_SEED_DIRS = (
@@ -709,14 +755,17 @@ _GUEST_SEED_DIR_SKIP = frozenset({
     "sessions", "projects", "file-history", "shell-snapshots",
     "session-env", "telemetry", "memtrace", "relocations", "logs",
     "workspace", "bin", "downloads",  # install trees: host RO via sandbox
+    # Host secret / app homes — guest gets empty stubs, never a copy.
+    ".ssh", ".Trash", ".azure", ".android", ".V2rayU",
+    ".aws", ".gnupg", ".kube",
     "__pycache__", ".git",
 })
 
 
-def _copy_file_if_newer(src: Path, dst: Path) -> None:
+def _copy_file_if_newer(src: Path, dst: Path, force: bool = False) -> None:
     import shutil
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if (not dst.is_file()
+    if force or (not dst.is_file()
             or src.stat().st_mtime > dst.stat().st_mtime + 0.5
             or src.stat().st_size != dst.stat().st_size):
         shutil.copy2(src, dst)
@@ -765,45 +814,131 @@ def _copy_tree_filtered(src: Path, dst: Path) -> None:
             log.warning("guest seed %s: %s", entry, e)
 
 
-def _merge_grok_trusted_folders(guest_grok: Path, guest_root: str) -> None:
-    """Keep main trusted folders and ensure the guest workspace is trusted.
+# Nested grok --sandbox workspace *inside* sandbox-exec/bwrap fails:
+# grok cannot canonicalize the guest root (EPERM on /Users/…) and
+# refuses to start. Filesystem jail is the outer backend; force grok's
+# own profile off so a host GROK_SANDBOX=workspace cannot leak in.
+GUEST_GROK_SANDBOX = "off"
 
-    Supports both shapes seen in the wild:
-      * ``trusted = ["/path", ...]``
-      * ``[folders."/path"]\\ntrusted = true``
+
+def _write_guest_trusted_folders(guest_grok: Path, guest_root: str) -> None:
+    """Guest may only trust its own workspace — never host trees from main.
+
+    Seed used to copy ``~/.grok/trusted_folders.toml`` and append the guest
+    root, so a guest grok still trusted ``~/Developer`` and listed it.
     """
     trust = guest_grok / "trusted_folders.toml"
     try:
         guest_grok.mkdir(parents=True, exist_ok=True)
-        text = ""
-        if trust.is_file():
-            text = trust.read_text(encoding="utf-8", errors="replace")
-        if guest_root in text:
-            return
-        import re
-        esc = guest_root.replace("\\", "\\\\").replace('"', '\\"')
-        # Table form: [folders."/abs/path"]
-        if re.search(r'^\[folders\.', text, re.M) or 'folders."' in text:
-            block = '\n[folders."%s"]\ntrusted = true\n' % esc
-            text = (text.rstrip() + "\n" + block) if text.strip() else block.lstrip()
-        else:
-            entry = '"%s"' % esc
-            m = re.search(r"trusted\s*=\s*\[(.*?)\]", text, re.S)
-            if m:
-                inner = m.group(1).strip()
-                if inner and not inner.rstrip().endswith(","):
-                    new_inner = inner + ", " + entry
-                elif inner:
-                    new_inner = inner + " " + entry
-                else:
-                    new_inner = entry
-                text = text[:m.start(1)] + new_inner + text[m.end(1):]
-            else:
-                text = ("trusted = [%s]\n" % entry) + (text or "")
-        trust.write_text(text, encoding="utf-8")
+        paths = []
+        seen = set()
+        for p in (guest_root, _realpath(guest_root)):
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
+        blocks = []
+        for p in paths:
+            esc = p.replace("\\", "\\\\").replace('"', '\\"')
+            blocks.append('[folders."%s"]\ntrusted = true\n' % esc)
+        body = "\n".join(blocks)
+        prev = trust.read_text(encoding="utf-8") if trust.is_file() else ""
+        if prev != body:
+            trust.write_text(body, encoding="utf-8")
         trust.chmod(0o600)
     except OSError as e:
-        log.warning("guest trusted_folders merge: %s", e)
+        log.warning("guest trusted_folders write: %s", e)
+
+
+def _host_claude_plugin_dir() -> Path:
+    """daemon/tui-plugin/agentremote-bridge next to this package."""
+    return Path(__file__).resolve().parent.parent / "tui-plugin" / "agentremote-bridge"
+
+
+def guest_claude_plugin_dir(isolate_root: str) -> str:
+    """Copy the TUI bridge plugin into the guest tree and return that path.
+
+    Guest Claude is launched with ``--plugin-dir`` so SessionStart can fire.
+    The host plugin lives under the repo (often ``~/Developer/…``), which
+    the jail cannot read. Putting a copy under the guest root keeps
+    ``sandbox-exec`` closed.
+    """
+    root = _realpath(isolate_root) if isolate_root else ""
+    if not root:
+        return ""
+    src = _host_claude_plugin_dir()
+    dst = Path(root) / ".agentremote" / "tui-plugin" / "agentremote-bridge"
+    if not src.is_dir():
+        log.warning("claude bridge plugin missing: %s", src)
+        return str(dst)
+    try:
+        _copy_tree_filtered(src, dst)
+        hook = dst / "scripts" / "post-hook.sh"
+        if hook.is_file():
+            hook.chmod(hook.stat().st_mode | 0o111)
+    except OSError as e:
+        log.warning("guest claude plugin copy failed: %s", e)
+    return str(dst)
+
+
+# Dirs apps look for under $HOME. Created empty in the guest tree (HOME is
+# rewritten there). Host copies are never seeded; the jail blocks the real
+# ``/Users/…/<name>`` path.
+_GUEST_HOME_STUB_DIRS = (
+    (".ssh", 0o700),
+    (".Trash", 0o700),
+    (".azure", 0o700),
+    (".android", 0o700),
+    (".V2rayU", 0o700),
+    (".aws", 0o700),
+    (".gnupg", 0o700),
+    (".kube", 0o700),
+)
+
+
+def _ensure_guest_home_stubs(isolate_root: str) -> None:
+    """Empty $HOME stubs in the guest sandbox. Never copy host contents."""
+    root = _realpath(isolate_root) if isolate_root else ""
+    if not root:
+        return
+    for name, mode in _GUEST_HOME_STUB_DIRS:
+        p = Path(root) / name
+        try:
+            if p.is_file() or p.is_symlink():
+                p.unlink()
+            p.mkdir(mode=mode, exist_ok=True)
+            os.chmod(p, mode)
+        except OSError as e:
+            log.warning("guest %s mkdir failed: %s", name, e)
+
+
+def _seed_guest_claude_json(root: str) -> None:
+    """Write a filtered $HOME/.claude.json into the guest tree."""
+    src = Path.home() / ".claude.json"
+    dst = Path(root) / ".claude.json"
+    out = {"hasCompletedOnboarding": True, "autoUpdates": False}
+    if src.is_file():
+        try:
+            data = json.loads(src.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            log.warning("host .claude.json unreadable: %s", e)
+            data = None
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if k not in _GUEST_CLAUDE_JSON_SKIP:
+                    out[k] = v
+            out["hasCompletedOnboarding"] = True
+            out["autoUpdates"] = False
+            # Guest-only project map: skip the "trust this folder" wizard
+            # without inheriting host Developer paths.
+            out["projects"] = {root: {"hasTrustDialogAccepted": True}}
+    try:
+        body = json.dumps(out, indent=2) + "\n"
+        prev = dst.read_text(encoding="utf-8") if dst.is_file() else ""
+        if prev != body:
+            dst.write_text(body, encoding="utf-8")
+        dst.chmod(0o600)
+    except OSError as e:
+        log.warning("guest .claude.json write: %s", e)
 
 
 def seed_guest_home(isolate_root: str) -> None:
@@ -812,7 +947,10 @@ def seed_guest_home(isolate_root: str) -> None:
     Guest processes run with HOME / GROK_HOME / CLAUDE_CONFIG_DIR /
     CODEX_HOME under *isolate_root*, so they load the same auth, settings,
     plugins, and skills as the main account — without inheriting main
-    session journals or project indexes.
+    session journals, project indexes, or host secret homes (``.ssh``,
+    ``.azure``, ``.android``, ``.V2rayU``, ``.Trash``, …). Those are
+    created empty under the guest HOME so apps that look in ``~`` stay
+    in the sandbox.
     """
     root = _realpath(isolate_root) if isolate_root else ""
     if not root:
@@ -825,7 +963,8 @@ def seed_guest_home(isolate_root: str) -> None:
         if not src.is_file():
             continue
         try:
-            _copy_file_if_newer(src, guest / rel)
+            force = rel.endswith(".credentials.json") or rel.endswith("auth.json")
+            _copy_file_if_newer(src, guest / rel, force=force)
         except OSError as e:
             log.warning("guest seed %s failed: %s", rel, e)
     for rel, _extra_skip in _GUEST_SEED_DIRS:
@@ -836,21 +975,21 @@ def seed_guest_home(isolate_root: str) -> None:
             _copy_tree_filtered(src, guest / rel)
         except OSError as e:
             log.warning("guest seed dir %s failed: %s", rel, e)
-    _merge_grok_trusted_folders(guest / ".grok", root)
+    _write_guest_trusted_folders(guest / ".grok", root)
+    _seed_guest_claude_json(root)
+    guest_claude_plugin_dir(root)
+    _ensure_guest_home_stubs(root)
 
 
 def _path_dirs_for_sandbox(isolate_root: str, host_home: str,
                            host_deny: list) -> list:
-    """Every absolute directory on $PATH (read-only in the seatbelt / bwrap).
+    """Absolute $PATH directories to expose read-only inside the jail.
 
-    Policy (operator request): allow **all** absolute PATH entries so anything
-    the host shell can resolve is readable for guest processes. Relative
-    entries (``.``) are skipped. The only hard exclusion is the daemon home
-    (``~/.agentremoted`` / ``AGENTREMOTED_HOME``) so a PATH pointing at it
-    cannot expose the main token.
+    System paths (``/usr/bin``, homebrew, …) are included. Directories under
+    the host home are **not**, except harness install trees from
+    ``_host_harness_ro_paths`` — a PATH entry of ``$HOME`` or ``~/Developer``
+    must not re-open the host tree to a guest ``!`` command.
     """
-    # Hard-exclude only the daemon config/token tree — not general host_deny.
-    # (host_deny still applies via later seatbelt deny rules for non-PATH reads.)
     secret_roots = []
     for d in (str(CONFIG_DIR), os.path.join(host_home or "", ".agentremoted")):
         d = (d or "").strip()
@@ -860,6 +999,19 @@ def _path_dirs_for_sandbox(isolate_root: str, host_home: str,
             secret_roots.append(os.path.realpath(d))
         except OSError:
             secret_roots.append(d)
+
+    hh = ""
+    if host_home:
+        try:
+            hh = os.path.realpath(host_home)
+        except OSError:
+            hh = host_home
+    harness_ro = []
+    for hp in _host_harness_ro_paths():
+        try:
+            harness_ro.append(os.path.realpath(hp))
+        except OSError:
+            harness_ro.append(hp)
 
     out = []
     seen = set()
@@ -882,9 +1034,101 @@ def _path_dirs_for_sandbox(isolate_root: str, host_home: str,
                 break
         if secret:
             continue
+        # Host home: only harness install trees, never $HOME itself or a parent
+        # of those trees (``~/.grok`` would bind sessions along with ``bin``).
+        if hh and (rp == hh or rp.startswith(hh.rstrip(os.sep) + os.sep)):
+            harness_ok = False
+            for hp in harness_ro:
+                if not hp:
+                    continue
+                if rp == hp or rp.startswith(hp.rstrip(os.sep) + os.sep):
+                    harness_ok = True
+                    break
+            if not harness_ok:
+                continue
         seen.add(rp)
         out.append(rp)
     return out
+
+
+def _sb_sub(path: str) -> str:
+    return '(subpath "%s")' % path.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _sb_aliases(path: str) -> list:
+    """Path plus macOS firmlink aliases (``/var`` ↔ ``/private/var``, …)."""
+    raw = (path or "").strip()
+    if not raw:
+        return []
+    out = []
+
+    def _add(p: str) -> None:
+        if p and p not in out:
+            out.append(p)
+
+    for p in (raw, os.path.abspath(raw), _realpath(raw)):
+        _add(p)
+        if p.startswith("/private/var/"):
+            _add(p[len("/private"):])
+        elif p.startswith("/var/"):
+            _add("/private" + p)
+        if p == "/private/tmp":
+            _add("/tmp")
+        elif p == "/tmp":
+            _add("/private/tmp")
+        if p == "/private/etc":
+            _add("/etc")
+        elif p == "/etc":
+            _add("/private/etc")
+    return out
+
+
+def _path_is_under(path: str, root: str) -> bool:
+    """Like path_under, but for already-resolved paths (no expanduser)."""
+    if not root or not path:
+        return False
+    if path == root:
+        return True
+    prefix = root if root.endswith(os.sep) else root + os.sep
+    return path.startswith(prefix)
+
+
+def _sb_path_list(paths) -> list:
+    """De-duplicated seatbelt subpaths, including macOS firmlink aliases."""
+    out = []
+    seen = set()
+    for p in paths:
+        if not p:
+            continue
+        for a in _sb_aliases(p):
+            if a not in seen:
+                seen.add(a)
+                out.append(a)
+    return out
+
+
+def _sb_allow(operations: str, paths) -> list:
+    uniq = _sb_path_list(paths)
+    if not uniq:
+        return []
+    lines = ["(allow %s" % operations]
+    for a in uniq:
+        lines.append("  %s" % _sb_sub(a))
+    lines.append(")")
+    return lines
+
+
+# Readable inside the jail. Not $HOME, not /Users, not /Volumes.
+_SB_SYSTEM_RO = (
+    "/usr", "/bin", "/sbin", "/opt", "/System", "/Library", "/Applications",
+    "/private/var/db", "/private/var/select", "/var/select",
+    "/private/etc", "/etc", "/dev",
+    "/private/var/folders", "/tmp", "/private/tmp", "/private/var/tmp",
+    "/var/db", "/private/var/run", "/var/run",
+)
+_SB_SYSTEM_RW = (
+    "/tmp", "/private/tmp", "/private/var/tmp", "/private/var/folders", "/dev",
+)
 
 
 def ensure_sandbox_profile(isolate_root: str) -> str:
@@ -892,19 +1136,17 @@ def ensure_sandbox_profile(isolate_root: str) -> str:
 
     Returns the profile file path, or "" if sandbox-exec is unavailable.
 
-    Strategy (proven with interactive grok): **allow default**, then **deny**
-    host secrets and data trees. Deny-by-default profiles break the TUI with
-    opaque ``Operation not permitted`` even when system paths are allow-listed;
-    allow-default + denylist keeps tools working while blocking::
-
-      * ~/.agentremoted (main token)
-      * host session/project journals
-      * common user data dirs (Developer, Documents, …)
-
-    Guest HOME is seeded via seed_guest_home(); child cwd is the guest root.
+    Deny-default without Apple's ``system.sb`` abort-traps bash (missing
+    dyld/mach). With that import, a real jail works: only system paths, the
+    guest root, and read-only harness install trees are visible. ``!`` /
+    ``/api/shell`` and harness children all run under this profile via
+    ``sandbox-exec``.
     """
     root = _realpath(isolate_root) if isolate_root else ""
     if not root or _system_name() != "Darwin" or not _sandbox_exec_bin():
+        return ""
+    if not guest_root_allowed(root):
+        log.warning("refusing seatbelt profile for over-broad root %s", root)
         return ""
     ensure_root_dir(root)
     seed_guest_home(root)
@@ -917,51 +1159,49 @@ def ensure_sandbox_profile(isolate_root: str) -> str:
         return ""
     path = prof_dir / ("%s.sb" % h)
 
-    def _sub(p: str) -> str:
-        return '(subpath "%s")' % p.replace("\\", "\\\\").replace('"', '\\"')
+    # Bump when policy changes so cached .sb files refresh.
+    profile_ver = "10"
 
-    # Bump when deny-list policy changes so cached .sb files refresh.
-    profile_ver = "8"
-    host_home = str(Path.home())
-    host_deny = [
-        os.path.join(host_home, ".agentremoted"),
-        os.path.join(host_home, ".grok", "sessions"),
-        os.path.join(host_home, ".grok", "workspace"),
-        os.path.join(host_home, ".claude", "projects"),
-        os.path.join(host_home, ".claude", "file-history"),
-        os.path.join(host_home, ".claude", "history.jsonl"),
-        os.path.join(host_home, ".claude", "sessions"),
-        os.path.join(host_home, ".claude", "shell-snapshots"),
-        os.path.join(host_home, ".claude", "session-env"),
-        os.path.join(host_home, ".codex", "sessions"),
-        os.path.join(host_home, "Developer"),
-        os.path.join(host_home, "Documents"),
-        os.path.join(host_home, "Desktop"),
-        os.path.join(host_home, "Downloads"),
-        os.path.join(host_home, "Movies"),
-        os.path.join(host_home, "Music"),
-        os.path.join(host_home, "Pictures"),
-        os.path.join(host_home, "Public"),
-    ]
-    # Also deny CONFIG_DIR if it differs from ~/.agentremoted.
-    try:
-        cfg = str(CONFIG_DIR.resolve())
-        if cfg and cfg not in host_deny:
-            host_deny.append(cfg)
-    except OSError:
-        pass
+    harness_ro = []
+    for p in _host_harness_ro_paths():
+        rp = _realpath(p) if p else ""
+        if not rp or _path_is_under(rp, root):
+            continue
+        harness_ro.append(rp)
+
+    read_ok = list(_SB_SYSTEM_RO) + [root] + harness_ro
+    write_ok = list(_SB_SYSTEM_RW) + [root]
 
     lines = [
         "(version 1)",
         "; agentremoted-guest-profile %s root=%s" % (profile_ver, root),
-        # Allow-default is required for interactive harness TUIs (grok/claude).
-        "(allow default)",
+        "(deny default)",
+        # dyld, mach bootstrap, syscall* — without this, bash SIGABRTs.
+        '(import "system.sb")',
+        "(allow process-exec*)",
+        "(allow process-fork)",
+        "(allow process-info*)",
+        "(allow signal)",
+        "(allow sysctl-read)",
+        "(allow mach-lookup)",
+        "(allow mach-register)",
+        "(allow network-outbound)",
+        "(allow network-inbound)",
+        "(allow network-bind)",
+        "(allow system-socket)",
+        "(allow file-ioctl)",
+        "(allow file-test-existence)",
+        "(allow pseudo-tty)",
+        "(allow ipc-posix-shm)",
+        "(allow ipc-posix-sem)",
+        "(allow iokit-open)",
     ]
-    # Denies listed after allow default — seatbelt applies these restrictions.
-    lines.append("(deny file-read* file-write*")
-    for p in host_deny:
-        lines.append("  %s" % _sub(p))
-    lines.append(")")
+    lines.extend(_sb_allow("file-read-metadata", read_ok))
+    lines.extend(_sb_allow("file-read* file-map-executable", read_ok))
+    lines.extend(_sb_allow("file-write*", write_ok))
+    # Guest root last so a later allow wins if Apple changes evaluation.
+    lines.extend(_sb_allow("file-read* file-write*", [root]))
+
     body = "\n".join(lines) + "\n"
     try:
         prev = path.read_text(encoding="utf-8") if path.is_file() else ""
@@ -969,6 +1209,23 @@ def ensure_sandbox_profile(isolate_root: str) -> str:
             path.write_text(body, encoding="utf-8")
     except OSError as e:
         log.warning("could not write sandbox profile: %s", e)
+        return ""
+
+    # Fail closed: a profile that will not even run /usr/bin/true is useless
+    # and must not be handed to wrap_shell_command.
+    import subprocess
+    sb = _sandbox_exec_bin()
+    probe = "/usr/bin/true" if os.path.isfile("/usr/bin/true") else "/bin/echo"
+    try:
+        r = subprocess.run(
+            [sb, "-f", str(path), probe],
+            capture_output=True, timeout=8, cwd=root)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or b"").decode("utf-8", "replace")[:400]
+            log.warning("sandbox profile probe failed: %s", err)
+            return ""
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning("sandbox profile probe failed: %s", e)
         return ""
     return str(path)
 
@@ -1011,9 +1268,10 @@ def isolation_env(base_env: Optional[dict], isolate_root: str) -> dict:
         return env
     seed_guest_home(root)
     env["HOME"] = root
-    # Point config/state at the seeded guest home. Binaries still run from
-    # the host install paths (allowed read-only by the seatbelt).
-    env["CLAUDE_CONFIG_DIR"] = os.path.join(root, ".claude")
+    # Point grok/codex at the seeded guest home. Do **not** set
+    # CLAUDE_CONFIG_DIR: Claude 2.1.x then ignores $HOME/.claude.json and
+    # drops oauth (login wizard, empty Live TUI). Default is $HOME/.claude.
+    env.pop("CLAUDE_CONFIG_DIR", None)
     env["GROK_HOME"] = os.path.join(root, ".grok")
     env["CODEX_HOME"] = os.path.join(root, ".codex")
     tmp = os.path.join(root, ".agentremote", "tmp")
@@ -1025,6 +1283,7 @@ def isolation_env(base_env: Optional[dict], isolate_root: str) -> dict:
     env["TMP"] = tmp
     env["TEMP"] = tmp
     env["AGENTREMOTE_ISOLATE_ROOT"] = root
+    env["GROK_SANDBOX"] = GUEST_GROK_SANDBOX
     # Keep a usable PATH: host harness bins first, then existing PATH.
     host = str(Path.home())
     path_prefix = [
@@ -1081,8 +1340,9 @@ def _guest_inner_shell(command: str, root: str) -> str:
         "export HOME=%s "
         "PATH=%s${PATH:+:$PATH} "
         "TMPDIR=%s TMP=%s TEMP=%s "
-        "CLAUDE_CONFIG_DIR=%s GROK_HOME=%s CODEX_HOME=%s "
-        "AGENTREMOTE_ISOLATE_ROOT=%s; "
+        "GROK_HOME=%s CODEX_HOME=%s "
+        "AGENTREMOTE_ISOLATE_ROOT=%s GROK_SANDBOX=%s; "
+        "unset CLAUDE_CONFIG_DIR; "
         "cd %s && %s"
     ) % (
         shlex.quote(root),
@@ -1090,10 +1350,10 @@ def _guest_inner_shell(command: str, root: str) -> str:
         shlex.quote(tmp),
         shlex.quote(tmp),
         shlex.quote(tmp),
-        shlex.quote(os.path.join(root, ".claude")),
         shlex.quote(os.path.join(root, ".grok")),
         shlex.quote(os.path.join(root, ".codex")),
         shlex.quote(root),
+        shlex.quote(GUEST_GROK_SANDBOX),
         shlex.quote(root),
         command,
     )
@@ -1184,12 +1444,13 @@ def _bwrap_argv(root: str, cmd: list) -> list:
     args += [
         "--setenv", "HOME", root,
         "--setenv", "GROK_HOME", os.path.join(root, ".grok"),
-        "--setenv", "CLAUDE_CONFIG_DIR", os.path.join(root, ".claude"),
+        "--unsetenv", "CLAUDE_CONFIG_DIR",
         "--setenv", "CODEX_HOME", os.path.join(root, ".codex"),
         "--setenv", "TMPDIR", "/tmp",
         "--setenv", "TMP", "/tmp",
         "--setenv", "TEMP", "/tmp",
         "--setenv", "AGENTREMOTE_ISOLATE_ROOT", root,
+        "--setenv", "GROK_SANDBOX", GUEST_GROK_SANDBOX,
         "--setenv", "PATH",
         _guest_path_prefix() + ":" + (os.environ.get("PATH") or ""),
     ]
@@ -1225,18 +1486,19 @@ def wrap_shell_command(command: str, isolate_root: str) -> str:
     env_exports = (
         "export HOME=%s PATH=%s${PATH:+:$PATH} "
         "TMPDIR=%s TMP=%s TEMP=%s "
-        "CLAUDE_CONFIG_DIR=%s GROK_HOME=%s CODEX_HOME=%s "
-        "AGENTREMOTE_ISOLATE_ROOT=%s TERM=xterm-256color; "
+        "GROK_HOME=%s CODEX_HOME=%s "
+        "AGENTREMOTE_ISOLATE_ROOT=%s GROK_SANDBOX=%s TERM=xterm-256color; "
+        "unset CLAUDE_CONFIG_DIR; "
     ) % (
         shlex.quote(root),
         shlex.quote(_guest_path_prefix()),
         shlex.quote(tmp),
         shlex.quote(tmp),
         shlex.quote(tmp),
-        shlex.quote(os.path.join(root, ".claude")),
         shlex.quote(os.path.join(root, ".grok")),
         shlex.quote(os.path.join(root, ".codex")),
         shlex.quote(root),
+        shlex.quote(GUEST_GROK_SANDBOX),
     )
     cmd_body = command.strip()
     # Simple argv → exec for a clean PID; shell fragments keep their own flow.
@@ -1261,6 +1523,9 @@ def wrap_shell_command(command: str, isolate_root: str) -> str:
                 shlex.quote(profile),
                 shlex.quote(inner),
             )
+        # Never fall through to an unsandboxed cd — that is the ! escape.
+        return "echo %s >&2; exit 126" % shlex.quote(
+            "guest isolation: sandbox-exec profile unavailable")
     # chroot / last-resort
     return "cd %s && %s" % (shlex.quote(root), inner)
 
@@ -1286,6 +1551,7 @@ def isolate_argv(cmd, isolate_root: str) -> list:
         if profile and sb:
             # env -C root (GNU) is not on macOS; rely on Popen cwd=root.
             return [sb, "-f", profile] + list(cmd)
+        return ["/usr/bin/false"]
     return list(cmd)
 
 
@@ -1296,7 +1562,14 @@ def isolate_shell_line(shell_cmd: str, isolate_root: str) -> str:
 
 def isolation_ready(isolate_root: str = "") -> bool:
     """True when guest process confinement is available on this host."""
-    return bool(isolation_backend())
+    if isolate_root and not guest_root_allowed(isolate_root):
+        return False
+    backend = isolation_backend()
+    if not backend:
+        return False
+    if backend == "sandbox-exec" and isolate_root:
+        return bool(ensure_sandbox_profile(isolate_root))
+    return True
 
 
 def isolation_required_hint() -> str:

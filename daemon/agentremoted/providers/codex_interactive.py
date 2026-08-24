@@ -36,6 +36,7 @@ import uuid
 from pathlib import Path
 
 from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
+from ..live_tui import idle_eviction_victim
 from ..render_blocks import markdown_to_blocks
 from .codex import (
     _event_chat_message,
@@ -326,10 +327,9 @@ class CodexInteractiveManager:
                         t.last_used = time.time()
                         return t, ""
             while len(self._tuis) >= _MAX_TUIS:
-                idle = [t for t in self._tuis.values() if t.job is None]
-                if not idle:
+                victim = idle_eviction_victim(self._tuis.values(), iso)
+                if victim is None:
                     break
-                victim = min(idle, key=lambda t: t.last_used)
                 log.info("evicting idle codex TUI %s (cap %d)",
                          victim.name, _MAX_TUIS)
                 self._kill(victim)

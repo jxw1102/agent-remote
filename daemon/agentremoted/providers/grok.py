@@ -1577,13 +1577,19 @@ class GrokRunner:
                "--output-format", "streaming-json"]
         if job.session_id:
             cmd += ["--resume", job.session_id]
-        if job.cwd:
+        # Guest jobs already Popen with cwd=isolate_root. Passing --cwd
+        # makes grok canonicalize every parent of the guest folder; deny-
+        # default seatbelt then dies with "Operation not permitted (os error 1)"
+        # on /Users/<host>. Interactive launch never passes --cwd (tmux -c).
+        if job.cwd and not str(getattr(job, "isolate_root", "") or "").strip():
             cmd += ["--cwd", job.cwd]
         if job.model and job.model != "default":
             cmd += ["--model", job.model]
         if job.effort and job.effort != "default":
             cmd += ["--effort", job.effort]
         cmd += str(getattr(self.config, "grok_prompt_flags", "") or "").split()
+        if str(getattr(job, "isolate_root", "") or "").strip():
+            cmd += ["--sandbox", "off"]
 
         env = dict(os.environ)
         extra_env = getattr(self.config, "grok_env", None) or {}

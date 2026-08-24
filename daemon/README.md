@@ -19,6 +19,47 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.8.13** Guest Live TUI actually starts. Headless grok was dying with
+`Operation not permitted (os error 1)` because `--cwd` canonicalizes every
+parent of the guest folder (blocked `/Users/<host>`); guest jobs now rely on
+Popen cwd, matching the Interactive launch. Claude guest TUI no longer waits
+only on SessionStart: seed a filtered `$HOME/.claude.json` (onboarding +
+oauth, never the host `projects` map) so the first-run theme/login wizard
+does not block the pane; if it still appears, dismiss it and treat the idle
+footer as ready. Guest tmux panes are never evicted to make room for the
+host account's fleet cap.
+
+**2.8.12** Guest HOME stubs for host-secret dirs (`.ssh`, `.Trash`, `.azure`,
+`.android`, `.V2rayU`, plus `.aws` / `.gnupg` / `.kube`): empty folders in
+the sandbox, never a copy of the host tree. Apps that look in ``~`` hit
+the guest HOME; the jail still blocks `/Users/…/<dir>`.
+
+**2.8.11** Guest HOME gets an empty `~/.ssh` (mode 0700). Host keys are
+never copied; host `~/.ssh` stays outside the jail.
+
+**2.8.10** Guest Claude TUI: copy `tui-plugin/agentremote-bridge` into
+`<guest>/.agentremote/tui-plugin/` and pass that as `--plugin-dir`. The
+host plugin sits under `~/Developer`, which deny-default `sandbox-exec`
+cannot read, so SessionStart never fired and the TUI never became ready.
+
+**2.8.9** Guest Grok TUI starts again: do not nest `grok --sandbox workspace`
+inside `sandbox-exec` (canonicalize of the guest root gets EPERM and grok
+refuses to launch). The daemon jail is the filesystem confinement;
+`GROK_SANDBOX=off` / `--sandbox off` so a host env cannot re-enable it.
+
+**2.8.8** Guest macOS confinement is deny-default `sandbox-exec` (imports
+Apple `system.sb` so dyld/mach still work), not allow-default plus a
+folder denylist. `!` / `POST /api/shell` and harness children all run
+inside that jail; a missing profile fails closed instead of `cd`-only.
+Guest `trusted_folders.toml` is rewritten to the guest root only (no
+longer a copy of the operator's Developer trees).
+
+**2.8.7** Guest macOS seatbelt no longer leaves the rest of `$HOME` readable:
+`!` / `POST /api/shell` and sandboxed harnesses cannot list `~/.ssh` or write
+outside the guest folder. The profile denies `/Users` and `/Volumes` except
+the guest root (plus read-only harness install trees). Guest roots equal to
+the host home are rejected.
+
 **2.8.6** Chunked attachments: `POST /api/attachments?name=&upload_id=&index=&total=`
 assembles a file from short POSTs so a Cloudflare ~100s HTTP timeout no
 longer kills an 11 MB upload as a browser "Network error during upload".

@@ -8,6 +8,9 @@ Run:  python3 tests/accounts_test.py
 
 import json
 import os
+import pwd
+import shlex
+import subprocess
 import sys
 import tempfile
 import types
@@ -51,11 +54,13 @@ def main():
     token_b = "b" * 32
     main_token = "m" * 32
 
+    token_broad = "c" * 32
     write_guests([
         {"name": "alice", "token": token_a, "root": root_a,
          "providers": ["claude", "grok"]},
         {"name": "bob", "token": token_b, "folder": root_b,
          "provider": "codex"},
+        {"name": "broad", "token": token_broad, "root": FAKE_HOME},
     ])
 
     main_p = accounts.resolve_principal(main_token, main_token)
@@ -67,6 +72,11 @@ def main():
     check("alice resolves guest", alice is not None and alice.is_guest)
     check("bob resolves guest", bob is not None and bob.is_guest)
     check("bad token rejected", bad is None)
+    check("over-broad guest root rejected",
+          accounts.resolve_principal(token_broad, main_token) is None)
+    check("host home is not an allowed guest root",
+          not accounts.guest_root_allowed(FAKE_HOME))
+    check("alice root is allowed", accounts.guest_root_allowed(alice.root))
     check("alice root", alice.root == os.path.realpath(root_a))
     check("account ids differ",
           main_p.account != alice.account != bob.account)
@@ -166,6 +176,9 @@ def main():
         check("profile written", bool(prof) and os.path.isfile(prof))
         body = open(prof, encoding="utf-8").read()
         check("profile allows guest root", alice.root in body)
+        check("profile is deny-default", "(deny default)" in body)
+        check("profile imports system.sb", 'import "system.sb"' in body)
+        check("profile is not allow-default", "(allow default)" not in body)
         host_home = os.path.realpath(os.path.expanduser("~"))
         check("profile does not allow whole host home",
               '(subpath "%s")' % host_home not in body)
@@ -177,8 +190,114 @@ def main():
         check("bwrap binds guest root", alice.root in argv)
     env = accounts.isolation_env({}, alice.root)
     check("isolation HOME is guest root", env.get("HOME") == alice.root)
+    check("isolation GROK_SANDBOX is off (no nested grok jail)",
+          env.get("GROK_SANDBOX") == "off")
+    check("isolation does not set CLAUDE_CONFIG_DIR",
+          "CLAUDE_CONFIG_DIR" not in env)
+    host_trust = os.path.join(FAKE_HOME, ".grok", "trusted_folders.toml")
+    os.makedirs(os.path.dirname(host_trust), exist_ok=True)
+    open(host_trust, "w").write(
+        '[folders."%s"]\ntrusted = true\n' % os.path.realpath(FAKE_HOME))
+    accounts.seed_guest_home(alice.root)
+    gt_path = os.path.join(alice.root, ".grok", "trusted_folders.toml")
+    gt = open(gt_path, encoding="utf-8").read() if os.path.isfile(gt_path) else ""
+    check("guest trusted_folders includes guest root", alice.root in gt)
+    check("guest trusted_folders excludes host home",
+          '[folders."%s"]' % os.path.realpath(FAKE_HOME) not in gt)
+    plug = accounts.guest_claude_plugin_dir(alice.root)
+    check("guest claude plugin under guest root",
+          plug.startswith(alice.root) and os.path.isdir(plug), plug)
+    check("guest claude plugin has hook script",
+          os.path.isfile(os.path.join(plug, "scripts", "post-hook.sh")))
+    host_ssh = os.path.join(FAKE_HOME, ".ssh")
+    os.makedirs(host_ssh, exist_ok=True)
+    open(os.path.join(host_ssh, "id_ed25519"), "w").write("HOSTKEY")
+    host_azure = os.path.join(FAKE_HOME, ".azure")
+    os.makedirs(host_azure, exist_ok=True)
+    open(os.path.join(host_azure, "credentials"), "w").write("SECRET")
+    accounts.seed_guest_home(alice.root)
+    gssh = os.path.join(alice.root, ".ssh")
+    check("guest .ssh exists", os.path.isdir(gssh))
+    check("guest .ssh does not copy host keys",
+          not os.path.isfile(os.path.join(gssh, "id_ed25519")))
+    for stub in (".ssh", ".Trash", ".azure", ".android", ".V2rayU"):
+        check("guest stub %s" % stub,
+              os.path.isdir(os.path.join(alice.root, stub)))
+    check("guest .azure does not copy host credentials",
+          not os.path.isfile(os.path.join(alice.root, ".azure", "credentials")))
+    host_cj = os.path.join(FAKE_HOME, ".claude.json")
+    open(host_cj, "w").write(json.dumps({
+        "hasCompletedOnboarding": True,
+        "theme": "light",
+        "oauthAccount": {"emailAddress": "host@example.com"},
+        "projects": {os.path.realpath(FAKE_HOME): {"allowed": True}},
+        "githubRepoPaths": {"/secret": True},
+    }))
+    accounts.seed_guest_home(alice.root)
+    guest_cj = os.path.join(alice.root, ".claude.json")
+    gj = {}
+    if os.path.isfile(guest_cj):
+        gj = json.loads(open(guest_cj, encoding="utf-8").read())
+    check("guest .claude.json seeded", isinstance(gj, dict) and gj.get("hasCompletedOnboarding") is True)
+    check("guest .claude.json keeps oauth", (gj.get("oauthAccount") or {}).get("emailAddress") == "host@example.com")
+    check("guest .claude.json omits host project paths",
+          os.path.realpath(FAKE_HOME) not in (gj.get("projects") or {}))
+    check("guest .claude.json trusts guest root",
+          ((gj.get("projects") or {}).get(alice.root) or {}).get("hasTrustDialogAccepted") is True)
+    check("guest .claude.json omits githubRepoPaths", "githubRepoPaths" not in gj)
     if backend:
         check("isolation_ready", accounts.isolation_ready(alice.root))
+        check("isolation_ready rejects host home",
+              not accounts.isolation_ready(FAKE_HOME))
+
+    # Live ! / /api/shell wrap: must not read ~/.ssh or write into $HOME.
+    if backend == "sandbox-exec":
+        real_home = pwd.getpwuid(os.getuid()).pw_dir
+        ssh = os.path.join(real_home, ".ssh")
+        r = subprocess.run(
+            accounts.wrap_shell_command("ls %s" % shlex.quote(ssh), alice.root),
+            shell=True, capture_output=True, timeout=20)
+        text = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
+        check("! ls ~/.ssh is blocked",
+              "Operation not permitted" in text
+              or "Permission denied" in text
+              or not os.path.isdir(ssh),
+              detail=text[:200])
+        marker = os.path.join(real_home, "agentremote-guest-escape-test")
+        try:
+            if os.path.isfile(marker):
+                os.remove(marker)
+            r = subprocess.run(
+                accounts.wrap_shell_command(
+                    "touch %s" % shlex.quote(marker), alice.root),
+                shell=True, capture_output=True, timeout=20)
+            leaked = os.path.isfile(marker)
+            check("! touch ~ is blocked", not leaked)
+        finally:
+            if os.path.isfile(marker):
+                os.remove(marker)
+        gf = os.path.join(alice.root, "guest-write-test")
+        r = subprocess.run(
+            accounts.wrap_shell_command(
+                "touch %s && echo OK" % shlex.quote(gf), alice.root),
+            shell=True, capture_output=True, timeout=20)
+        text = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
+        check("! touch guest root works",
+              os.path.isfile(gf) and "OK" in text, detail=text[:200])
+        r = subprocess.run(
+            accounts.wrap_shell_command("python3 -c 'print(42)'", alice.root),
+            shell=True, capture_output=True, timeout=20)
+        text = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
+        check("sandbox python3 works", "42" in text, detail=text[:200])
+        r = subprocess.run(
+            accounts.wrap_shell_command(
+                "ls %s" % shlex.quote(real_home), alice.root),
+            shell=True, capture_output=True, timeout=20)
+        text = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
+        check("! ls $HOME is blocked",
+              "Operation not permitted" in text
+              or "Permission denied" in text,
+              detail=text[:200])
 
     print()
     if failures:
