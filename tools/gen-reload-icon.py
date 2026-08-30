@@ -17,7 +17,11 @@ from PIL import Image, ImageDraw
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "blackberry", "assets", "images", "ic_reload.png")
 
-SIZE = 48
+# 96, not 48: the icon buttons scale with the screen (Passport ~73 px), so
+# a 48 px source had to be upscaled there. Geometry lives in the 100-unit
+# design space, so this is the same drawing with more pixels - the Classic
+# still downscales it to 44.
+SIZE = 96
 SS = 8
 WHITE = (255, 255, 255, 255)
 

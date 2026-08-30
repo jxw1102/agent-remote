@@ -181,10 +181,10 @@ Page {
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
                 }
                 ImageButton {
-                    preferredWidth: 44
-                    preferredHeight: 44
-                    minWidth: 44
-                    minHeight: 44
+                    preferredWidth: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                    preferredHeight: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                    minWidth: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                    minHeight: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
                     verticalAlignment: VerticalAlignment.Center
                     defaultImageSource: "asset:///images/ic_close.png"
                     pressedImageSource: "asset:///images/ic_close.png"
@@ -271,12 +271,12 @@ Page {
                 layoutProperties: StackLayoutProperties { spaceQuota: 1 }
             }
             ImageButton {
-                preferredWidth: 44
-                preferredHeight: 44
-                minWidth: 44
-                minHeight: 44
-                maxWidth: 44
-                maxHeight: 44
+                preferredWidth: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                preferredHeight: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                minWidth: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                minHeight: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                maxWidth: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                maxHeight: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
                 verticalAlignment: VerticalAlignment.Center
                 visible: transcriptPage.api ? transcriptPage.api.jobRunning : false
                 defaultImageSource: "asset:///images/ic_stop.png"
@@ -287,12 +287,12 @@ Page {
                 }
             }
             ImageButton {
-                preferredWidth: 44
-                preferredHeight: 44
-                minWidth: 44
-                minHeight: 44
-                maxWidth: 44
-                maxHeight: 44
+                preferredWidth: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                preferredHeight: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                minWidth: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                minHeight: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                maxWidth: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                maxHeight: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
                 verticalAlignment: VerticalAlignment.Center
                 visible: transcriptPage.api
                          ? (! transcriptPage.api.jobRunning
@@ -308,6 +308,12 @@ Page {
         }
 
         ListView {
+            // Passport: the capacitive-keyboard swipe scrolls the page's
+            // MAIN scrollable. Cascades only auto-picks one when it has no
+            // siblings (see ListView::scrollRole), and every list here sits
+            // beside chrome - so nothing was ever the main scrollable and the
+            // gesture had nothing to drive. Say so explicitly.
+            scrollRole: ScrollRole.Main
             id: messagesList
             dataModel: messagesModel
             horizontalAlignment: HorizontalAlignment.Fill
@@ -1231,12 +1237,12 @@ Page {
             layout: StackLayout { orientation: LayoutOrientation.LeftToRight }
 
             ImageButton {
-                preferredWidth: 44
-                preferredHeight: 44
-                minWidth: 44
-                minHeight: 44
-                maxWidth: 44
-                maxHeight: 44
+                preferredWidth: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                preferredHeight: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                minWidth: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                minHeight: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                maxWidth: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
+                maxHeight: transcriptPage.api ? transcriptPage.api.iconButtonPx : 44
                 verticalAlignment: VerticalAlignment.Center
                 rightMargin: 6
                 defaultImageSource: "asset:///images/ic_add.png"
@@ -1291,6 +1297,9 @@ Page {
             id: filePicker
             type: FileType.Other
             title: qsTr("Attach a file")
+            // Open in device storage, not the SD card the picker defaults
+            // to; SD stays reachable through the picker's own navigation.
+            directories: ["/accounts/1000/shared"]
             onFileSelected: {
                 if (selectedFiles && selectedFiles.length > 0
                         && transcriptPage.api)

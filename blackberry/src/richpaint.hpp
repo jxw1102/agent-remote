@@ -54,13 +54,6 @@ public:
     /** One-line description of the resolved font files (for the log). */
     QString fontDebugInfo();
 
-    /** Zero the per-open paint profile counters (call before a build loop). */
-    void resetProfile();
-
-    /** Accumulated cache-lookup / rasterize / png-save breakdown since the
-     *  last resetProfile, for the client-timing log. */
-    QString profileSummary() const;
-
 private:
     RichPaintPrivate *d;
 };

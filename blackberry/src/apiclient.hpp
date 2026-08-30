@@ -91,6 +91,15 @@ class ApiClient : public QObject
     Q_PROPERTY(int screenWidth READ screenWidth CONSTANT)
     // True on wider devices (Passport); QML bumps a few FontSizes slightly.
     Q_PROPERTY(bool largeDisplay READ largeDisplay CONSTANT)
+    // Percent of the Classic's metrics that fixed pixel sizes should use on
+    // this device (Classic 100, Passport ~165). Anything with a hardcoded
+    // height that wraps TEXT must scale by this: system FontSizes grow on a
+    // Passport, so a Classic-sized box clips the label.
+    Q_PROPERTY(int uiScalePct READ uiScalePct CONSTANT)
+    // Side of a square icon button (title bar, compose strip, stop/reload).
+    // Classic 44; Passport scales up so the target keeps its physical size
+    // instead of shrinking to a 2.5 mm speck on a denser, wider screen.
+    Q_PROPERTY(int iconButtonPx READ iconButtonPx CONSTANT)
     // Connection profiles: [{name, baseUrl, token}], one active at a time.
     Q_PROPERTY(QVariantList profiles READ profiles NOTIFY profilesChanged)
     Q_PROPERTY(int activeProfileIndex READ activeProfileIndex NOTIFY profilesChanged)
@@ -150,6 +159,9 @@ class ApiClient : public QObject
     // toggled from the Session sheet.
     Q_PROPERTY(bool soundCues READ soundCues WRITE setSoundCues NOTIFY settingsChanged)
     Q_PROPERTY(bool ledCues READ ledCues WRITE setLedCues NOTIFY settingsChanged)
+    // Inbox: hand a finished download straight to the system viewer.
+    Q_PROPERTY(bool autoOpenDownloads READ autoOpenDownloads
+               WRITE setAutoOpenDownloads NOTIFY settingsChanged)
     // Connection test (Settings sheet). 0 idle, 1 testing, 2 ok, 3 failed.
     Q_PROPERTY(int pingState READ pingState NOTIFY pingChanged)
     Q_PROPERTY(QString pingInfo READ pingInfo NOTIFY pingChanged)
@@ -286,6 +298,8 @@ public:
 
     int screenWidth() const { return m_screenWidth; }
     bool largeDisplay() const { return m_largeDisplay; }
+    int iconButtonPx() const { return m_iconButtonPx; }
+    int uiScalePct() const { return m_uiScalePct; }
 
     QVariantList profiles() const { return m_profiles; }
     int activeProfileIndex() const { return m_activeProfile; }
@@ -315,6 +329,7 @@ public:
     QString modelOverride() const { return m_modelOverride; }
     QString effortOverride() const { return m_effortOverride; }
     bool soundCues() const { return m_soundCues; }
+    bool autoOpenDownloads() const { return m_autoOpenDownloads; }
     // Focus: mode is a local preference, capability comes from ping.
     bool focusMode() const { return m_focusMode; }
     bool capFocus() const { return m_capFocus; }
@@ -448,6 +463,9 @@ public:
     Q_INVOKABLE void setSoundCues(bool on);
     Q_INVOKABLE void setFocusMode(bool on);
     Q_INVOKABLE void setLedCues(bool on);
+    Q_INVOKABLE void setAutoOpenDownloads(bool on);
+    /// Hand a downloaded Inbox file to whatever app the OS registered for it.
+    Q_INVOKABLE void openDownloadedFile(const QString &path);
     Q_INVOKABLE void resolvePermission(bool allow);
     // answers: one entry per question, each a list of chosen option labels
     // (single-select questions carry exactly one). notes: optional free text
@@ -598,8 +616,6 @@ private:
     void fetchMessages(int offset, int limit, bool older);
     void handleMessages(QNetworkReply *reply, const QVariant &data);
     void setLoadingOlder(bool v);
-    void reportLoadTiming(const QVariantMap &t, qint64 netMs, qint64 buildMs,
-                          int count);
     void handleJobPoll(int httpStatus, const QVariant &data, bool parseOk,
                        const QString &networkError);
     void handleJobEnd(const QString &status, const QString &newSessionId,
@@ -780,6 +796,7 @@ private:
     QString m_modelOverride;
     QString m_effortOverride;
     bool m_soundCues;
+    bool m_autoOpenDownloads;
     bool m_focusMode;
     bool m_capFocus;
     bool m_capShare;
@@ -884,6 +901,8 @@ private:
     bool m_largeDisplay;
     int m_paintWidthBody;
     int m_paintWidthCode;
+    int m_iconButtonPx;
+    int m_uiScalePct;
     int m_fontBodyPx;
     int m_fontCodePx;
     int m_fontHeadingPx;

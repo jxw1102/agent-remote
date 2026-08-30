@@ -46,7 +46,15 @@ Sheet {
     }
 
     // Height of the horizontal profile strip (single row of name chips).
-    property int profileStripH: 84
+    // Classic 84. The chips hold text, and system FontSizes are larger on
+    // a Passport, so a fixed strip clipped them.
+    property int profileStripH: settingsSheet.api
+                                ? Math.round(84 * settingsSheet.api.uiScalePct / 100)
+                                : 84
+    property int chipH: settingsSheet.api
+                        ? Math.round(60 * settingsSheet.api.uiScalePct / 100) : 60
+    property int chipW: settingsSheet.api
+                        ? Math.round(220 * settingsSheet.api.uiScalePct / 100) : 220
 
     function rebuildProfiles() {
         // Bake every display field (name, chip colors, active dot) into the
@@ -64,6 +72,10 @@ Sheet {
             // enabled is absent on profiles saved before the switch existed.
             var on = (ps[i].enabled === undefined) ? true : ps[i].enabled;
             profilesModel.append({
+                // Baked per row: inside a ListItemComponent only ListItemData
+                // always resolves.
+                h: settingsSheet.chipH,
+                w: settingsSheet.chipW,
                 name: raw != "" ? raw : qsTr("(unnamed)"),
                 bg: (i == act) ? abg : "#161616",
                 fg: ! on ? "#6a6a6a" : ((i == act) ? acc : "#ffffff"),
@@ -155,6 +167,12 @@ Sheet {
         }
 
         ScrollView {
+            // Passport: the capacitive-keyboard swipe scrolls the page's
+            // MAIN scrollable. Cascades only auto-picks one when it has no
+            // siblings (see ListView::scrollRole), and every list here sits
+            // beside chrome - so nothing was ever the main scrollable and the
+            // gesture had nothing to drive. Say so explicitly.
+            scrollRole: ScrollRole.Main
             Container {
                 leftPadding: 24
                 rightPadding: 24
@@ -192,9 +210,9 @@ Sheet {
                             // rebuildProfiles), never ListItem.view functions.
                             Container {
                                 rightMargin: 12
-                                preferredHeight: 60
-                                maxHeight: 60
-                                preferredWidth: 220
+                                preferredHeight: ListItemData.h ? ListItemData.h : 60
+                                maxHeight: ListItemData.h ? ListItemData.h : 60
+                                preferredWidth: ListItemData.w ? ListItemData.w : 220
                                 background: Color.create(ListItemData.bg)
                                 leftPadding: 22
                                 rightPadding: 22

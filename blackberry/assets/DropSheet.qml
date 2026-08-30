@@ -10,6 +10,13 @@ Sheet {
 
     property variant api
     property bool showing: false
+    // Guards the auto-open toggle while show() seeds it from the setting -
+    // without it, opening the sheet would write the value straight back.
+    property bool ready: false
+    // Drives the collapse of the explainer/paths block. dropFiles is notified
+    // by dropChanged, so this re-evaluates on every list refresh.
+    property bool hasFiles: dropSheet.api
+                            ? (dropSheet.api.dropFiles.length > 0) : false
 
     peekEnabled: false
 
@@ -50,12 +57,17 @@ Sheet {
         if (dropSheet.api)
             dropSheet.api.fetchDropFiles();
         rebuild();
+        ready = false;
+        if (dropSheet.api)
+            autoOpenToggle.checked = dropSheet.api.autoOpenDownloads;
+        ready = true;
         showing = true;
         open();
     }
 
     onClosed: {
         showing = false;
+        ready = false;
     }
 
     Page {
@@ -82,8 +94,14 @@ Sheet {
             verticalAlignment: VerticalAlignment.Fill
             layout: StackLayout {}
 
-            // How to use + host / phone paths.
+            // Onboarding + diagnostics. This block plus the title bar was
+            // eating half a 720 px Classic screen, leaving room for about
+            // three rows. The explainer and the host/phone paths only matter
+            // when there is nothing to look at yet - and that is also exactly
+            // when you need them, to tell the agent where to put a file - so
+            // they own the empty state and get out of the way once files list.
             Container {
+                visible: ! dropSheet.hasFiles
                 horizontalAlignment: HorizontalAlignment.Fill
                 leftPadding: 20
                 rightPadding: 20
@@ -112,6 +130,48 @@ Sheet {
                     topMargin: 2
                     textStyle.fontSize: FontSize.XXSmall
                     textStyle.color: Color.create("#6a9ab0")
+                }
+            }
+
+            // Hand each finished download to the system viewer. The file is
+            // saved either way - this only adds the open. Stays available at
+            // all times, but collapses to one line once files are listed; the
+            // caveat below it is only shown in the roomy empty state.
+            Container {
+                horizontalAlignment: HorizontalAlignment.Fill
+                leftPadding: 20
+                rightPadding: 20
+                topPadding: dropSheet.hasFiles ? 6 : 10
+                bottomPadding: dropSheet.hasFiles ? 6 : 12
+                background: Color.create("#161616")
+                layout: StackLayout { orientation: LayoutOrientation.LeftToRight }
+
+                Container {
+                    layoutProperties: StackLayoutProperties { spaceQuota: 1 }
+                    layout: StackLayout {}
+                    verticalAlignment: VerticalAlignment.Center
+
+                    Label {
+                        text: qsTr("Open after download")
+                        textStyle.fontSize: FontSize.XSmall
+                        textStyle.color: Color.create("#e8e8e8")
+                    }
+                    Label {
+                        visible: ! dropSheet.hasFiles
+                        text: qsTr("Needs an app that handles the file type")
+                        multiline: true
+                        textStyle.fontSize: FontSize.XXSmall
+                        textStyle.color: Color.create("#8a8a8a")
+                    }
+                }
+                ToggleButton {
+                    id: autoOpenToggle
+                    verticalAlignment: VerticalAlignment.Center
+                    leftMargin: 12
+                    onCheckedChanged: {
+                        if (dropSheet.ready && dropSheet.api)
+                            dropSheet.api.setAutoOpenDownloads(checked);
+                    }
                 }
             }
 
@@ -150,6 +210,12 @@ Sheet {
             }
 
             ListView {
+                // Passport: the capacitive-keyboard swipe scrolls the page's
+                // MAIN scrollable. Cascades only auto-picks one when it has no
+                // siblings (see ListView::scrollRole), and every list here sits
+                // beside chrome - so nothing was ever the main scrollable and the
+                // gesture had nothing to drive. Say so explicitly.
+                scrollRole: ScrollRole.Main
                 id: dropList
                 dataModel: dropModel
                 horizontalAlignment: HorizontalAlignment.Fill
@@ -220,10 +286,20 @@ Sheet {
                             ]
 
                             ImageView {
-                                preferredWidth: 36
-                                preferredHeight: 36
-                                minWidth: 36
-                                minHeight: 36
+                                // iconPx is stamped onto every row by C++:
+                                // ListItemData is the one channel that always
+                                // resolves inside a ListItemComponent. The
+                                // row's text uses system FontSizes, which the
+                                // OS already enlarges on a Passport, so a fixed
+                                // 36 px glyph was the one thing left behind.
+                                preferredWidth: ListItemData.iconPx
+                                                ? ListItemData.iconPx : 36
+                                preferredHeight: ListItemData.iconPx
+                                                 ? ListItemData.iconPx : 36
+                                minWidth: ListItemData.iconPx
+                                          ? ListItemData.iconPx : 36
+                                minHeight: ListItemData.iconPx
+                                           ? ListItemData.iconPx : 36
                                 rightMargin: 12
                                 verticalAlignment: VerticalAlignment.Center
                                 imageSource: "asset:///images/ic_inbox.png"

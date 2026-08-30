@@ -11,7 +11,6 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
-#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
@@ -187,18 +186,8 @@ struct RichPaintPrivate {
     QString dbg;
     QHash<QString, QString> cacheIndex;  // sha -> "<sha>_WxH.png" on disk
 
-    // Per-open profiling (reset by RichPaint::resetProfile before a build
-    // loop; read via profileSummary). Nanoseconds accumulated across calls.
-    qint64 profLookupNs;
-    qint64 profRasterNs;
-    qint64 profSaveNs;
-    int profCalls;
-    int profHits;
-
     RichPaintPrivate()
-        : triedInit(false), ready(false), regular(0), fbold(0), mono(0),
-          profLookupNs(0), profRasterNs(0), profSaveNs(0),
-          profCalls(0), profHits(0) {}
+        : triedInit(false), ready(false), regular(0), fbold(0), mono(0) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -497,25 +486,6 @@ QString RichPaint::fontDebugInfo()
 {
     richPaintInit(d);
     return d->dbg;
-}
-
-void RichPaint::resetProfile()
-{
-    d->profLookupNs = 0;
-    d->profRasterNs = 0;
-    d->profSaveNs = 0;
-    d->profCalls = 0;
-    d->profHits = 0;
-}
-
-QString RichPaint::profileSummary() const
-{
-    return QString("paint calls=%1 hits=%2 lookup=%3ms raster=%4ms save=%5ms")
-        .arg(d->profCalls)
-        .arg(d->profHits)
-        .arg(d->profLookupNs / 1000000)
-        .arg(d->profRasterNs / 1000000)
-        .arg(d->profSaveNs / 1000000);
 }
 
 // ---------------------------------------------------------------------------
@@ -888,10 +858,6 @@ QVariantMap RichPaint::render(const QString &markup, int widthPx, int fontPx,
     if (fontPx > 72)
         fontPx = 72;
 
-    d->profCalls++;
-    QElapsedTimer profTimer;
-    profTimer.start();
-
     // ---- cache lookup ----
     const QString cacheKey = QString::number(widthPx) + QLatin1Char('|')
             + QString::number(fontPx) + QLatin1Char('|')
@@ -915,8 +881,6 @@ QVariantMap RichPaint::render(const QString &markup, int widthPx, int fontPx,
                 const int w = name.mid(us + 1, xx - us - 1).toInt();
                 const int h = name.mid(xx + 1, dot - xx - 1).toInt();
                 if (w > 0 && h > 0) {
-                    d->profLookupNs += profTimer.nsecsElapsed();
-                    d->profHits++;
                     out.insert(QString("ok"), true);
                     out.insert(QString("path"),
                                QUrl::fromLocalFile(
@@ -929,8 +893,7 @@ QVariantMap RichPaint::render(const QString &markup, int widthPx, int fontPx,
             }
         }
     }
-    d->profLookupNs += profTimer.nsecsElapsed();
-    profTimer.restart();  // ---- rasterize phase begins ----
+    // ---- rasterize phase begins ----
 
     quint32 defC = 0xffd0d0d0u;
     parseHexColor(defaultColor, &defC);
@@ -1132,9 +1095,7 @@ QVariantMap RichPaint::render(const QString &markup, int widthPx, int fontPx,
                           defC, false);
     }
 
-    d->profRasterNs += profTimer.nsecsElapsed();
-    profTimer.restart();  // ---- png save phase ----
-
+    // ---- png save phase ----
     const QString fileName = sha + QString("_%1x%2.png").arg(widthPx).arg(height);
     const QString path = d->cacheDir + QLatin1Char('/') + fileName;
     if (!img.save(path, "PNG")) {
@@ -1142,7 +1103,6 @@ QVariantMap RichPaint::render(const QString &markup, int widthPx, int fontPx,
         return out;
     }
     d->cacheIndex.insert(sha, fileName);
-    d->profSaveNs += profTimer.nsecsElapsed();
 
     out.insert(QString("ok"), true);
     out.insert(QString("path"), QUrl::fromLocalFile(path).toString());

@@ -40,6 +40,10 @@ Page {
         for (var i = 0; i < ps.length; ++i) {
             var prov = ps[i].provider ? ("" + ps[i].provider) : "";
             profChipsModel.append({
+                // Baked per row: ListItemData is the channel that always
+                // resolves inside a ListItemComponent.
+                h: a ? Math.round(60 * a.uiScalePct / 100) : 60,
+                w: a ? Math.round(260 * a.uiScalePct / 100) : 260,
                 label: (i === act ? "● " : "") +
                        (ps[i].name || qsTr("Profile %1").arg(i + 1)),
                 bg: i === act ? "#2a2d33" : "#161616",
@@ -121,7 +125,11 @@ Page {
                 id: profChips
                 dataModel: profChipsModel
                 horizontalAlignment: HorizontalAlignment.Fill
-                preferredHeight: 76
+                // Classic 76; the chips hold text, which is larger on a
+                // Passport, so this has to follow or the labels clip.
+                preferredHeight: projectsPage.api
+                                 ? Math.round(76 * projectsPage.api.uiScalePct / 100)
+                                 : 76
                 layout: StackListLayout {
                     orientation: LayoutOrientation.LeftToRight
                 }
@@ -134,9 +142,9 @@ Page {
                         // minWidth (settings-chip pattern, proven on device).
                         Container {
                             rightMargin: 12
-                            preferredHeight: 60
-                            maxHeight: 60
-                            preferredWidth: 260
+                            preferredHeight: ListItemData.h ? ListItemData.h : 60
+                            maxHeight: ListItemData.h ? ListItemData.h : 60
+                            preferredWidth: ListItemData.w ? ListItemData.w : 260
                             background: Color.create(ListItemData.bg)
                             leftPadding: 20
                             rightPadding: 20
@@ -200,6 +208,12 @@ Page {
         }
 
         ListView {
+            // Passport: the capacitive-keyboard swipe scrolls the page's
+            // MAIN scrollable. Cascades only auto-picks one when it has no
+            // siblings (see ListView::scrollRole), and every list here sits
+            // beside chrome - so nothing was ever the main scrollable and the
+            // gesture had nothing to drive. Say so explicitly.
+            scrollRole: ScrollRole.Main
             id: projectsList
             dataModel: projectsModel
             horizontalAlignment: HorizontalAlignment.Fill

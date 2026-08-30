@@ -87,70 +87,100 @@ Sheet {
                 Button {
                     text: "Esc"
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
-                    preferredHeight: 48
-                    minHeight: 48
-                    maxHeight: 52
+                    preferredHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    minHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    maxHeight: liveTuiSheet.api
+                              ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
                     onClicked: liveTuiSheet.sendKey("Escape")
                 }
                 Button {
                     text: "\u21E5"   // ⇥ Tab
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
-                    preferredHeight: 48
-                    minHeight: 48
-                    maxHeight: 52
+                    preferredHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    minHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    maxHeight: liveTuiSheet.api
+                              ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
                     onClicked: liveTuiSheet.sendKey("Tab")
                 }
                 Button {
                     text: "\u2191"   // ↑
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
-                    preferredHeight: 48
-                    minHeight: 48
-                    maxHeight: 52
+                    preferredHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    minHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    maxHeight: liveTuiSheet.api
+                              ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
                     onClicked: liveTuiSheet.sendKey("Up")
                 }
                 Button {
                     text: "\u2193"   // ↓
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
-                    preferredHeight: 48
-                    minHeight: 48
-                    maxHeight: 52
+                    preferredHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    minHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    maxHeight: liveTuiSheet.api
+                              ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
                     onClicked: liveTuiSheet.sendKey("Down")
                 }
                 Button {
                     text: "\u2190"   // ←
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
-                    preferredHeight: 48
-                    minHeight: 48
-                    maxHeight: 52
+                    preferredHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    minHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    maxHeight: liveTuiSheet.api
+                              ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
                     onClicked: liveTuiSheet.sendKey("Left")
                 }
                 Button {
                     text: "\u2192"   // →
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
-                    preferredHeight: 48
-                    minHeight: 48
-                    maxHeight: 52
+                    preferredHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    minHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    maxHeight: liveTuiSheet.api
+                              ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
                     onClicked: liveTuiSheet.sendKey("Right")
                 }
                 Button {
                     text: "^C"
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
-                    preferredHeight: 48
-                    minHeight: 48
-                    maxHeight: 52
+                    preferredHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    minHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    maxHeight: liveTuiSheet.api
+                              ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
                     onClicked: liveTuiSheet.sendKey("Ctrl+C")
                 }
                 Button {
                     text: "\u21B5"   // ↵ Enter
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
-                    preferredHeight: 48
-                    minHeight: 48
-                    maxHeight: 52
+                    preferredHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    minHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    maxHeight: liveTuiSheet.api
+                              ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
                     onClicked: liveTuiSheet.sendKey("Enter")
                 }
             }
 
             ScrollView {
+                // Passport: the capacitive-keyboard swipe scrolls the page's
+                // MAIN scrollable. Cascades only auto-picks one when it has no
+                // siblings (see ListView::scrollRole), and every list here sits
+                // beside chrome - so nothing was ever the main scrollable and the
+                // gesture had nothing to drive. Say so explicitly.
+                scrollRole: ScrollRole.Main
                 horizontalAlignment: HorizontalAlignment.Fill
                 layoutProperties: StackLayoutProperties { spaceQuota: 1 }
                 scrollViewProperties {
@@ -210,9 +240,12 @@ Sheet {
                 Button {
                     text: qsTr("Send")
                     preferredWidth: 100
-                    preferredHeight: 48
-                    minHeight: 48
-                    maxHeight: 52
+                    preferredHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    minHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    maxHeight: liveTuiSheet.api
+                              ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
                     leftMargin: 6
                     onClicked: liveTuiSheet.sendLine()
                 }

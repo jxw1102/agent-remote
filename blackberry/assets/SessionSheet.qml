@@ -75,6 +75,12 @@ Sheet {
         }
 
         ScrollView {
+            // Passport: the capacitive-keyboard swipe scrolls the page's
+            // MAIN scrollable. Cascades only auto-picks one when it has no
+            // siblings (see ListView::scrollRole), and every list here sits
+            // beside chrome - so nothing was ever the main scrollable and the
+            // gesture had nothing to drive. Say so explicitly.
+            scrollRole: ScrollRole.Main
             Container {
                 leftPadding: 24
                 rightPadding: 24

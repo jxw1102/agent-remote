@@ -332,6 +332,8 @@ ApiClient::ApiClient(QObject *parent)
     , m_largeDisplay(false)
     , m_paintWidthBody(REF_SCREEN_W - PAINT_INSET_BODY)
     , m_paintWidthCode(REF_SCREEN_W - PAINT_INSET_CODE)
+    , m_iconButtonPx(44)
+    , m_uiScalePct(100)
     , m_fontBodyPx(27)
     , m_fontCodePx(24)
     , m_fontHeadingPx(33)
@@ -372,6 +374,11 @@ ApiClient::ApiClient(QObject *parent)
         m_fontBodyPx = qRound(27 * fontScale);
         m_fontCodePx = qRound(24 * fontScale);
         m_fontHeadingPx = qRound(33 * fontScale);
+        // Icon buttons follow the same damped curve. A flat 44 is ~3.8 mm on
+        // the Classic but only ~2.5 mm on the denser Passport, which is why
+        // every icon looked like a speck there. Classic 44 -> Passport 73.
+        m_iconButtonPx = qRound(44 * fontScale);
+        m_uiScalePct = qRound(fontScale * 100);
     }
     m_dropLocalDir = dropDownloadDir();
     loadProfiles();
@@ -400,6 +407,8 @@ ApiClient::ApiClient(QObject *parent)
         settings.value("processViewSessions").toStringList());
     // Progress cues are on by default; the Session sheet silences either one.
     m_soundCues = settings.value("soundCues", true).toBool();
+    // Opt-in: a finished Inbox download stays on disk unless asked otherwise.
+    m_autoOpenDownloads = settings.value("autoOpenDownloads", false).toBool();
     // Focus mode is a view preference; capFocus comes from /api/ping.
     m_focusMode = settings.value("focusMode", false).toBool();
     m_capFocus = false;
@@ -1462,6 +1471,33 @@ void ApiClient::setModelOverride(const QString &model)
     emit settingsChanged();
 }
 
+void ApiClient::setAutoOpenDownloads(bool on)
+{
+    if (on == m_autoOpenDownloads)
+        return;
+    m_autoOpenDownloads = on;
+    QSettings settings(BRAND_SETTINGS_ORG, BRAND_SETTINGS_APP);
+    settings.setValue("autoOpenDownloads", m_autoOpenDownloads);
+    settings.sync();
+    emit settingsChanged();
+}
+
+// Ask the OS to open a saved Inbox file. No explicit target: the invocation
+// framework picks the viewer registered for that file's type (same pattern as
+// openUsageInBrowser). Nothing is registered for some types - BB10 then shows
+// its own "no app" notice, which is why this never reports success itself.
+void ApiClient::openDownloadedFile(const QString &path)
+{
+    const QString clean = path.trimmed();
+    if (clean.isEmpty() || !QFile::exists(clean))
+        return;
+    static bb::system::InvokeManager manager;
+    bb::system::InvokeRequest request;
+    request.setAction("bb.action.OPEN");
+    request.setUri(QUrl::fromLocalFile(clean));
+    manager.invoke(request);
+}
+
 void ApiClient::setSoundCues(bool on)
 {
     if (on == m_soundCues)
@@ -2411,8 +2447,6 @@ void ApiClient::fetchMessages(int offset, int limit, bool older)
     QNetworkReply *reply = get(path, "messages");
     reply->setProperty("sid", m_currentSessionId);
     reply->setProperty("older", older);
-    // Stamp the send time so onFinished can report round-trip latency.
-    reply->setProperty("t_send", QDateTime::currentMSecsSinceEpoch());
 }
 
 // Long-press "Rewind to here" on a user prompt: the daemon's /rewind N
@@ -3697,8 +3731,19 @@ void ApiClient::onFinished(QNetworkReply *reply)
             // harness caps: Focus spans every harness on the daemon.
             const bool focus = map.value("focus", QVariant(false)).toBool();
             if (focus != m_capFocus) {
+                const bool gained = focus && !m_capFocus;
                 m_capFocus = focus;
                 emit capsChanged();
+                // Focus mode fans out only to daemons known to support it,
+                // so a listing built before this answer arrived left this
+                // daemon out. Re-run it instead of waiting for a manual
+                // Refresh - but only when the cached flag was false, i.e. the
+                // fetch really did skip us (first launch after install, or an
+                // upgrade from a build that never cached this).
+                if (gained && m_focusMode
+                        && !m_profiles.value(m_activeProfile).toMap()
+                                .value("focus").toBool())
+                    refreshSessions();
             }
             const bool share = map.value("share", QVariant(false)).toBool();
             if (share != m_capShare) {
@@ -3752,11 +3797,19 @@ void ApiClient::onFinished(QNetworkReply *reply)
             if (prof.value("provider").toString() != provider
                     || prof.value("caps").toMap() != newCaps
                     || prof.value("multi").toBool() != multi
+                    || prof.value("focus").toBool() != focus
                     || prof.value("providers").toList() != newProviders
                     || prof.value("chunked_upload").toBool() != chunkedUpload
                     || prof.value("provider_details").toMap() != newDetails) {
                 prof["provider"] = provider;
                 prof["caps"] = newCaps;
+                // Focus support must be cached like every other capability.
+                // pingProfiles() already did this for the NON-active daemons;
+                // the active one only ever set the in-memory m_capFocus, so
+                // after a restart its stored flag read false, Focus mode
+                // skipped the profile entirely (see startUnifiedFetch) and the
+                // list came up empty until the user hit Refresh.
+                prof["focus"] = focus;
                 prof["chunked_upload"] = chunkedUpload;
                 // Always store multi catalogue so New Session can pick harnesses
                 // even if an earlier code path only cached "provider".
@@ -4382,6 +4435,11 @@ void ApiClient::onFinished(QNetworkReply *reply)
                     f["mtime_text"] = QString();
                 }
                 f["api"] = QVariant::fromValue<QObject *>(this);
+                // Row glyph size: baked into the row because inside a
+                // ListItemComponent only ListItemData is a channel that
+                // always resolves. A shade under the icon-button size - it
+                // labels the row, it is not a tap target.
+                f["iconPx"] = qRound(m_iconButtonPx * 0.82);
                 f["profileIndex"] = profileIndex;
                 f["profileName"] = profileName;
                 f["accent"] = providerAccent(provider);
@@ -4475,6 +4533,7 @@ void ApiClient::onFinished(QNetworkReply *reply)
                 }
                 // Stamp api so a list-item context action can delete.
                 f["api"] = QVariant::fromValue<QObject *>(this);
+                f["iconPx"] = qRound(m_iconButtonPx * 0.82);
                 m_dropFiles.append(f);
             }
             m_dropStatus = m_dropFiles.isEmpty()
@@ -4552,11 +4611,14 @@ void ApiClient::onFinished(QNetworkReply *reply)
         emit dropChanged();
         // Heap toast: show() is async; a stack object would die first.
         bb::system::SystemToast *toast = new bb::system::SystemToast(this);
-        toast->setBody(tr("Saved to Downloads/Inbox"));
+        toast->setBody(m_autoOpenDownloads ? tr("Opening %1").arg(localName)
+                                           : tr("Saved to Downloads/Inbox"));
         QObject::connect(toast,
                          SIGNAL(finished(bb::system::SystemUiResult::Type)),
                          toast, SLOT(deleteLater()));
         toast->show();
+        if (m_autoOpenDownloads)
+            openDownloadedFile(dest);
         return;
     }
 
@@ -4656,24 +4718,14 @@ void ApiClient::handleMessages(QNetworkReply *reply, const QVariant &data)
         return;
     const bool older = reply->property("older").toBool();
 
-    // Round trip: send -> reply arrived. Covers daemon work + transfer,
-    // NOT the local block-building that follows.
-    const qint64 tSend = reply->property("t_send").toLongLong();
-    const qint64 netMs = tSend > 0
-            ? QDateTime::currentMSecsSinceEpoch() - tSend : -1;
-
     QVariantMap payload = data.toMap();
     QVariantList raw = payload["messages"].toList();
 
     // Local build: block -> display item, including RichPaint rasterizing
     // each rich block to a PNG (the heaviest client-side step).
-    if (m_richPaint)
-        m_richPaint->resetProfile();
-    const qint64 tBuild = QDateTime::currentMSecsSinceEpoch();
     QVariantList items;
     for (int i = 0; i < raw.size(); ++i)
         appendMessageItemsFor(items, raw.at(i).toMap());
-    const qint64 buildMs = QDateTime::currentMSecsSinceEpoch() - tBuild;
 
     if (older) {
         const int prepended = items.size();
@@ -4704,48 +4756,6 @@ void ApiClient::handleMessages(QNetworkReply *reply, const QVariant &data)
         if (it.value("kind").toString() == QLatin1String("step"))
             m_shownStepRefs.insert(it.value("stepRef").toString());
     }
-    reportLoadTiming(payload["timing"].toMap(), netMs, buildMs, raw.size());
-}
-
-// Break the transcript-open cost into daemon / network / client phases and
-// send it to the daemon's client-timing.log (fire-and-forget) for off-device
-// analysis. Not shown in the UI - the status bar returns to normal.
-void ApiClient::reportLoadTiming(const QVariantMap &t, qint64 netMs,
-                                 qint64 buildMs, int count)
-{
-    const double parse = t.value("parse_ms").toDouble();
-    const double render = t.value("render_ms").toDouble();
-    const double ser = t.value("serialize_ms").toDouble();
-    const double srv = parse + render + ser;
-    const int bodyKb = t.value("body_bytes").toInt() / 1024;
-    const int fileKb = t.value("file_bytes").toInt() / 1024;
-    const int total = t.value("count_total").toInt();
-    qint64 xfer = -1;
-    if (netMs >= 0) {
-        xfer = netMs - (qint64) (srv + 0.5);
-        if (xfer < 0)
-            xfer = 0;
-    }
-    QString xf = xfer >= 0 ? QString::number(xfer) : QString("?");
-    QString line = QString("loaded %1 msgs in %2ms: daemon %3 (parse %4 + "
-                           "render %5 + ser %6), net %7, build %8 | %9KB body, "
-                           "%10KB file, %11 total")
-            .arg(count).arg(netMs >= 0 ? netMs + buildMs : buildMs)
-            .arg((qint64) (srv + 0.5)).arg((qint64) parse).arg((qint64) render)
-            .arg((qint64) ser).arg(xf).arg(buildMs).arg(bodyKb).arg(fileKb)
-            .arg(total);
-
-    // Break the client build cost into RichPaint sub-phases (cache-lookup
-    // directory glob vs stb rasterize vs PNG encode+write) for the log.
-    if (m_richPaint)
-        line += QString(" [%1]").arg(m_richPaint->profileSummary());
-
-    // Fire-and-forget to the daemon log; the reply is ignored.
-    QVariantMap logBody;
-    logBody["line"] = line;
-    logBody["app"] = QString("%1 %2").arg(QLatin1String(BRAND_APP_NAME),
-                                          QLatin1String(BRAND_VERSION));
-    post("/api/clientlog", logBody, "clientlog");
 }
 
 // ---------------------------------------------------------------- helpers

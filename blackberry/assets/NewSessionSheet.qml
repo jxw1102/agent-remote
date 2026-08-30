@@ -59,6 +59,9 @@ Sheet {
             if (h == "claude") label = "Claude";
             else if (h == "grok") label = "Grok";
             else if (h == "codex") label = "Codex";
+            else if (h == "deepseek" || h == "dsh") label = "DeepSeek";
+            else if (label.length > 0)
+                label = label.charAt(0).toUpperCase() + label.substring(1);
             harnessModel.append({
                 id: h,
                 name: label,
@@ -141,7 +144,12 @@ Sheet {
                 ListView {
                     id: harnessList
                     topMargin: 8
-                    preferredHeight: 56
+                    // Not a fixed 56: on a Passport the system font is bigger,
+                    // the chip grew past this box and the ListView clipped the
+                    // labels (Claude/Grok/Codex sliced through the middle).
+                    preferredHeight: newSessionSheet.api
+                                     ? Math.round(56 * newSessionSheet.api.uiScalePct / 100)
+                                     : 56
                     dataModel: ArrayDataModel { id: harnessModel }
                     layout: StackListLayout {
                         orientation: LayoutOrientation.LeftToRight

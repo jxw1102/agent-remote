@@ -60,12 +60,23 @@ Sheet {
             }
 
             ListView {
+                // Passport: the capacitive-keyboard swipe scrolls the page's
+                // MAIN scrollable. Cascades only auto-picks one when it has no
+                // siblings (see ListView::scrollRole), and every list here sits
+                // beside chrome - so nothing was ever the main scrollable and the
+                // gesture had nothing to drive. Say so explicitly.
+                scrollRole: ScrollRole.Main
                 id: queueList
                 dataModel: queueModel
                 horizontalAlignment: HorizontalAlignment.Fill
                 layoutProperties: StackLayoutProperties { spaceQuota: 1 }
                 property int rowWidth: queueSheet.api
                                        ? queueSheet.api.screenWidth : 720
+                // Bridged to the row like rowWidth: inside a ListItemComponent
+                // only ListItem.view / ListItemData resolve, and preferredWidth
+                // is one of the bindings that propagates reliably.
+                property int iconPx: queueSheet.api
+                                     ? queueSheet.api.iconButtonPx : 44
 
                 // A tap cancels that queued prompt. A Button/ImageButton inside
                 // a list item never gets the tap on BB10 (the ListView consumes
@@ -108,10 +119,14 @@ Sheet {
                             // Visual affordance only - the tap is handled by the
                             // ListView's onTriggered above (see note there).
                             ImageView {
-                                preferredWidth: 44
-                                preferredHeight: 44
-                                minWidth: 44
-                                minHeight: 44
+                                preferredWidth: ListItem.view
+                                                ? ListItem.view.iconPx : 44
+                                preferredHeight: ListItem.view
+                                                 ? ListItem.view.iconPx : 44
+                                minWidth: ListItem.view
+                                          ? ListItem.view.iconPx : 44
+                                minHeight: ListItem.view
+                                           ? ListItem.view.iconPx : 44
                                 leftMargin: 10
                                 verticalAlignment: VerticalAlignment.Center
                                 imageSource: "asset:///images/ic_close.png"

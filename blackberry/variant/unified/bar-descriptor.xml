@@ -8,7 +8,7 @@
     <name>Agent Remote</name>
     <description>Control your AI sessions from anywhere with seamless support for Claude, Grok, and Codex.</description>
     <versionNumber>3.0.2</versionNumber>
-    <buildId>9</buildId>
+    <buildId>19</buildId>
     <platformVersion>10.3.1.0</platformVersion>
 
     <icon>

@@ -161,12 +161,12 @@ NavigationPane {
                     layout: DockLayout {}
 
                     ImageButton {
-                        preferredWidth: 44
-                        preferredHeight: 44
-                        minWidth: 44
-                        minHeight: 44
-                        maxWidth: 44
-                        maxHeight: 44
+                        preferredWidth: nav.api ? nav.api.iconButtonPx : 44
+                        preferredHeight: nav.api ? nav.api.iconButtonPx : 44
+                        minWidth: nav.api ? nav.api.iconButtonPx : 44
+                        minHeight: nav.api ? nav.api.iconButtonPx : 44
+                        maxWidth: nav.api ? nav.api.iconButtonPx : 44
+                        maxHeight: nav.api ? nav.api.iconButtonPx : 44
                         verticalAlignment: VerticalAlignment.Center
                         horizontalAlignment: HorizontalAlignment.Left
                         defaultImageSource: "asset:///images/ic_settings.png"
@@ -192,12 +192,12 @@ NavigationPane {
                         layout: StackLayout { orientation: LayoutOrientation.LeftToRight }
 
                         ImageButton {
-                            preferredWidth: 44
-                            preferredHeight: 44
-                            minWidth: 44
-                            minHeight: 44
-                            maxWidth: 44
-                            maxHeight: 44
+                            preferredWidth: nav.api ? nav.api.iconButtonPx : 44
+                            preferredHeight: nav.api ? nav.api.iconButtonPx : 44
+                            minWidth: nav.api ? nav.api.iconButtonPx : 44
+                            minHeight: nav.api ? nav.api.iconButtonPx : 44
+                            maxWidth: nav.api ? nav.api.iconButtonPx : 44
+                            maxHeight: nav.api ? nav.api.iconButtonPx : 44
                             rightMargin: 10
                             verticalAlignment: VerticalAlignment.Center
                             defaultImageSource: "asset:///images/ic_add.png"
@@ -205,12 +205,12 @@ NavigationPane {
                             onClicked: sessionsPage.openProjects(true)
                         }
                         ImageButton {
-                            preferredWidth: 44
-                            preferredHeight: 44
-                            minWidth: 44
-                            minHeight: 44
-                            maxWidth: 44
-                            maxHeight: 44
+                            preferredWidth: nav.api ? nav.api.iconButtonPx : 44
+                            preferredHeight: nav.api ? nav.api.iconButtonPx : 44
+                            minWidth: nav.api ? nav.api.iconButtonPx : 44
+                            minHeight: nav.api ? nav.api.iconButtonPx : 44
+                            maxWidth: nav.api ? nav.api.iconButtonPx : 44
+                            maxHeight: nav.api ? nav.api.iconButtonPx : 44
                             verticalAlignment: VerticalAlignment.Center
                             defaultImageSource: "asset:///images/ic_reload.png"
                             pressedImageSource: "asset:///images/ic_reload.png"
@@ -326,6 +326,12 @@ NavigationPane {
             }
 
             ListView {
+                // Passport: the capacitive-keyboard swipe scrolls the page's
+                // MAIN scrollable. Cascades only auto-picks one when it has no
+                // siblings (see ListView::scrollRole), and every list here sits
+                // beside chrome - so nothing was ever the main scrollable and the
+                // gesture had nothing to drive. Say so explicitly.
+                scrollRole: ScrollRole.Main
                 id: sessionsList
                 dataModel: sessionsModel
                 horizontalAlignment: HorizontalAlignment.Fill
