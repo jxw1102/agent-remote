@@ -3716,7 +3716,27 @@ function openNewSession() {
   let harness = (harnessesOf(picked)[0] || picked.provider || "claude");
   let projects = [];
 
-  const render = () => {
+  // What the user typed, kept OUTSIDE the DOM. Every pill (model, effort,
+  // execution, harness) re-renders the whole modal body, and so does the
+  // /api/projects reply — rebuilding the inputs. Without this, picking a
+  // model threw away a half-written first message, and a slow project list
+  // wiped whatever was typed while it loaded.
+  let draftCwd = "";
+  let draftPrompt = "";
+  let live = null;   // the inputs of the generation currently on screen
+
+  /** Pull the on-screen values into the draft before the body is rebuilt. */
+  const keepDraft = () => {
+    if (!live) return;
+    if (live.cwd && live.cwd.isConnected) draftCwd = live.cwd.value;
+    if (live.prompt && live.prompt.isConnected) draftPrompt = live.prompt.value;
+  };
+
+  // clearCwd: switching daemon host — the old path belongs to the old
+  // machine, so it goes; the first message is the user's own words and stays.
+  const render = ({ clearCwd = false } = {}) => {
+    keepDraft();
+    if (clearCwd) draftCwd = "";
     // Form chrome (Execution / Model / Effort / Start) follows the selected harness.
     applyAccent(harness);
     const harnessPal = providerOf(harness);
@@ -3747,10 +3767,12 @@ function openNewSession() {
             col.appendChild(el("div", "phost", bits.join(" · ")));
             card.appendChild(col);
             card.addEventListener("click", () => {
+              if (p.id === picked.id) return;
               picked = p;
               harness = harnessesOf(picked)[0] || picked.provider || "claude";
               projects = [];
-              render();
+              // Another machine: its folders are not this one's.
+              render({ clearCwd: true });
               loadProjects();
             });
             list.appendChild(card);
@@ -3789,6 +3811,8 @@ function openNewSession() {
         const cwd = el("input");
         cwd.placeholder = needCwd ? "/Users/you/code/project" : "empty = the daemon's workspace";
         cwd.style.fontFamily = "var(--mono)";
+        cwd.value = draftCwd;
+        cwd.addEventListener("input", () => { draftCwd = cwd.value; });
         f.appendChild(cwd);
         body.appendChild(f);
 
@@ -3807,7 +3831,10 @@ function openNewSession() {
           col.appendChild(el("div", "phost", proj.cwd));
           b.appendChild(col);
           b.appendChild(el("span", "tag", String(proj.session_count || 0)));
-          b.addEventListener("click", () => { cwd.value = proj.cwd; });
+          b.addEventListener("click", () => {
+            cwd.value = proj.cwd;
+            draftCwd = proj.cwd;
+          });
           plist.appendChild(b);
         });
         body.appendChild(plist);
@@ -3817,6 +3844,8 @@ function openNewSession() {
         pf.appendChild(el("label", null, "First message"));
         const prompt = el("textarea");
         prompt.rows = 5;
+        prompt.value = draftPrompt;
+        prompt.addEventListener("input", () => { draftPrompt = prompt.value; });
         pf.appendChild(prompt);
         body.appendChild(pf);
         // Execution: Interactive | Headless (both always bypass permissions).
@@ -3893,6 +3922,9 @@ function openNewSession() {
         body.appendChild(el("div", "help",
           `Runs on ${picked.name} · ${hLabel} · ${execModeLabel(execModeOf(picked, harness))}`));
         body._new = { cwd, prompt, harness: () => harness, picked: () => picked };
+        // Snapshot source for the next re-render (covers paste, autofill and
+        // anything else that never fires 'input').
+        live = { cwd, prompt };
       },
       actions: [
         { label: "Cancel", close: true },
@@ -3938,9 +3970,19 @@ function openNewSession() {
     return m;
   };
 
+  // Is this form still the thing on screen? modal() un-hides the dialog, so
+  // re-rendering after a Cancel would resurrect a dismissed modal (or stomp
+  // whatever the user opened instead).
+  const stillOpen = () => !$("modal").classList.contains("hidden")
+    && !!live && !!live.prompt && live.prompt.isConnected;
+
   const loadProjects = async () => {
+    // Which host we asked — a second daemon click while this is in flight
+    // must not paint the old machine's folders under the new selection.
+    const forId = picked.id;
     try {
       const data = await call(picked, "/api/projects", { timeout: 20000 });
+      if (forId !== picked.id || !stillOpen()) return;
       projects = data.projects || [];
       render();
     } catch { /* the cwd field still works */ }
