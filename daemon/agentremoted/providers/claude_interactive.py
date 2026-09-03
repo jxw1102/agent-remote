@@ -28,9 +28,16 @@ runs the model, so those turns may end on a quiet period after their
 transcript output instead of a Stop hook; a /command that shows a UI panel
 (/cost, /mcp...) gets snapshotted for the phone and dismissed with Escape.
 
-The TUI runs with --permission-mode bypassPermissions: permission prompts
-would render inside the pane where nobody can see them, so interactive mode
-is by definition an auto mode (the phone UI says so).
+The TUI runs with --permission-mode bypassPermissions, which was assumed to
+remove permission prompts entirely. It does not. Bypass skips allow/ask
+evaluation, but a `Read()` deny rule still arms the static Bash guards
+(cd-compound-read/write/redirect), and commands whose arguments cannot be
+analysed statically ask regardless — each opens a dialog that blocks the pane
+with a Yes/No nobody is there to give. Since 2.9.0 those dialogs are lifted
+onto the phone: the pane is polled ~1/s, _permission_panel parses the dialog
+into a question payload, and the phone's pick is typed back with the same
+Down/Enter driving AskUserQuestion uses. There is no hook for this, which is
+why it is screen-read; see _answer_permission for the cancel semantics.
 
 AskUserQuestion is the one panel the model itself opens mid-turn, and it
 blocks the pane until answered. Its questions/options reach the phone
@@ -119,6 +126,29 @@ _OLD_PREFIXES = ("cld-", "bb10i-")
 # The AskUserQuestion panel's footer, i.e. "the panel is still up". Used to
 # tell "submitted, panel gone" from "still waiting" after the last pick.
 _ASK_PANEL_MARKER = "to navigate"
+
+# A permission dialog in the pane. bypassPermissions does NOT suppress these:
+# the static Bash guards (cd-compound-read/write/redirect, and commands whose
+# arguments cannot be analysed) still open a blocking dialog, and the module
+# docstring's old claim that interactive mode is "by definition an auto mode"
+# is wrong because of them. Nobody is sitting at the pane, so the dialog is
+# lifted onto the same question channel AskUserQuestion uses.
+_PERM_Q_RE = re.compile(r"^(Do you want to [^?]{0,120}\?)$")
+_PERM_OPT_RE = re.compile(r"^[\u276f>]?\s*(\d+)\.\s+(\S.*?)$")
+_PERM_BOX = "\u2502|\u256d\u256e\u2570\u256f\u2500\u2501\u2550 \t"
+_PERM_DETAIL_LINES = 12   # context lines above the question to forward
+_PERM_LINE_CAP = 200      # per line, so one huge command cannot flood
+_PERM_TEXT_CAP = 900      # whole question text
+# The dialog footer: the only thing allowed to sit below the options.
+_PERM_FOOTER_RE = re.compile(
+    r"(Esc to cancel|esc to interrupt|Tab to amend|to navigate|shift\+tab)",
+    re.I)
+
+
+def _unbox(line: str) -> str:
+    """Strip tmux box drawing / gutter so a dialog line reads as plain text."""
+    return line.strip().strip(_PERM_BOX).strip()
+
 
 # Guest first-run parks on theme picker / login ("Let's get started") when
 # $HOME/.claude.json is missing. SessionStart does not fire until that is
@@ -1317,6 +1347,119 @@ class InteractiveManager:
                     % self._pane_tail(tui.name), "")
         return "", " · ".join(picks)
 
+    # -- permission dialogs (pane Yes/No) -----------------------------------
+
+    @staticmethod
+    def _permission_panel(pane: str) -> dict:
+        """The permission dialog on screen as a question payload, else {}.
+
+        What it parses (CLI 2.1.x), box gutter stripped:
+
+            Bash command
+              cd /repo; grep -n "x" file.cpp
+            grep on 'file.cpp' after a cd would search a directory that
+            cannot be determined here, and a Read() deny rule is configured
+            Do you want to proceed?
+            > 1. Yes
+              2. No
+
+        Only the LAST question line counts: scrollback holds earlier,
+        already-answered dialogs, and acting on those would type into a live
+        prompt. Two options minimum, contiguous and numbered, or it is not a
+        dialog.
+        """
+        rows = [_unbox(l) for l in pane.splitlines()]
+        q_at = -1
+        for i in range(len(rows) - 1, -1, -1):
+            if _PERM_Q_RE.match(rows[i]):
+                q_at = i
+                break
+        if q_at < 0:
+            return {}
+        options = []
+        for line in rows[q_at + 1:]:
+            m = _PERM_OPT_RE.match(line)
+            if m:
+                options.append(m.group(2)[:_PERM_LINE_CAP])
+            elif options or line:
+                break            # options are contiguous; anything else ends it
+        if len(options) < 2:
+            return {}
+        # Still up, or answered and merely still on screen? An open dialog is
+        # the last thing in the pane apart from its own footer; once answered,
+        # the tool output follows it. Typing into that would land keys on a
+        # live prompt, so anything else below means stale.
+        tail = [l for l in rows[q_at + 1 + len(options):] if l]
+        if any(not _PERM_FOOTER_RE.search(l) for l in tail):
+            return {}
+
+        detail = [l[:_PERM_LINE_CAP]
+                  for l in rows[max(0, q_at - _PERM_DETAIL_LINES):q_at] if l]
+        if sum(len(l) for l in detail) > _PERM_TEXT_CAP and len(detail) > 6:
+            detail = detail[:3] + ["..."] + detail[-3:]
+        question = "\n".join(detail + ["", rows[q_at]]) if detail else rows[q_at]
+
+        opts = []
+        for text in options:
+            label = text if len(text) <= 60 else text[:57] + "..."
+            opts.append({"label": label,
+                         "description": text if label != text else ""})
+        return {"question": question[:_PERM_TEXT_CAP], "header": "Permission",
+                "options": opts, "multi_select": False}
+
+    def _perm_open(self, tui: _Tui) -> bool:
+        """Is a permission dialog still up? (answered in the pane = gone)"""
+        return bool(self._permission_panel(self._pane_text(tui.name)))
+
+    def _answer_permission(self, job, tui: _Tui, panel: dict):
+        """Ask the phone to approve a pane dialog, then type the pick.
+
+        Own thread, like _answer_questions: the turn must keep draining so
+        Stop still works while the dialog blocks the pane. Cancel, timeout
+        and an unrecognised answer all send Escape, which declines the one
+        tool call and lets the model carry on rather than wedging the TUI.
+        """
+        secs = float(getattr(self.config, "question_timeout", 0) or 0)
+        timeout = secs if secs > 0 else None
+        labels = [o["label"] for o in panel["options"]]
+        job.set_phase("asking", "permission request")
+        answers = job.request_question([panel], timeout,
+                                       abort_when=lambda: not self._perm_open(tui))
+        try:
+            picked = [l for l in (answers[0] if answers else []) if l in labels]
+            if answers is None or not picked:
+                # Nothing usable. Only touch the pane if the dialog is still
+                # there — it may have been answered in the host / Live TUI.
+                if self._perm_open(tui):
+                    self._tmux("send-keys", "-t", tui.name, "Escape")
+                    job.add_event("tool", name="Permission",
+                                  detail="declined (no answer from the client)")
+                return
+            idx = labels.index(picked[0])
+            for _ in range(idx):
+                self._tmux("send-keys", "-t", tui.name, "Down")
+                time.sleep(0.12)
+            self._tmux("send-keys", "-t", tui.name, "Enter")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log.warning("permission dialog: tmux input failed: %s", e)
+            job.add_event("tool", name="Permission",
+                          detail="tmux input failed: %s" % e)
+            return
+        end = time.time() + 8.0
+        while time.time() < end:
+            if not self._perm_open(tui):
+                job.add_event("tool", name="Permission answered",
+                              detail=labels[idx])
+                return
+            time.sleep(_POLL_S)
+        try:
+            self._tmux("send-keys", "-t", tui.name, "Escape")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        job.add_event("tool", name="Permission",
+                      detail="dialog did not close after '%s' - cancelled"
+                             % labels[idx])
+
     def _run_turn(self, job, tui: _Tui, resume: bool = False):
         with job.lock:
             job.status = "running"
@@ -1359,7 +1502,8 @@ class InteractiveManager:
         state = {"last_text": "", "kind": kind,
                  "local_done": 0.0, "pending_local": "",
                  "ask": None, "ask_thread": None,
-                 "ask_done": set()}  # fingerprints already shown / answered
+                 "ask_done": set(),  # fingerprints already shown / answered
+                 "perm_thread": None, "perm_tick_at": 0.0}
         # Re-opened pending_question after restart has no waiter — clear it
         # so the phone does not show a dead gate; a still-open panel will
         # re-fire via hook / transcript.
@@ -1442,6 +1586,28 @@ class InteractiveManager:
             if tui.hook_ask and not state["ask"]:
                 self._ask_seen(job, {"questions": tui.hook_ask}, state)
                 tui.hook_ask = None
+            # A permission dialog blocks the pane with a Yes/No only the
+            # phone can give. There is no hook for it (bypassPermissions was
+            # assumed to remove them), so the pane is polled ~1/s. Never
+            # while AskUserQuestion owns the pane: its panel is also numbered
+            # and the two must not race for the same keystrokes.
+            perm_t = state.get("perm_thread")
+            ask_t = state.get("ask_thread")
+            if (not (perm_t and perm_t.is_alive())
+                    and not state["ask"] and not tui.hook_ask
+                    and not (ask_t and ask_t.is_alive())
+                    and now - float(state.get("perm_tick_at") or 0) >= 1.0):
+                state["perm_tick_at"] = now
+                pane = self._pane_text(tui.name)
+                if _ASK_PANEL_MARKER not in pane:
+                    panel = self._permission_panel(pane)
+                    if panel:
+                        log.info("permission dialog on %s: %s", tui.name,
+                                 panel["question"].splitlines()[-1])
+                        state["perm_thread"] = threading.Thread(
+                            target=self._answer_permission,
+                            args=(job, tui, panel), daemon=True)
+                        state["perm_thread"].start()
             thread = state["ask_thread"]
             if state["ask"] and not (thread and thread.is_alive()):
                 questions, state["ask"] = state["ask"], None

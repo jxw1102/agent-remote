@@ -19,6 +19,22 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.9.0** Permission dialogs reach the clients. Interactive mode runs the
+TUI with `--permission-mode bypassPermissions`, which was assumed to remove
+prompts; it does not. A `Read()` deny rule arms the static Bash guards
+(`cd-compound-read` / `-write` / `-redirect`), and commands whose arguments
+cannot be analysed statically ask regardless, so a turn could sit blocked on
+a Yes/No with nobody at the pane. There is no hook for these, so the pane is
+polled ~1/s while a turn runs, parsed into a question payload
+(`_permission_panel`) and published on the existing `pending_question`
+channel — so the web, Android and BlackBerry clients show it with no client
+change — then the pick is typed back with Down/Enter. Two guards matter: a
+dialog with output below it is treated as already answered (typing there
+would hit a live prompt), and an AskUserQuestion panel is skipped so the two
+handlers never race for the same keystrokes. Cancel, timeout and an
+unrecognised answer all send Escape, declining that one tool call instead of
+wedging the TUI. Covered by `tests/permission_panel_test.py`.
+
 **2.8.13** Guest Live TUI actually starts. Headless grok was dying with
 `Operation not permitted (os error 1)` because `--cwd` canonicalizes every
 parent of the guest folder (blocked `/Users/<host>`); guest jobs now rely on
