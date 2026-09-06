@@ -19,6 +19,11 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.9.1** Inbox download of non-ASCII filenames. `X-Drop-Name` is an HTTP/1
+header (latin-1), so a Chinese name used to 500 the whole transfer. The header
+is now percent-encoded UTF-8 when needed, and `Content-Disposition` carries
+RFC 5987 `filename*`. Android, BlackBerry, and iOS unquote it so the saved
+file keeps the original name.
 **2.9.0** Permission dialogs reach the clients. Interactive mode runs the
 TUI with `--permission-mode bypassPermissions`, which was assumed to remove
 prompts; it does not. A `Read()` deny rule arms the static Bash guards

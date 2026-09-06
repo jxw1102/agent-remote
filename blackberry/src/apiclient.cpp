@@ -4577,8 +4577,11 @@ void ApiClient::onFinished(QNetworkReply *reply)
         // The daemon names what it actually served in X-Drop-Name — a folder
         // arrives zipped as "<name>.zip" — so save under that, not under the
         // entry name that was requested. Older daemons omit the header.
+        // Non-ASCII names are percent-encoded UTF-8 (HTTP/1 headers are
+        // latin-1); fromPercentEncoding is a no-op for ASCII names.
         QString served = QFileInfo(QString::fromUtf8(
-                reply->rawHeader("X-Drop-Name"))).fileName().trimmed();
+                QByteArray::fromPercentEncoding(
+                    reply->rawHeader("X-Drop-Name")))).fileName().trimmed();
         const QString localName =
                 safeLocalFileName(served.isEmpty() ? name : served);
         const QString dest = QDir(m_dropLocalDir).absoluteFilePath(localName);

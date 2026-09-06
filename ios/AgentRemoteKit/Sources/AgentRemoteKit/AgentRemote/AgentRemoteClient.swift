@@ -327,6 +327,17 @@ public struct AgentRemoteClient: Sendable {
         try await send("GET", "/api/drop")
     }
 
+    /// Recover the filename the daemon served in X-Drop-Name.
+    /// HTTP/1 headers are latin-1, so a CJK name is percent-encoded UTF-8.
+    /// ASCII names (including spaces) are sent as-is.
+    private static func decodeDropName(_ header: String?, fallback: String) -> String {
+        let raw = header?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if raw.isEmpty { return fallback }
+        guard raw.contains("%") else { return raw }
+        let decoded = raw.removingPercentEncoding ?? raw
+        return decoded.isEmpty ? fallback : decoded
+    }
+
     /// Download one drop entry. The daemon names what it actually served in `X-Drop-Name` — a
     /// folder arrives zipped as `<name>.zip` — so save under the returned name, not the entry
     /// name that was requested.
@@ -352,8 +363,9 @@ public struct AgentRemoteClient: Sendable {
                 ?? String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
             throw AgentRemoteError.daemon(status: http.statusCode, message: message)
         }
-        let served = http.value(forHTTPHeaderField: "X-Drop-Name") ?? ""
-        return DropDownload(name: served.isEmpty ? name : served, data: data)
+        let served = Self.decodeDropName(
+            http.value(forHTTPHeaderField: "X-Drop-Name"), fallback: name)
+        return DropDownload(name: served, data: data)
     }
 
     @available(*, deprecated, renamed: "downloadDropEntry(name:)")

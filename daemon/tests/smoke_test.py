@@ -20,8 +20,9 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -29,6 +30,13 @@ FAKE_HOME = tempfile.mkdtemp(prefix="agentremoted-test-")
 os.environ["AGENTREMOTED_HOME"] = os.path.join(FAKE_HOME, ".agentremoted")
 # Never read the real macOS Keychain (real OAuth tokens -> live API calls).
 os.environ["AGENTREMOTED_NO_KEYCHAIN"] = "1"
+# Main-principal drop_path() reads load_config() (AGENTREMOTED_HOME/config.json),
+# not the Config object passed to make_server. Pin drop_dir so macOS does not
+# serve the real ~/Public during Inbox tests.
+_TEST_DROP = os.path.join(os.environ["AGENTREMOTED_HOME"], "drop")
+os.makedirs(_TEST_DROP, exist_ok=True)
+with open(os.path.join(os.environ["AGENTREMOTED_HOME"], "config.json"), "w") as f:
+    json.dump({"drop_dir": _TEST_DROP}, f)
 
 from agentremoted.config import Config, load_or_create_token  # noqa: E402
 from agentremoted.jobs import JobManager                      # noqa: E402
@@ -740,6 +748,9 @@ def run_claude_suite(token):
         check("drop download content-type",
               resp.headers.get("Content-Type", "").startswith("application/octet"),
               resp.headers.get("Content-Type"))
+        check("drop download X-Drop-Name",
+              resp.headers.get("X-Drop-Name") == drop_name,
+              resp.headers.get("X-Drop-Name"))
     try:
         urllib.request.urlopen(
             urllib.request.Request(base + "/api/drop/" + urllib.request.quote(drop_name)),
@@ -788,6 +799,52 @@ def run_claude_suite(token):
         check("drop refuses Drop Box delete", False)
     except urllib.error.HTTPError as e:
         check("drop refuses Drop Box delete", e.code == 400, e.code)
+
+    # Non-ASCII names used to 500: send_header encodes latin-1, so a raw
+    # Chinese X-Drop-Name never made it onto the wire.
+    zh_name = "中文 测试.txt"
+    zh_body = "你好 inbox\n".encode("utf-8")
+    with open(os.path.join(drop_dir, zh_name), "wb") as f:
+        f.write(zh_body)
+    _, listing_zh = api(base, token, "/api/drop")
+    names_zh = [f["name"] for f in listing_zh.get("files", [])]
+    check("drop lists CJK name", zh_name in names_zh, listing_zh)
+    req = urllib.request.Request(
+        base + "/api/drop/" + urllib.request.quote(zh_name),
+        headers={"X-Auth-Token": token})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        got = resp.read()
+        check("drop CJK download bytes match", got == zh_body, got[:40])
+        hdr = resp.headers.get("X-Drop-Name") or ""
+        hdr.encode("latin-1")  # would raise if the header were raw CJK
+        check("drop CJK X-Drop-Name is latin-1", True, hdr)
+        check("drop CJK X-Drop-Name round-trips",
+              urllib.parse.unquote(hdr) == zh_name, hdr)
+        cd = resp.headers.get("Content-Disposition") or ""
+        check("drop CJK Content-Disposition has filename*",
+              "filename*=UTF-8''" in cd, cd)
+    zh_folder = os.path.join(drop_dir, "资料")
+    os.makedirs(zh_folder, exist_ok=True)
+    with open(os.path.join(zh_folder, "inside.txt"), "w") as f:
+        f.write("nested\n")
+    req = urllib.request.Request(
+        base + "/api/drop/" + urllib.request.quote("资料"),
+        headers={"X-Auth-Token": token})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        zdata = resp.read()
+        check("drop CJK folder zips", zdata[:2] == b"PK", zdata[:8])
+        zhdr = resp.headers.get("X-Drop-Name") or ""
+        check("drop CJK zip name round-trips",
+              urllib.parse.unquote(zhdr) == "资料.zip", zhdr)
+    status, data = api(base, token,
+                       "/api/drop/" + urllib.request.quote(zh_name) + "/delete",
+                       {})
+    check("drop CJK delete ok", status == 200 and data.get("ok") is True, data)
+    status, data = api(base, token,
+                       "/api/drop/" + urllib.request.quote("资料") + "/delete",
+                       {})
+    check("drop CJK folder delete ok",
+          status == 200 and data.get("ok") is True, data)
 
     print("new session:")
     status, data = api(base, token, "/api/sessions/new",

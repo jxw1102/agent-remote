@@ -39,6 +39,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.net.URLDecoder
 import java.util.concurrent.TimeUnit
 
 /** A failed call, already turned into something worth showing a user. */
@@ -88,6 +89,25 @@ class DaemonClient(
         private const val UPLOAD_TIMEOUT_SEC = 180
         /** Stay under Cloudflare's ~100s HTTP timeout on a slow link. */
         private const val UPLOAD_CHUNK_BYTES = 512 * 1024
+
+        /**
+         * Recover the filename the daemon served in X-Drop-Name.
+         *
+         * HTTP/1 headers are latin-1, so a CJK name is percent-encoded UTF-8.
+         * ASCII names (including spaces) are sent as-is. URLDecoder treats
+         * '+' as space and throws on a stray '%', so those stay literal.
+         */
+        fun decodeDropName(header: String?, fallback: String): String {
+            val raw = header?.trim().orEmpty()
+            if (raw.isEmpty()) return fallback
+            if ('%' !in raw) return raw
+            return try {
+                URLDecoder.decode(raw.replace("+", "%2B"), "UTF-8")
+                    .ifBlank { fallback }
+            } catch (_: IllegalArgumentException) {
+                raw
+            }
+        }
 
         /**
          * Accept what a person types: "10.0.0.5", "10.0.0.5:8473",
@@ -667,7 +687,7 @@ class DaemonClient(
     suspend fun dropDownload(name: String): DropPayload {
         val (headers, bytes) =
             rawResponse(request(url("api/drop/$name")).get().build(), timeoutSeconds = 180)
-        val served = headers["X-Drop-Name"]?.takeIf { it.isNotBlank() } ?: name
+        val served = decodeDropName(headers["X-Drop-Name"], name)
         return DropPayload(served, bytes)
     }
 

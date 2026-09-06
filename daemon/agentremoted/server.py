@@ -90,7 +90,7 @@ import time
 import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, unquote, quote
 
 from . import __version__
 from . import accounts
@@ -157,6 +157,36 @@ def _safe_drop_name(raw: str) -> str:
     if any(ord(ch) < 32 for ch in name):
         return ""
     return name
+
+
+def _header_filename(name: str) -> str:
+    """Make a filename safe for an HTTP/1 header (latin-1, strict).
+
+    ``send_header`` encodes values as latin-1, so a CJK Inbox name used to
+    500 the whole download. ASCII names pass through unchanged; anything
+    else is percent-encoded UTF-8 (clients unquote ``X-Drop-Name``).
+    """
+    name = name or "file"
+    try:
+        name.encode("ascii")
+        return name
+    except UnicodeEncodeError:
+        return quote(name, safe="")
+
+
+def _content_disposition(filename: str) -> str:
+    """ASCII ``filename`` plus RFC 5987 ``filename*`` for the real name.
+
+    ``str.isalnum`` is Unicode-aware, so CJK would leak into ``filename=``
+    and ``send_header`` would still 500. Restrict the fallback to ASCII.
+    """
+    raw = filename or "file"
+    safe_ascii = "".join(
+        ch if (ch.isascii() and (ch.isalnum() or ch in "-_.")) else "_"
+        for ch in raw
+    ) or "file"
+    return 'attachment; filename="%s"; filename*=UTF-8\'\'%s' % (
+        safe_ascii, quote(raw, safe=""))
 
 
 def _upload_lock(upload_id: str):
@@ -3526,20 +3556,17 @@ class ApiHandler(BaseHTTPRequestHandler):
                     os.unlink(tmp_zip)
                 except OSError:
                     pass
-        # ASCII-safe Content-Disposition filename; the real name is in the
-        # URL path the client already knows.
-        safe_ascii = "".join(
-            ch if (ch.isalnum() or ch in "-_.") else "_" for ch in out_name
-        ) or "file"
+        # Content-Disposition: ASCII fallback + RFC 5987 filename* (CJK).
+        # X-Drop-Name is percent-encoded UTF-8 when it is not ASCII —
+        # send_header is latin-1, so a raw Chinese name 500s the transfer.
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Content-Disposition",
-                         'attachment; filename="%s"' % safe_ascii)
+        self.send_header("Content-Disposition", _content_disposition(out_name))
         self.send_header("Cache-Control", "no-store")
         # out_name, not path.name: a folder arrives as <folder>.zip and the
         # client saves it under the name it actually got.
-        self.send_header("X-Drop-Name", out_name)
+        self.send_header("X-Drop-Name", _header_filename(out_name))
         self.send_header("X-Drop-Size", str(len(data)))
         # Browser client downloads these cross-origin.
         self.send_header("Access-Control-Expose-Headers", "X-Drop-Name, X-Drop-Size")
