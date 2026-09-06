@@ -146,10 +146,19 @@ _DROP_LIST_SKIP = frozenset({"Drop Box"})
 def _safe_drop_name(raw: str) -> str:
     """Basename-only, no traversal; empty if the name is unusable.
 
-    Callers pass a URL path segment — unquote first so "hello%20drop.txt"
-    resolves to the real filename on disk.
+    Callers pass a URL path segment. Unquote until stable so both a
+    correctly encoded client and BB10 Qt 4.8's double-encoding
+    (``%25E6%2595%25B0…`` from ``QUrl(QString)`` re-encoding ``%``) resolve
+    to the on-disk name. ``basename`` still runs after decoding, so
+    ``%252e%252e`` cannot walk out of the drop folder.
     """
-    name = os.path.basename(unquote((raw or "").strip()))
+    name = (raw or "").strip()
+    for _ in range(3):
+        nxt = unquote(name)
+        if nxt == name:
+            break
+        name = nxt
+    name = os.path.basename(name)
     if not name or name in (".", "..") or "/" in name or "\\" in name:
         return ""
     # Reject null bytes and control chars; keep the rest so non-ASCII

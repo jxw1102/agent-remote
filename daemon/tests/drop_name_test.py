@@ -31,7 +31,7 @@ with open(os.path.join(os.environ["AGENTREMOTED_HOME"], "config.json"), "w") as 
 from agentremoted.config import Config, load_or_create_token  # noqa: E402
 from agentremoted.jobs import JobManager                      # noqa: E402
 from agentremoted.server import (                             # noqa: E402
-    _content_disposition, _header_filename, make_server)
+    _content_disposition, _header_filename, _safe_drop_name, make_server)
 from agentremoted import providers                            # noqa: E402
 
 failures = []
@@ -69,6 +69,16 @@ def test_helpers():
           "filename*=UTF-8''" in cd, cd)
     check("CJK not in filename= fallback",
           "中" not in cd.split("filename*=", 1)[0], cd)
+    once = urllib.parse.quote(zh, safe="")
+    twice = urllib.parse.quote(once, safe="")
+    check("unquote once-encoded CJK", _safe_drop_name(once) == zh, once)
+    check("unquote BB10 double-encoded CJK",
+          _safe_drop_name(twice) == zh, twice)
+    check("unquote space name twice",
+          _safe_drop_name(urllib.parse.quote(urllib.parse.quote("hello drop.txt")))
+          == "hello drop.txt")
+    check("double-encoded .. still rejected",
+          _safe_drop_name("%252e%252e") == "")
 
 
 def start_drop_server(token):
@@ -118,6 +128,20 @@ def test_http(token):
                       "filename*=UTF-8''" in cd, cd)
         except urllib.error.HTTPError as e:
             check("CJK download bytes match", False,
+                  "HTTP %s %s" % (e.code, e.read()[:200]))
+
+        # BB10 QUrl(QString) sends %25E6… ; that must still hit the file.
+        double = urllib.parse.quote(urllib.parse.quote(zh_name, safe=""), safe="")
+        req = urllib.request.Request(
+            base + "/api/drop/" + double,
+            headers={"X-Auth-Token": token})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                got = resp.read()
+                check("BB10 double-encoded CJK download",
+                      got == zh_body, got[:40])
+        except urllib.error.HTTPError as e:
+            check("BB10 double-encoded CJK download", False,
                   "HTTP %s %s" % (e.code, e.read()[:200]))
 
         folder = os.path.join(DROP_DIR, "资料")

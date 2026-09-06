@@ -19,6 +19,10 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.9.2** Inbox: BB10 Qt 4.8 `QUrl(QString)` re-encodes an already
+percent-encoded path (`%E6` → `%25E6`), so a Chinese filename 404'd. The
+daemon now unquotes until stable (still basename-confined), and the BB10
+client builds drop URLs with `QUrl::fromEncoded`.
 **2.9.1** Inbox download of non-ASCII filenames. `X-Drop-Name` is an HTTP/1
 header (latin-1), so a Chinese name used to 500 the whole transfer. The header
 is now percent-encoded UTF-8 when needed, and `Content-Disposition` carries

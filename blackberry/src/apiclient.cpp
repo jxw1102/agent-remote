@@ -35,6 +35,15 @@
 
 namespace {
 const int POLL_INTERVAL_MS = 1500;
+
+// Callers already percent-encode path segments (QUrl::toPercentEncoding).
+// QUrl(QString) treats the concatenation as *decoded* and encodes '%'
+// again, so a Chinese Inbox name became /api/drop/%25E6%2595%25B0… and
+// 404'd on BB10 Qt 4.8.
+QUrl urlFromEncoded(const QString &baseUrl, const QString &pathAndQuery)
+{
+    return QUrl::fromEncoded((baseUrl + pathAndQuery).toUtf8());
+}
 // A status frame older than this can't vouch that the job has no new
 // events; fall back to a plain poll (frames tick ~1/s during a job).
 const int WS_FRESH_MS = 4000;
@@ -1639,7 +1648,7 @@ void ApiClient::updateCaps(const QVariantMap &caps)
 
 QNetworkRequest ApiClient::makeRequest(const QString &pathAndQuery) const
 {
-    QUrl url(m_baseUrl + pathAndQuery);
+    QUrl url = urlFromEncoded(m_baseUrl, pathAndQuery);
     QNetworkRequest request(url);
     request.setRawHeader("X-Auth-Token", m_token.toUtf8());
     return request;
@@ -2086,7 +2095,7 @@ QNetworkReply *ApiClient::getFrom(const QString &baseUrl, const QString &token,
 {
     // Like get(), but against an explicit daemon - the unified fan-out
     // queries every profile, not just the active connection.
-    QUrl url(baseUrl + pathAndQuery);
+    QUrl url = urlFromEncoded(baseUrl, pathAndQuery);
     QNetworkRequest request(url);
     request.setRawHeader("X-Auth-Token", token.toUtf8());
     QNetworkReply *reply = m_nam.get(request);
@@ -2106,7 +2115,7 @@ QNetworkReply *ApiClient::postTo(const QString &baseUrl, const QString &token,
                                  const QString &path, const QVariantMap &body,
                                  const QString &kind)
 {
-    QUrl url(baseUrl + path);
+    QUrl url = urlFromEncoded(baseUrl, path);
     QNetworkRequest request(url);
     request.setRawHeader("X-Auth-Token", token.toUtf8());
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
