@@ -60,6 +60,7 @@ Brief: [docs/AGENT_INSTALL.md](https://github.com/jxw1102/agent-remote/blob/main
 
 - **Web (easiest):** [hosted client](https://nice-dune-0415af003.7.azurestaticapps.net/) → **Add a daemon**. It talks only to **your** machines.
 - **Android / iOS / BlackBerry 10:** install from [Releases](https://github.com/jxw1102/agent-remote/releases), then add the same URL + token.
+- **Pebble Time 2:** build [`pebble/`](pebble/) and paste the same URL + token in the official Pebble app settings.
 
 Same Wi‑Fi: use `http://<laptop-lan-ip>:8473`. For a phone off your network, use a tunnel (next).
 
@@ -148,6 +149,7 @@ CLI bills the **API key** — unset the key to stay on Max. Full notes:
 | iOS | [`ios/`](ios/) | SwiftUI app for iPhone + iPad |
 | BlackBerry 10 | [`blackberry/`](blackberry/) | Cascades app for BB10 devices |
 | LILYGO T-LoRa Pager | [`esp32/`](esp32/) | Small-screen, keyboard-driven remote |
+| Pebble Time 2 | [`pebble/`](pebble/) | Native emery watchapp; voice + buttons |
 
 ## Why Agent Remote?
 
@@ -155,7 +157,7 @@ CLI bills the **API key** — unset the key to stay on Max. Full notes:
 - **Keeps subscription economics** — runs official CLIs; Pro/Max and ChatGPT logins stay on the host (API keys work too).
 - **Agent-aware remote** — permissions, AskUserQuestion, queue, stop, live TUI, rewind — not a dumb terminal proxy.
 - **Ultra-light daemon** — Python standard library only; launchd / systemd / one-shot install.
-- **Unusual clients** — BlackBerry 10 Cascades and LILYGO T-LoRa Pager alongside web, Android, and iOS.
+- **Unusual clients** — BlackBerry 10 Cascades, Pebble Time 2, and LILYGO T-LoRa Pager alongside web, Android, and iOS.
 
 ```text
   Phone / web / BB10 / pager

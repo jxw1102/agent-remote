@@ -95,6 +95,7 @@ Copy the `https://….trycloudflare.com` URL cloudflared prints.
 | **Android** | Profiles → + → Base URL + token → Test connection |
 | **iOS** | Same profile fields (community client) |
 | **BlackBerry 10** | Install BAR from releases; Settings → daemon URL + token |
+| **Pebble Time 2** | Build [`pebble/`](../pebble/README.md); URL + token in official Pebble app settings |
 | **LILYGO T-LoRa Pager** | See [esp32/README.md](../esp32/README.md) |
 
 Test connection should show host name, version, harness list, and (daemon ≥ 2.5.3) auth summary.

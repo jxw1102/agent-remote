@@ -1,0 +1,37 @@
+{
+  "name": "agent-remote",
+  "author": "Agent Remote",
+  "version": "0.1.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {
+    "@rebble/clay": "^1.0.4"
+  },
+  "pebble": {
+    "displayName": "Agent Remote",
+    "uuid": "02b8e0c7-8700-45f9-84e3-29445a39af74",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "projectType": "native",
+    "capabilities": ["configurable"],
+    "targetPlatforms": ["emery"],
+    "watchapp": { "watchface": false },
+    "messageKeys": [
+      "CMD","SID","JID","RID","PROMPT","PROV","ALLOW","CANCEL","ANSWERS","CHUNK","QNOTE",
+      "KIND","CONN","HOST","VER","MULTI","PROVS",
+      "FOCUS_N","FOCUS_I","FOCUS_GEN","TITLE","STATE","PHASE","ELAPSED","STARTED","LAST","UNREAD","STATUS",
+      "MSG_I","MSG_N","MSG_ROLE","MSG_TEXT","MSG_MORE",
+      "TOOL","DETAIL","QTEXT","QOPT","Q_I","Q_N","Q_QI","Q_QN","QMULTI","QNOTEFOR","QKIND",
+      "ERR","CHIME","TX","FONT"
+    ],
+    "resources": {
+      "media": [
+        { "file": "images/menuicon.png", "menuIcon": true, "name": "IMAGE_MENU_ICON", "type": "bitmap" },
+        { "file": "images/ab_check.png", "name": "IMAGE_AB_CHECK", "type": "bitmap" },
+        { "file": "images/ab_cross.png", "name": "IMAGE_AB_CROSS", "type": "bitmap" },
+        { "file": "images/ab_up.png", "name": "IMAGE_AB_UP", "type": "bitmap" },
+        { "file": "images/ab_down.png", "name": "IMAGE_AB_DOWN", "type": "bitmap" }
+      ]
+    }
+  }
+}

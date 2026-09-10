@@ -1,0 +1,6 @@
+build/
+node_modules/
+.lock-waf*
+.DS_Store
+*.pyc
+__pycache__/
