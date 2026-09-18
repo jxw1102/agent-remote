@@ -100,6 +100,13 @@ fun UsageScreen(vm: UsageViewModel, onBack: () -> Unit, onOpenWeb: (String) -> U
                             Text("Open grok.com usage")
                         }
                     }
+                    if (profile.provider == "cursor") {
+                        TextButton(onClick = { onOpenWeb(CURSOR_USAGE_URL) }) {
+                            Icon(Icons.Outlined.OpenInBrowser, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Open cursor.com usage")
+                        }
+                    }
                 }
                 Hairline(inset = 16)
             }
@@ -190,6 +197,7 @@ fun UsageScreen(vm: UsageViewModel, onBack: () -> Unit, onOpenWeb: (String) -> U
                                         UsageBar(
                                             title = title,
                                             percent = bucket.percent,
+                                            showBar = bucket.showBar,
                                             resets = bucket.resetsText,
                                             severity = bucket.severity,
                                             accent = Accent.forProvider(harness).tint,
@@ -219,6 +227,8 @@ fun UsageScreen(vm: UsageViewModel, onBack: () -> Unit, onOpenWeb: (String) -> U
 
 private const val GROK_USAGE_URL = "https://grok.com/?_s=usage"
 
+
+private const val CURSOR_USAGE_URL = "https://cursor.com/dashboard?tab=usage"
 /** Multi /api/usage prefixes "Claude · …" for flat-list clients; strip under a section header. */
 private fun stripHarnessPrefix(title: String, harness: String): String {
     if (harness.isBlank() || title.isBlank()) return title
@@ -233,6 +243,7 @@ private fun stripHarnessPrefix(title: String, harness: String): String {
 private fun UsageBar(
     title: String,
     percent: Int,
+    showBar: Boolean = true,
     resets: String,
     severity: String,
     accent: androidx.compose.ui.graphics.Color,
@@ -254,10 +265,14 @@ private fun UsageBar(
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f),
             )
-            Text("$percent%", style = MaterialTheme.typography.labelLarge, color = color)
+            if (showBar) {
+                Text("$percent%", style = MaterialTheme.typography.labelLarge, color = color)
+            }
         }
-        Spacer(Modifier.height(6.dp))
-        Box(
+        // Spend-only rows (show_bar=false) carry their amount in `resets`;
+        // a 0% bar under them would be a lie.
+        if (showBar) Spacer(Modifier.height(6.dp))
+        if (showBar) Box(
             Modifier
                 .fillMaxWidth()
                 .height(8.dp)

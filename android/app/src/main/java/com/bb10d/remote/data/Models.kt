@@ -372,6 +372,8 @@ data class StatusFrameDto(
 data class UsageBucketDto(
     val title: String = "",
     val percent: Int = 0,
+    /** false = spend-only row (Cursor Enterprise): no percentage, draw no bar. */
+    @SerialName("show_bar") val showBar: Boolean = true,
     @SerialName("resets_text") val resetsText: String = "",
     /** normal | warning | critical */
     val severity: String = "normal",

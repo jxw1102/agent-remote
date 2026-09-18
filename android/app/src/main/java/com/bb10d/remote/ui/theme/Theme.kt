@@ -29,6 +29,7 @@ enum class Accent(val tint: Color, val onTint: Color, val label: String) {
     Grok(Color(0xFF00D4FF), Color(0xFF04222A), "Grok"),
     Codex(Color(0xFF10A37F), Color(0xFF042018), "Codex"),
     DeepSeek(Color(0xFF4D6BFE), Color(0xFF0B1024), "DeepSeek"),
+    Cursor(Color(0xFFD946EF), Color(0xFF24082A), "Cursor"),
     Neutral(Color(0xFF9AA4B2), Color(0xFF11151A), "Agent"),
     ;
 
@@ -38,6 +39,7 @@ enum class Accent(val tint: Color, val onTint: Color, val label: String) {
             "grok" -> Grok
             "codex" -> Codex
             "deepseek", "dsh" -> DeepSeek
+            "cursor", "cursor-agent" -> Cursor
             else -> Neutral
         }
     }
@@ -77,12 +79,14 @@ private fun darkPalette(accent: Accent) = RemotePalette(
         Accent.Claude -> Color(0xFFE0A183)
         Accent.Codex -> Color(0xFF6EE7B7)
         Accent.DeepSeek -> Color(0xFF93A8FF)
+        Accent.Cursor -> Color(0xFFF0ABFC)
         else -> Color(0xFF67E8F9)
     },
     heading = when (accent) {
         Accent.Claude -> Color(0xFFE9A47F)
         Accent.Codex -> Color(0xFF3DD68C)
         Accent.DeepSeek -> Color(0xFF7B93FF)
+        Accent.Cursor -> Color(0xFFE879F9)
         else -> Color(0xFFB9A2F0)
     },
     thought = Color(0xFF8B93A3),
@@ -104,11 +108,13 @@ private fun lightPalette(accent: Accent) = RemotePalette(
     inlineCode = when (accent) {
         Accent.Claude -> Color(0xFFA9532F)
         Accent.Codex -> Color(0xFF0D7A5A)
+        Accent.Cursor -> Color(0xFFA21CAF)
         else -> Color(0xFF0B7C93)
     },
     heading = when (accent) {
         Accent.Claude -> Color(0xFFA9532F)
         Accent.Codex -> Color(0xFF0D7A5A)
+        Accent.Cursor -> Color(0xFFA21CAF)
         else -> Color(0xFF5B3FA8)
     },
     thought = Color(0xFF5C6472),
