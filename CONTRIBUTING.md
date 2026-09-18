@@ -26,6 +26,7 @@ Prefer capability flags from `GET /api/ping` over hard-coding per client.
 ```bash
 cd daemon
 python3 tests/smoke_test.py
+python3 tests/cursor_test.py
 python3 tests/render_test.py
 python3 tests/focus_test.py
 python3 tests/focus_api_test.py

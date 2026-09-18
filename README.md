@@ -18,7 +18,7 @@
   <img src="docs/cover.jpg" alt="Agent Remote — control your AI sessions from anywhere" width="100%">
 </p>
 
-Start, watch, and steer Claude Code, Grok, Codex, and DeepSeek from your
+Start, watch, and steer Claude Code, Grok, Codex, DeepSeek, and Cursor Agent from your
 phone or browser — even when you are away from the desk. A small daemon on your Mac or
 VPS talks to the CLIs you already use. Clients merge every host into **one
 list**.
@@ -26,7 +26,7 @@ list**.
 ## Get started
 
 You need **Python 3** and at least one working CLI on the machine you install
-on: `claude`, `grok`, `codex`, and/or `dsh` (DeepSeek Harness) — subscription
+on: `claude`, `grok`, `codex`, `cursor-agent`, and/or `dsh` (DeepSeek Harness) — subscription
 login or API key. Confirm the CLI works in a normal terminal first.
 
 ### 1. Install the daemon

@@ -18,9 +18,10 @@ Whenever you change a **client-side** feature, behaviour, or API contract, consi
 | LILYGO T-LoRa Pager | `esp32/` (ESP32-S3 firmware) |
 | Pebble Time 2 | `pebble/` (C + PKJS, emery) |
 
-Harnesses the daemon can front: Claude Code, Grok, Codex, and DeepSeek
+Harnesses the daemon can front: Claude Code, Grok, Codex, DeepSeek
 Harness (`dsh web` on localhost — no TUI; the daemon is a client of `/api`
-and starts `dsh web` if it is not already running).
+and starts `dsh web` if it is not already running), and Cursor Agent
+(`cursor-agent --print`).
 
 Examples of work that almost always spans clients:
 

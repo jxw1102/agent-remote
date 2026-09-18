@@ -9,6 +9,7 @@ Smoke path for a **fresh machine → working phone client**.
   - `claude` (Claude Code — Pro/Max login **or** API key)
   - and/or `codex`
   - and/or `grok`
+  - and/or `cursor-agent`
 - Optional: `cloudflared` for HTTPS to the phone
   ([downloads](https://developers.cloudflare.com/tunnel/downloads/) —
   macOS: `brew install cloudflared`)
@@ -16,7 +17,7 @@ Smoke path for a **fresh machine → working phone client**.
 Confirm the CLI alone:
 
 ```bash
-claude   # or: codex / grok
+claude   # or: codex / grok / cursor-agent
 # complete login if prompted, then quit
 ```
 
@@ -95,7 +96,6 @@ Copy the `https://….trycloudflare.com` URL cloudflared prints.
 | **Android** | Profiles → + → Base URL + token → Test connection |
 | **iOS** | Same profile fields (community client) |
 | **BlackBerry 10** | Install BAR from releases; Settings → daemon URL + token |
-| **Pebble Time 2** | Build [`pebble/`](../pebble/README.md); URL + token in official Pebble app settings |
 | **LILYGO T-LoRa Pager** | See [esp32/README.md](../esp32/README.md) |
 
 Test connection should show host name, version, harness list, and (daemon ≥ 2.5.3) auth summary.
@@ -104,7 +104,7 @@ Test connection should show host name, version, harness list, and (daemon ≥ 2.
 
 1. **New session**
 2. Pick **which daemon** (if you have more than one profile)
-3. Pick **provider** if the host runs multi (Claude / Grok / Codex / DeepSeek)
+3. Pick **provider** if the host runs multi (Claude / Grok / Codex / DeepSeek / Cursor)
 4. Project/cwd if required, then send a prompt
 
 You should see live status, permissions / questions when the harness asks, and the same sessions that appear in the host CLI history.
