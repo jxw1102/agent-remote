@@ -219,8 +219,10 @@ void cue(chime::Cue c) {
 // Brand accents shared with Android/web (Theme.kt Accent).
 lv_color_t providerColor(const String &p) {
   if (p.startsWith("cl")) return lv_color_hex(0xd97757);  // Claude warm orange
+  if (p.startsWith("cu")) return lv_color_hex(0xd946ef);  // Cursor magenta
   if (p.startsWith("co")) return lv_color_hex(0x10a37f);  // Codex teal
   if (p.startsWith("gr")) return lv_color_hex(0x00d4ff);  // Grok icon cyan
+  if (p.startsWith("de") || p.startsWith("ds")) return lv_color_hex(0x4d6bfe);
   return lv_color_hex(0x9aa4b2);                           // neutral
 }
 
@@ -1320,21 +1322,25 @@ void fillUsage() {
     lv_obj_set_style_text_font(t, &lv_font_montserrat_12, 0);
     lv_obj_align(t, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    lv_obj_t *bar = lv_bar_create(row);
-    lv_bar_set_range(bar, 0, 100);
-    lv_bar_set_value(bar, u.percent, LV_ANIM_ON);
-    lv_obj_set_size(bar, 120, 10);
-    lv_obj_align(bar, LV_ALIGN_TOP_RIGHT, -56, 3);
-    lv_color_t col = u.percent >= 90 ? lv_palette_main(LV_PALETTE_RED)
-                     : u.percent >= 70 ? lv_palette_main(LV_PALETTE_AMBER)
-                                       : lv_palette_main(LV_PALETTE_GREEN);
-    if (u.severity != "normal") col = lv_palette_main(LV_PALETTE_AMBER);
-    lv_obj_set_style_bg_color(bar, col, LV_PART_INDICATOR);
+    // A spend-only row (show_bar false: Cursor Enterprise reports dollars,
+    // no limit) has no percentage; the amount sits in the resets line.
+    if (u.showBar) {
+      lv_obj_t *bar = lv_bar_create(row);
+      lv_bar_set_range(bar, 0, 100);
+      lv_bar_set_value(bar, u.percent, LV_ANIM_ON);
+      lv_obj_set_size(bar, 120, 10);
+      lv_obj_align(bar, LV_ALIGN_TOP_RIGHT, -56, 3);
+      lv_color_t col = u.percent >= 90 ? lv_palette_main(LV_PALETTE_RED)
+                       : u.percent >= 70 ? lv_palette_main(LV_PALETTE_AMBER)
+                                         : lv_palette_main(LV_PALETTE_GREEN);
+      if (u.severity != "normal") col = lv_palette_main(LV_PALETTE_AMBER);
+      lv_obj_set_style_bg_color(bar, col, LV_PART_INDICATOR);
 
-    lv_obj_t *pc = lv_label_create(row);
-    lv_label_set_text(pc, (String(u.percent) + "%").c_str());
-    lv_obj_set_style_text_font(pc, &lv_font_montserrat_12, 0);
-    lv_obj_align(pc, LV_ALIGN_TOP_RIGHT, -8, 0);
+      lv_obj_t *pc = lv_label_create(row);
+      lv_label_set_text(pc, (String(u.percent) + "%").c_str());
+      lv_obj_set_style_text_font(pc, &lv_font_montserrat_12, 0);
+      lv_obj_align(pc, LV_ALIGN_TOP_RIGHT, -8, 0);
+    }
 
     lv_obj_t *r = lv_label_create(row);
     lv_label_set_text(r, u.resets.c_str());

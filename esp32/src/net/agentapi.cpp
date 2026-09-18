@@ -354,6 +354,7 @@ bool fetchUsage(int daemon, std::vector<UsageBucket> *out, String *errOut) {
     u.resets = (const char *)(b["resets_text"] | "");
     u.severity = (const char *)(b["severity"] | "normal");
     u.percent = b["percent"] | 0;
+    u.showBar = b["show_bar"] | true;
     u.provider = prov && prov[0] ? prov : (const char *)(b["provider"] | "");
     u.account = acct && acct[0] ? acct : (const char *)(b["account"] | "");
     u.accountId = acctId && acctId[0] ? acctId

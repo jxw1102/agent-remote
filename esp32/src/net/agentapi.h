@@ -28,6 +28,8 @@ struct UsageBucket {
   String provider;   // claude / grok / codex
   String account;    // email or stable id label
   String accountId;  // stable seat id for multi-host dedup
+  // false = spend-only row (Cursor Enterprise): no percentage, draw no bar.
+  bool showBar = true;
 };
 
 struct StatusSnap {
