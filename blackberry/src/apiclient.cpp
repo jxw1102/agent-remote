@@ -195,6 +195,8 @@ const ProviderPalette CODEX_PALETTE =
     {"#10a37f", "#0d1f1a", "#3dd68c", "#141a17", "#3dd68c", "#7a9a8a", "#6ee7b7"};
 const ProviderPalette DEEPSEEK_PALETTE =
     {"#4d6bfe", "#12162a", "#7b93ff", "#14161f", "#7b93ff", "#8a92e0", "#93a8ff"};
+const ProviderPalette CURSOR_PALETTE =
+    {"#d946ef", "#24122a", "#e879f9", "#1a1220", "#e879f9", "#a98fb5", "#f0abfc"};
 
 const ProviderPalette *palForProvider(const QString &provider)
 {
@@ -207,6 +209,9 @@ const ProviderPalette *palForProvider(const QString &provider)
     if (provider == QLatin1String("deepseek")
             || provider == QLatin1String("dsh"))
         return &DEEPSEEK_PALETTE;
+    if (provider == QLatin1String("cursor")
+            || provider == QLatin1String("cursor-agent"))
+        return &CURSOR_PALETTE;
     return 0; // unknown -> brand.hpp neutral fallbacks
 }
 
@@ -492,6 +497,12 @@ QString ApiClient::agentName() const
         return QLatin1String("Grok");
     if (m_provider == QLatin1String("codex"))
         return QLatin1String("Codex");
+    if (m_provider == QLatin1String("deepseek")
+            || m_provider == QLatin1String("dsh"))
+        return QLatin1String("DeepSeek");
+    if (m_provider == QLatin1String("cursor")
+            || m_provider == QLatin1String("cursor-agent"))
+        return QLatin1String("Cursor");
 #endif
     return QLatin1String(BRAND_AGENT_NAME);
 }
@@ -796,6 +807,12 @@ QString ApiClient::statusActor() const
         return QLatin1String("Grok");
     if (m_sessionProvider == QLatin1String("codex"))
         return QLatin1String("Codex");
+    if (m_sessionProvider == QLatin1String("deepseek")
+            || m_sessionProvider == QLatin1String("dsh"))
+        return QLatin1String("DeepSeek");
+    if (m_sessionProvider == QLatin1String("cursor")
+            || m_sessionProvider == QLatin1String("cursor-agent"))
+        return QLatin1String("Cursor");
     // Fallback: active profile provider, then brand agent name.
     if (m_provider == QLatin1String("claude"))
         return QLatin1String("Claude");
@@ -803,6 +820,12 @@ QString ApiClient::statusActor() const
         return QLatin1String("Grok");
     if (m_provider == QLatin1String("codex"))
         return QLatin1String("Codex");
+    if (m_provider == QLatin1String("deepseek")
+            || m_provider == QLatin1String("dsh"))
+        return QLatin1String("DeepSeek");
+    if (m_provider == QLatin1String("cursor")
+            || m_provider == QLatin1String("cursor-agent"))
+        return QLatin1String("Cursor");
     return agentName();
 }
 

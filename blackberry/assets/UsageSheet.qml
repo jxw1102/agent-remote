@@ -141,11 +141,15 @@ Sheet {
                             // Progress bar: filled portion + remainder (track
                             // shows through the transparent remainder). Filled
                             // color follows severity (green / amber / red).
+                            // A spend-only row (show_bar false: Cursor
+                            // Enterprise reports dollars, no limit) has no
+                            // percentage, so no bar; absent means true.
                             Container {
                                 horizontalAlignment: HorizontalAlignment.Fill
                                 preferredHeight: 16
                                 topMargin: 8
                                 bottomMargin: 6
+                                visible: ListItemData.show_bar != false
                                 background: Color.create("#2a2a2a")
                                 layout: StackLayout {
                                     orientation: LayoutOrientation.LeftToRight
@@ -187,6 +191,7 @@ Sheet {
                                 }
                                 Label {
                                     text: ListItemData.percent + "%"
+                                    visible: ListItemData.show_bar != false
                                     textStyle.fontSize: FontSize.XSmall
                                     textStyle.color: Color.create("#b0b0b0")
                                     textStyle.textAlign: TextAlign.Right

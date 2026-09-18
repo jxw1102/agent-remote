@@ -441,7 +441,7 @@ public:
     // Open a merged-list row: switches to the row's profile first when it
     // is not the active one. profileIndex -1 = plain openTranscript.
     Q_INVOKABLE void openSessionRow(int profileIndex, const QString &sessionId);
-    // Accent hex for a provider name ("claude"/"grok"/"codex"/other) - the
+    // Accent hex for a provider name ("claude"/"grok"/"codex"/"cursor"/other) - the
     // QML profile chips color themselves with this.
     Q_INVOKABLE QString providerAccent(const QString &provider) const;
     // Active profile's harness list (multi daemon → claude/grok/codex).

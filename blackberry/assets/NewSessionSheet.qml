@@ -60,6 +60,7 @@ Sheet {
             else if (h == "grok") label = "Grok";
             else if (h == "codex") label = "Codex";
             else if (h == "deepseek" || h == "dsh") label = "DeepSeek";
+            else if (h == "cursor" || h == "cursor-agent") label = "Cursor";
             else if (label.length > 0)
                 label = label.charAt(0).toUpperCase() + label.substring(1);
             harnessModel.append({
@@ -213,6 +214,10 @@ Sheet {
                     if (newSessionSheet.harness == "claude") name = "Claude";
                     else if (newSessionSheet.harness == "grok") name = "Grok";
                     else if (newSessionSheet.harness == "codex") name = "Codex";
+                    else if (newSessionSheet.harness == "deepseek"
+                             || newSessionSheet.harness == "dsh") name = "DeepSeek";
+                    else if (newSessionSheet.harness == "cursor"
+                             || newSessionSheet.harness == "cursor-agent") name = "Cursor";
                     else if (a) name = a.agentName;
                     return qsTr("What should %1 do?").arg(name);
                 }
