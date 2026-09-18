@@ -7,7 +7,7 @@ runs turns via each harness CLI.
 **Preferred setup:** one process with
 
 ```json
-{ "providers": ["claude", "grok", "codex"], "port": 8473 }
+{ "providers": ["claude", "grok", "codex", "cursor"], "port": 8473 }
 ```
 
 Clients use **one profile** for that host; new session picks the harness.
@@ -19,6 +19,28 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.12.1** Usage buckets may carry `"show_bar": false`. Cursor Enterprise
+seats report spend for the billing cycle, not a share of a limit, so the
+bucket has no meaningful percentage; the daemon marks it and every client
+(web, Android, BlackBerry, iOS, LILYGO) renders the row without a bar or a
+"0%" label. Absent means true, so older clients keep drawing bars.
+
+**2.12.0** Cursor Live TUI. Interactive turns now run the real Cursor Agent
+terminal in a detached tmux session, with preallocated chat IDs, restart
+adoption, transcript-driven completion, mid-turn input, ANSI/plain pane
+capture, direct key injection, model selection, guest isolation, and idle
+fleet eviction. Requires `tmux`; otherwise Cursor remains headless-only.
+**2.11.0** Cursor rewind and usage. `/rewind N` moves the chat's
+content-addressed `store.db` root to the last complete snapshot before the
+dropped prompt, trims the display transcript, and keeps `.rewind-bak`
+backups; files changed by the agent are not restored. `/api/usage` reads the
+local Cursor login token (macOS Keychain, Linux Secret Service, IDE state DB,
+or `CURSOR_ACCESS_TOKEN`) and maps Cursor's dashboard plan/spend data into the
+shared Usage sheet.
+**2.10.0** Cursor Agent (`cursor-agent`) as a fifth harness: headless
+`--print --output-format stream-json`, sessions from `~/.cursor/chats` +
+agent-transcripts. Add `"cursor"` to `providers`. No Live TUI. Phone turns
+pass `--force --trust`.
 **2.9.2** Inbox: BB10 Qt 4.8 `QUrl(QString)` re-encodes an already
 percent-encoded path (`%E6` → `%25E6`), so a Chinese filename 404'd. The
 daemon now unquotes until stable (still basename-confined), and the BB10
@@ -299,14 +321,14 @@ sudo systemctl enable --now agentremoted
 ## Multi provider model
 
 ```json
-{ "providers": ["claude", "grok", "codex"], "port": 8473 }
+{ "providers": ["claude", "grok", "codex", "cursor"], "port": 8473 }
 ```
 
 - One client profile → host **root**
 - `GET /api/ping` → `multi: true` when more than one provider, plus
   `providers` and per-harness `provider_details`
 - Sessions merged; each row has `provider`
-- `POST /api/sessions/new` requires `"provider": "claude"|"grok"|"codex"|"deepseek"`
+- `POST /api/sessions/new` requires `"provider": "claude"|"grok"|"codex"|"deepseek"|"cursor"`
 
 Path mounts (`/claude/…`, `/grok/…`) still work. `/internal/permission` and
 `/internal/hook` stay unprefixed (MCP / TUI).
@@ -455,6 +477,7 @@ Auth: `X-Auth-Token` / `Authorization: Bearer` / `?token=`.
 ```bash
 cd daemon
 python3 tests/smoke_test.py
+python3 tests/cursor_test.py
 python3 tests/render_test.py
 python3 tests/focus_test.py        # focus state machine (unit)
 python3 tests/focus_api_test.py    # focus over HTTP, incl. enrolment rules

@@ -1031,6 +1031,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             if name in ("deepseek", "dsh"):
                 from .providers.deepseek import DeepseekStore
                 return DeepseekStore(self.config)
+            if name in ("cursor", "cursor-agent", "cursoragent"):
+                from .providers.cursor import CursorStore
+                return CursorStore(root / ".cursor", self.config)
         except Exception:
             log.exception("guest store for %s failed", name)
         return None

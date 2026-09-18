@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <meta name="referrer" content="no-referrer">
 <title>Shared session · Agent Remote</title>
-<!-- built 2026-08-26 10:36 from web/src -->
+<!-- built 2026-09-18 20:06 from web/src -->
 <style>
 /* Agent Remote, browser client.
  *
@@ -2709,6 +2709,7 @@ function applyAccent(provider) {
     : p === "claude" ? "#d97757"
     : p === "codex" ? "#10a37f"
     : (p === "deepseek" || p === "dsh") ? "#4d6bfe"
+    : (p === "cursor" || p === "cursor-agent") ? "#d946ef"
     : "#9aa4b2";
   document.documentElement.style.setProperty("--accent", accent);
 }

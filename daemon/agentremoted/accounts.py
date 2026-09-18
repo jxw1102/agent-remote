@@ -499,7 +499,7 @@ _JAIL_RO_BINDS = (
     "/etc", "/dev", "/proc", "/sys", "/run", "/var/run",
 )
 _JAIL_HOME_BINDS = (
-    ".claude", ".grok", ".codex", ".npm", ".local", ".config",
+    ".claude", ".grok", ".codex", ".cursor", ".npm", ".local", ".config",
 )
 
 

@@ -19,7 +19,7 @@ get_messages) never filter, so a link to any session still resolves.
             blocks}]} | None
 
 Runner — how one turn is executed as a subprocess (used by jobs.JobManager):
-    name                                  "claude" | "grok" | "codex" | "deepseek"
+    name                                  "claude" | "grok" | "codex" | "deepseek" | "cursor"
     capabilities() -> dict                feature flags for /api/ping
     auth_health() -> dict                 optional CLI/login snapshot for /api/ping
     slash_commands() -> [str]             commands offered to the app
@@ -83,13 +83,16 @@ def build_one(config, name: str):
         host = DshHost(config)
         store = DeepseekStore(config, host=host)
         runner = DeepseekRunner(config, host=host)
+    elif name in ("cursor", "cursor-agent", "cursoragent"):
+        from .cursor import CursorRunner, CursorStore
+        store, runner = CursorStore(config.cursor_home_path, config), CursorRunner(config)
     if store is not None:
         titler = getattr(runner, "title_for", None)
         if callable(titler):
             store.titler = titler
         return store, runner
     raise ValueError(
-        "unknown provider %r (expected 'claude', 'grok', 'codex', or 'deepseek')"
+        "unknown provider %r (expected 'claude', 'grok', 'codex', 'deepseek', or 'cursor')"
         % name)
 
 

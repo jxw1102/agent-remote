@@ -1,7 +1,7 @@
 {
   "bind": "0.0.0.0",
   "port": 8473,
-  "providers": ["claude", "grok", "codex", "deepseek"],
+  "providers": ["claude", "grok", "codex", "deepseek", "cursor"],
 
   "claude_bin": "claude",
   "permission_mode": "bypassPermissions",
@@ -24,6 +24,12 @@
   "dsh_home": "~/.dsh",
   "dsh_bin": "dsh",
   "dsh_manage": true,
+
+  "cursor_bin": "cursor-agent",
+  "cursor_home": "~/.cursor",
+  "cursor_prompt_flags": "--force --trust",
+  "cursor_tui_flags": "--force --trust --approve-mcps",
+  "cursor_env": {},
 
   "turn_timeout": 1800
 }

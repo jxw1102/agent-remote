@@ -127,9 +127,14 @@ def main():
     with urllib.request.urlopen(base + "/api/ping", timeout=5) as resp:
         ping = json.loads(resp.read().decode())
     check("ping advertises share", ping.get("share") is True, ping)
-    check("version is 2.7+",
-          str(ping.get("version") or "").startswith("2.7")
-          or str(ping.get("version") or "") >= "2.7",
+    def _vtuple(v):
+        # Numeric compare: "2.10.0" is newer than "2.7", not older.
+        out = []
+        for part in str(v or "").split("."):
+            digits = "".join(ch for ch in part if ch.isdigit())
+            out.append(int(digits) if digits else 0)
+        return tuple(out)
+    check("version is 2.7+", _vtuple(ping.get("version")) >= (2, 7),
           ping.get("version"))
 
     print("mint requires daemon token:")

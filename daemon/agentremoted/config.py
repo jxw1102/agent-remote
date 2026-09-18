@@ -5,7 +5,7 @@ Everything lives under ~/.agentremoted/ (override with AGENTREMOTED_HOME):
     token        — shared secret clients must present (auto-generated)
     daemon.log   — log file when running under launchd/systemd
 
-Recommended config uses ``"providers": ["claude", "grok", "codex"]`` (one
+Recommended config uses ``"providers": ["claude", "grok", "codex", "cursor"]`` (one
 process, every harness). A lone ``"provider"`` string still works as a
 fallback when ``providers`` is empty.
 """
@@ -222,6 +222,18 @@ DEFAULTS = {
     "dsh_home": str(Path.home() / ".dsh"),
     "dsh_bin": "dsh",
     "dsh_manage": True,
+
+    # ---- cursor agent (cursor-agent CLI) --------------------------------
+    "cursor_home": str(Path.home() / ".cursor"),
+    "cursor_bin": "cursor-agent",
+    # Extra flags for every headless turn (whitespace-split).
+    # Default --force --trust: phone turns cannot answer CLI prompts.
+    "cursor_prompt_flags": "--force --trust",
+    # Detached interactive TUI flags. MCP approval must also be automatic:
+    # there may be no host terminal attached when servers initialize.
+    "cursor_tui_flags": "--force --trust --approve-mcps",
+    "cursor_default_cwd": "",
+    "cursor_env": {},
 }
 
 
@@ -249,6 +261,10 @@ class Config:
         return Path(self._data["codex_home"]).expanduser()
 
     @property
+    def cursor_home_path(self) -> Path:
+        return Path(self._data["cursor_home"]).expanduser()
+
+    @property
     def upload_path(self) -> Path:
         raw = str(self._data.get("upload_dir") or "").strip()
         return Path(raw).expanduser() if raw else CONFIG_DIR / "uploads"
@@ -273,11 +289,15 @@ class Config:
             out = []
             for item in raw:
                 name = str(item or "").strip().lower()
+                if name in ("cursor-agent", "cursoragent"):
+                    name = "cursor"
                 if name and name not in out:
                     out.append(name)
             if out:
                 return out
         name = str(self._data.get("provider") or "claude").strip().lower() or "claude"
+        if name in ("cursor-agent", "cursoragent"):
+            name = "cursor"
         return [name]
 
     def multi_mode(self) -> bool:
