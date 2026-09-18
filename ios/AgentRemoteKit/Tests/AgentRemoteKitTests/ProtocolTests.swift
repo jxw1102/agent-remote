@@ -205,6 +205,7 @@ final class ProtocolTests: XCTestCase {
         let usage = try decoder().decode(UsageResponse.self, from: Data(json.utf8))
         XCTAssertTrue(usage.ok)
         XCTAssertEqual(usage.buckets?.first?.percent, 3)
+        XCTAssertTrue(usage.buckets?.first?.showBar ?? false, "show_bar absent means a bar is drawn")
     }
 
     func testDecodeErrorBody() throws {

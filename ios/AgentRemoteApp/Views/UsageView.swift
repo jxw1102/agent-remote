@@ -204,15 +204,20 @@ private struct UsageBucketRow: View {
             HStack {
                 Text(bucket.title).font(.subheadline.weight(.medium))
                 Spacer()
-                Text("\(bucket.percent)%").font(.subheadline.weight(.semibold)).foregroundStyle(tint)
-            }
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.secondary.opacity(0.15))
-                    Capsule().fill(tint).frame(width: max(3, geo.size.width * min(1, Double(bucket.percent) / 100)))
+                if bucket.showBar {
+                    Text("\(bucket.percent)%").font(.subheadline.weight(.semibold)).foregroundStyle(tint)
                 }
             }
-            .frame(height: 5)
+            // Spend-only rows (show_bar false) carry their amount in resetsText; no bar.
+            if bucket.showBar {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.secondary.opacity(0.15))
+                        Capsule().fill(tint).frame(width: max(3, geo.size.width * min(1, Double(bucket.percent) / 100)))
+                    }
+                }
+                .frame(height: 5)
+            }
             Text(bucket.resetsText).font(.caption).foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)

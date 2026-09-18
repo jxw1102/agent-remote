@@ -8,6 +8,9 @@ public struct UsageBucket: Codable, Sendable, Equatable, Identifiable {
     public let percent: Int
     public let resetsText: String
     public let severity: String
+    /// false = spend-only row (Cursor Enterprise reports dollars, not a share of a limit):
+    /// there is no percentage to draw, so the row shows no bar. Absent means true.
+    public let showBar: Bool
 
     public var id: String { title }
 
@@ -17,9 +20,10 @@ public struct UsageBucket: Codable, Sendable, Equatable, Identifiable {
         percent = try c.decodeIfPresent(Int.self, forKey: .percent) ?? 0
         resetsText = try c.decodeIfPresent(String.self, forKey: .resetsText) ?? ""
         severity = try c.decodeIfPresent(String.self, forKey: .severity) ?? "normal"
+        showBar = try c.decodeIfPresent(Bool.self, forKey: .showBar) ?? true
     }
 
-    private enum CodingKeys: String, CodingKey { case title, percent, resetsText, severity }
+    private enum CodingKeys: String, CodingKey { case title, percent, resetsText, severity, showBar }
 }
 
 /// One harness's usage on a multi daemon (`sections` array), stamped with the account so two
