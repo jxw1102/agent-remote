@@ -16,6 +16,8 @@ const PROVIDERS = {
   codex: { label: "Codex", accent: "#10a37f", heading: "#3dd68c", inline: "#6ee7b7" },
   deepseek: { label: "DeepSeek", accent: "#4d6bfe", heading: "#7b93ff", inline: "#93a8ff" },
   dsh: { label: "DeepSeek", accent: "#4d6bfe", heading: "#7b93ff", inline: "#93a8ff" },
+  cursor: { label: "Cursor", accent: "#d946ef", heading: "#e879f9", inline: "#f0abfc" },
+  "cursor-agent": { label: "Cursor", accent: "#d946ef", heading: "#e879f9", inline: "#f0abfc" },
 };
 const NEUTRAL = { label: "Agent", accent: "#9aa4b2", heading: "#9aa4b2", inline: "#9aa4b2" };
 // Multi-harness host chrome (one profile, Claude+Grok+Codex) — purple, not gray.
@@ -3680,7 +3682,7 @@ function normalizeProfile(p) {
   let url = String(p.baseUrl || "").trim().replace(/\/+$/, "");
   if (url && !/^https?:\/\//i.test(url)) url = "http://" + url;
   // Strip accidental /claude|/grok|/codex suffixes — multi lives at the root.
-  url = url.replace(/\/(claude|grok|codex|deepseek|dsh)$/i, "");
+  url = url.replace(/\/(claude|grok|codex|deepseek|dsh|cursor|cursor-agent)$/i, "");
   return {
     id: p.id || uuid(),
     name: p.name || url.replace(/^https?:\/\//, ""),
@@ -4694,15 +4696,21 @@ function appendUsageBuckets(body, buckets, accent) {
   (buckets || []).forEach((b) => {
     const item = el("div", "usage-item");
     if (accent) item.style.setProperty("--tag", accent);
+    // A spend-only bucket (Cursor Enterprise: dollars, no limit) has no
+    // percentage to draw; the daemon says so with show_bar=false and the
+    // resets line carries the amount. Absent means true.
+    const showBar = b.show_bar !== false;
     const top = el("div", "usage-top");
     top.appendChild(el("span", null, b.title || ""));
-    top.appendChild(el("span", null, `${b.percent || 0}%`));
+    if (showBar) top.appendChild(el("span", null, `${b.percent || 0}%`));
     item.appendChild(top);
-    const bar = el("div", `bar ${b.severity || "normal"}`);
-    const fill = el("span");
-    fill.style.width = Math.min(100, Math.max(0, b.percent || 0)) + "%";
-    bar.appendChild(fill);
-    item.appendChild(bar);
+    if (showBar) {
+      const bar = el("div", `bar ${b.severity || "normal"}`);
+      const fill = el("span");
+      fill.style.width = Math.min(100, Math.max(0, b.percent || 0)) + "%";
+      bar.appendChild(fill);
+      item.appendChild(bar);
+    }
     if (b.resets_text) {
       const foot = el("div", "usage-foot");
       foot.appendChild(el("span", null, b.resets_text));

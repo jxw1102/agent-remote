@@ -110,6 +110,7 @@ function applyAccent(provider) {
     : p === "claude" ? "#d97757"
     : p === "codex" ? "#10a37f"
     : (p === "deepseek" || p === "dsh") ? "#4d6bfe"
+    : (p === "cursor" || p === "cursor-agent") ? "#d946ef"
     : "#9aa4b2";
   document.documentElement.style.setProperty("--accent", accent);
 }
