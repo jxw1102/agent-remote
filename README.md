@@ -18,7 +18,7 @@
   <img src="docs/cover.jpg" alt="Agent Remote — control your AI sessions from anywhere" width="100%">
 </p>
 
-Start, watch, and steer Claude Code, Grok, Codex, DeepSeek, and Cursor Agent from your
+Start, watch, and steer Claude Code, Grok, Codex, DeepSeek, Cursor Agent, and GitHub Copilot from your
 phone or browser — even when you are away from the desk. A small daemon on your Mac or
 VPS talks to the CLIs you already use. Clients merge every host into **one
 list**.
@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.s
 It prints a **Base URL** and **token**. On macOS it installs a launchd service;
 on Linux, a user systemd unit.
 
-**Or hand this to your coding agent.** Paste into Claude, Codex, Grok, or Cursor
+**Or hand this to your coding agent.** Paste into Claude, Codex, Grok, Cursor, or Copilot
 (no clone needed):
 
 ```text
@@ -60,7 +60,6 @@ Brief: [docs/AGENT_INSTALL.md](https://github.com/jxw1102/agent-remote/blob/main
 
 - **Web (easiest):** [hosted client](https://nice-dune-0415af003.7.azurestaticapps.net/) → **Add a daemon**. It talks only to **your** machines.
 - **Android / iOS / BlackBerry 10:** install from [Releases](https://github.com/jxw1102/agent-remote/releases), then add the same URL + token.
-- **Pebble Time 2:** build [`pebble/`](pebble/) and paste the same URL + token in the official Pebble app settings.
 
 Same Wi‑Fi: use `http://<laptop-lan-ip>:8473`. For a phone off your network, use a tunnel (next).
 
@@ -149,7 +148,6 @@ CLI bills the **API key** — unset the key to stay on Max. Full notes:
 | iOS | [`ios/`](ios/) | SwiftUI app for iPhone + iPad |
 | BlackBerry 10 | [`blackberry/`](blackberry/) | Cascades app for BB10 devices |
 | LILYGO T-LoRa Pager | [`esp32/`](esp32/) | Small-screen, keyboard-driven remote |
-| Pebble Time 2 | [`pebble/`](pebble/) | Native emery watchapp; voice + buttons |
 
 ## Why Agent Remote?
 
@@ -157,7 +155,7 @@ CLI bills the **API key** — unset the key to stay on Max. Full notes:
 - **Keeps subscription economics** — runs official CLIs; Pro/Max and ChatGPT logins stay on the host (API keys work too).
 - **Agent-aware remote** — permissions, AskUserQuestion, queue, stop, live TUI, rewind — not a dumb terminal proxy.
 - **Ultra-light daemon** — Python standard library only; launchd / systemd / one-shot install.
-- **Unusual clients** — BlackBerry 10 Cascades, Pebble Time 2, and LILYGO T-LoRa Pager alongside web, Android, and iOS.
+- **Unusual clients** — BlackBerry 10 Cascades and LILYGO T-LoRa Pager alongside web, Android, and iOS.
 
 ```text
   Phone / web / BB10 / pager
@@ -182,6 +180,11 @@ CLI bills the **API key** — unset the key to stay on Max. Full notes:
   hosted by the daemon (`/share/<token>`). LILYGO does not generate links.
 - Permission Allow/Deny and `AskUserQuestion` where the harness supports them
 - Attachments, slash commands, host→device file drop, session rewind
+- Live TUI: the host terminal itself. The web client forwards a real
+  keyboard — Shift+Tab, Ctrl+O, Alt chords, F-keys — at the focused pane,
+  while the text field below it stays an ordinary input so a system IME can
+  compose there (daemon ≥ 2.13.0). Touch clients send the soft-key row and
+  typed lines; the pager shows the pane read-only.
 - Interactive and headless execution modes
 
 ## Security

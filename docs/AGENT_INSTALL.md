@@ -1,6 +1,6 @@
 # Agent install brief — Agent Remote daemon
 
-**Give this brief to your coding agent** (Claude Code, Codex, Grok, Cursor, …).
+**Give this brief to your coding agent** (Claude Code, Codex, Grok, Cursor, Copilot, …).
 The human does **not** have a clone of this repo. Fetch this file from:
 
 https://raw.githubusercontent.com/jxw1102/agent-remote/main/docs/AGENT_INSTALL.md
@@ -13,7 +13,7 @@ Instruction they were told to paste:
 
 ## Goal
 
-Install **agentremoted** (the Agent Remote daemon) so this computer’s AI coding CLI sessions (Claude Code, Grok, Codex, DeepSeek, Cursor Agent) can be controlled from a phone, browser, BlackBerry 10, or ESP32 pager.
+Install **agentremoted** (the Agent Remote daemon) so this computer’s AI coding CLI sessions (Claude Code, Grok, Codex, DeepSeek, Cursor Agent, GitHub Copilot) can be controlled from a phone, browser, BlackBerry 10, or ESP32 pager.
 
 The daemon does **not** sell LLM tokens. It runs the host’s existing CLIs. The human must already be able to run `claude`, `grok`, `codex`, `cursor-agent`, and/or `dsh` (DeepSeek) interactively on this machine (subscription login **or** API key).
 
