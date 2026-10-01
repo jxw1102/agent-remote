@@ -68,7 +68,7 @@ import time
 import uuid
 
 from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
-from ..live_tui import idle_eviction_victim
+from ..live_tui import TUI_COLS, TUI_ROWS, idle_eviction_victim
 
 log = logging.getLogger(__name__)
 
@@ -694,7 +694,8 @@ class InteractiveManager:
             before_mtime = time.time()
         try:
             r = self._tmux("new-session", "-d", "-s", tui.name,
-                           "-x", "220", "-y", "50", "-c", launch_cwd, shell_cmd)
+                           "-x", str(TUI_COLS), "-y", str(TUI_ROWS),
+                           "-c", launch_cwd, shell_cmd)
         except OSError as e:
             return "tmux not available: %s" % e
         except subprocess.TimeoutExpired:

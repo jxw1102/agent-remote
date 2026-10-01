@@ -99,11 +99,13 @@ else:
         providers.append("codex")
     if has_bin("cursor-agent", "~/.local/bin/cursor-agent"):
         providers.append("cursor")
+    if has_bin("copilot", "~/.local/bin/copilot"):
+        providers.append("copilot")
     if has_bin("dsh", "/opt/homebrew/bin/dsh", "~/.local/bin/dsh"):
         providers.append("deepseek")
     if not providers:
-        providers = ["claude", "grok", "codex", "deepseek", "cursor"]
-        print("warn: no claude/grok/codex/dsh/cursor-agent on PATH; wrote all five — install a CLI and restart")
+        providers = ["claude", "grok", "codex", "deepseek", "cursor", "copilot"]
+        print("warn: no claude/grok/codex/dsh/cursor-agent/copilot on PATH; wrote all six — install a CLI and restart")
 
 cfg = {}
 path = home / "config.json"

@@ -82,8 +82,10 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -98,6 +100,7 @@ from . import focus as focus_store
 from . import shares as share_store
 from . import ssestream
 from . import wstream
+from .live_tui import TUI_COLS, TUI_ROWS
 
 log = logging.getLogger(__name__)
 
@@ -127,7 +130,8 @@ _FOCUS_DONE = re.compile(r"^/api/focus/([^/]+)/done$")
 _FOCUS_RESTORE = re.compile(r"^/api/focus/([^/]+)/restore$")
 _FOCUS_SEEN = re.compile(r"^/api/focus/([^/]+)/seen$")
 _CHUNK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-_MAX_CHUNKS = 512
+# 256 MB in the 512 KB chunks every client uses, with room for smaller ones.
+_MAX_CHUNKS = 2048
 _MAX_CHUNK_BYTES = 2 * 1024 * 1024
 _PARTIAL_TTL_S = 2 * 3600
 _UPLOAD_LOCKS_GUARD = threading.Lock()
@@ -181,6 +185,36 @@ def _header_filename(name: str) -> str:
         return name
     except UnicodeEncodeError:
         return quote(name, safe="")
+
+
+_DROP_PIECE = 256 * 1024
+
+
+def _parse_byte_range(header, size):
+    """One ``bytes=`` range -> (start, end) inclusive, None to send the whole
+    body (absent, malformed, or multi-range, which no client asks for), or
+    "unsatisfiable" for a start at/after the end of the file."""
+    if not header:
+        return None
+    m = re.match(r"^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$", header)
+    if not m:
+        return None
+    a, b = m.group(1), m.group(2)
+    if a == "" and b == "":
+        return None
+    if a == "":
+        # Suffix range: the last N bytes.
+        n = int(b)
+        if n <= 0:
+            return "unsatisfiable"
+        return (max(0, size - n), size - 1)
+    start = int(a)
+    if start >= size:
+        return "unsatisfiable"
+    end = size - 1 if b == "" else min(int(b), size - 1)
+    if end < start:
+        return None
+    return (start, end)
 
 
 def _content_disposition(filename: str) -> str:
@@ -1034,6 +1068,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             if name in ("cursor", "cursor-agent", "cursoragent"):
                 from .providers.cursor import CursorStore
                 return CursorStore(root / ".cursor", self.config)
+            if name in ("copilot", "github-copilot", "gh-copilot"):
+                from .providers.copilot import CopilotStore
+                return CopilotStore(root / ".copilot", self.config)
         except Exception:
             log.exception("guest store for %s failed", name)
         return None
@@ -1699,13 +1736,35 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self.config.drop_path
         return p.drop_path()
 
+    def _stamp_tui_caps(self, payload: dict) -> None:
+        """Advertise the Live TUI key vocabulary and the host pane width.
+
+        `tui_keys` is a version, not a boolean: 1 is the original fixed list
+        (Esc/Enter/Tab/arrows/Ctrl+letter), 2 adds modifier-composed names —
+        Shift+Tab, Alt/Option combos, Shift+Enter, F1-F12, Ctrl+symbol. A
+        client that wants to bind a whole keyboard checks this instead of
+        guessing from the version string.
+        """
+        payload["tui_keys"] = 2
+        payload["tui_cols"] = TUI_COLS
+        payload["tui_rows"] = TUI_ROWS
+        caps = payload.get("caps")
+        if isinstance(caps, dict):
+            caps = dict(caps)
+            caps["tui_keys"] = 2
+            payload["caps"] = caps
+
     def _stamp_upload_caps(self, payload: dict) -> None:
         """Advertise chunked uploads so clients split large files under the
         Cloudflare ~100s HTTP timeout (an 11 MB pcap from a slow link used
         to die as a generic browser 'Network error during upload')."""
-        mb = int(getattr(self.config, "max_upload_mb", 16) or 16)
+        mb = int(getattr(self.config, "max_upload_mb", 256) or 256)
         payload["chunked_upload"] = True
         payload["max_upload_mb"] = mb
+        # Drop downloads stream and resume with Range (2.14.2); 0 = no cap.
+        payload["drop_range"] = True
+        drop_cap = self._drop_cap_bytes()
+        payload["max_drop_mb"] = drop_cap // (1024 * 1024) if drop_cap else 0
         caps = payload.get("caps")
         if isinstance(caps, dict):
             caps = dict(caps)
@@ -1926,6 +1985,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 payload["focus"] = self.focus is not None
                 payload["focus_states"] = list(focus_store.STATES)
                 payload["share"] = self.shares is not None
+                self._stamp_tui_caps(payload)
                 self._stamp_upload_caps(payload)
                 self._send_json(payload)
                 return
@@ -1975,6 +2035,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             payload["focus"] = self.focus is not None
             payload["focus_states"] = list(focus_store.STATES)
             payload["share"] = self.shares is not None
+            self._stamp_tui_caps(payload)
             self._stamp_upload_caps(payload)
             self._send_json(payload)
             return
@@ -3189,7 +3250,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         return name
 
     def _upload_max_bytes(self) -> int:
-        return int(getattr(self.config, "max_upload_mb", 16) or 16) * 1024 * 1024
+        return int(getattr(self.config, "max_upload_mb", 256) or 256) * 1024 * 1024
 
     def _read_upload_body(self, length: int, max_bytes: int):
         """Read the request body. Returns (bytes, err_status, err_message)."""
@@ -3258,6 +3319,26 @@ class ApiHandler(BaseHTTPRequestHandler):
             raise
         return dest
 
+    def _commit_upload_parts(self, upload_dir, name: str, parts):
+        """Like _commit_upload, but copies chunk files straight to disk."""
+        from pathlib import Path
+        upload_dir = Path(upload_dir)
+        dest = upload_dir / ("%s-%s" % (uuid.uuid4().hex[:8], name))
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        try:
+            with open(tmp, "wb") as out:
+                for p in parts:
+                    with open(p, "rb") as src:
+                        shutil.copyfileobj(src, out, 1024 * 1024)
+            os.replace(str(tmp), str(dest))
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        return dest
+
     def _handle_chunked_attachment(self, query, name: str, data: bytes,
                                    max_bytes: int):
         """Assemble POST /api/attachments?upload_id=&index=&total= chunks."""
@@ -3308,24 +3389,22 @@ class ApiHandler(BaseHTTPRequestHandler):
                         })
                         return
                     present.append(p)
-                size = 0
-                for p in present:
-                    size += p.stat().st_size
-                    if size > max_bytes:
-                        shutil.rmtree(str(partial), ignore_errors=True)
-                        self._error(413, "attachment too large (max %d MB)"
-                                    % (max_bytes // (1024 * 1024)))
-                        return
-                blob = bytearray()
-                for p in present:
-                    blob.extend(p.read_bytes())
-                dest = self._commit_upload(Path(upload_dir), name, bytes(blob))
+                size = sum(p.stat().st_size for p in present)
+                if size > max_bytes:
+                    shutil.rmtree(str(partial), ignore_errors=True)
+                    self._error(413, "attachment too large (max %d MB)"
+                                % (max_bytes // (1024 * 1024)))
+                    return
+                # Stream the parts into place. Joining them in memory first
+                # meant a large upload needed its whole size in RAM at once,
+                # which a 1 GB VPS cannot spare for a 200 MB file.
+                dest = self._commit_upload_parts(Path(upload_dir), name, present)
                 shutil.rmtree(str(partial), ignore_errors=True)
             except OSError as e:
                 self._error(500, "could not store attachment: %s" % e)
                 return
         self._send_json({"ok": True, "complete": True,
-                         "path": str(dest), "size": len(blob)},
+                         "path": str(dest), "size": size},
                         status=201)
 
     def _handle_attachment(self, query):
@@ -3460,7 +3539,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                             zf.write(real, os.path.join(folder.name, rel))
                         except OSError:
                             continue
-                        if os.path.getsize(tmp) > max_bytes:
+                        if max_bytes and os.path.getsize(tmp) > max_bytes:
                             return None, ("folder too large once zipped "
                                           "(max %d MB)"
                                           % (max_bytes // (1024 * 1024)))
@@ -3517,19 +3596,36 @@ class ApiHandler(BaseHTTPRequestHandler):
             "files": files,
         })
 
+    def _drop_cap_bytes(self):
+        """Per-file drop cap in bytes, or None when unlimited (the default)."""
+        try:
+            mb = int(getattr(self.config, "max_drop_mb", 0) or 0)
+        except (TypeError, ValueError):
+            mb = 0
+        return mb * 1024 * 1024 if mb > 0 else None
+
     def _handle_drop_download(self, raw_name):
         """Stream one drop entry as raw bytes to the phone.
 
+        The body goes out in 256 KB pieces with a Content-Length, never read
+        whole, so a multi-GB file costs the daemon no RAM. A FILE also honours
+        a single ``Range: bytes=N-`` (or N-M) with 206, guarded by an ETag
+        through ``If-Range``, so a client that lost the link mid-transfer
+        resumes instead of starting over.
+
         A folder is zipped to a temp file first (outside the drop folder) and
         the archive is deleted as soon as it is on the wire, so staging a
-        folder never leaves a second copy on the host.
+        folder never leaves a second copy on the host. A zip is rebuilt per
+        request and so is not resumable (Accept-Ranges: none).
         """
         path, err = self._resolve_drop_entry(raw_name)
         if path is None:
             status = 404 if err == "file not found" else 400
             self._error(status, err)
             return
-        max_bytes = int(getattr(self.config, "max_drop_mb", 64) or 64) * 1024 * 1024
+        max_bytes = self._drop_cap_bytes()
+        too_large = ("file too large (max %d MB)"
+                     % (max_bytes // (1024 * 1024))) if max_bytes else ""
         tmp_zip = None
         out_name = path.name
         if path.is_dir():
@@ -3546,45 +3642,89 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             read_from = tmp_zip if tmp_zip else str(path)
             try:
-                size = os.path.getsize(read_from)
-            except OSError as e:
-                self._error(500, "stat failed: %s" % e)
-                return
-            if size > max_bytes:
-                self._error(413, "file too large (max %d MB)"
-                            % (max_bytes // (1024 * 1024)))
-                return
-            try:
-                # Read fully: BB10's QNAM is happier with Content-Length + one
-                # write than chunked transfer of an unknown length.
-                with open(read_from, "rb") as fh:
-                    data = fh.read()
+                fh = open(read_from, "rb")
             except OSError as e:
                 self._error(500, "read failed: %s" % e)
                 return
+            with fh:
+                st = os.fstat(fh.fileno())
+                size = int(st.st_size)
+                if max_bytes and size > max_bytes:
+                    self._error(413, too_large)
+                    return
+                etag = '"%x-%x"' % (size, int(st.st_mtime_ns))
+                start, end = 0, size - 1
+                partial = False
+                if not tmp_zip:
+                    rng = _parse_byte_range(self.headers.get("Range"), size)
+                    if_range = (self.headers.get("If-Range") or "").strip()
+                    if if_range and if_range != etag:
+                        rng = None   # the file changed: send it whole
+                    if rng == "unsatisfiable":
+                        self.send_response(416)
+                        self.send_header("Content-Range", "bytes */%d" % size)
+                        self.send_header("Content-Length", "0")
+                        self._cors_headers()
+                        self.end_headers()
+                        return
+                    if rng:
+                        start, end = rng
+                        partial = True
+                length = max(0, end - start + 1)
+                # Content-Disposition: ASCII fallback + RFC 5987 filename*
+                # (CJK). X-Drop-Name is percent-encoded UTF-8 when it is not
+                # ASCII — send_header is latin-1, so a raw Chinese name 500s
+                # the transfer.
+                self.send_response(206 if partial else 200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(length))
+                if partial:
+                    self.send_header("Content-Range",
+                                     "bytes %d-%d/%d" % (start, end, size))
+                self.send_header("Accept-Ranges", "none" if tmp_zip else "bytes")
+                if not tmp_zip:
+                    self.send_header("ETag", etag)
+                self.send_header("Content-Disposition",
+                                 _content_disposition(out_name))
+                self.send_header("Cache-Control", "no-store")
+                # out_name, not path.name: a folder arrives as <folder>.zip
+                # and the client saves it under the name it actually got.
+                self.send_header("X-Drop-Name", _header_filename(out_name))
+                # The WHOLE entry's size, also on a 206.
+                self.send_header("X-Drop-Size", str(size))
+                # Browser client downloads these cross-origin.
+                self.send_header(
+                    "Access-Control-Expose-Headers",
+                    "X-Drop-Name, X-Drop-Size, Content-Range, Accept-Ranges, "
+                    "ETag, Content-Length")
+                self._cors_headers()
+                self.end_headers()
+                if self.command == "HEAD":
+                    return
+                fh.seek(start)
+                remaining = length
+                try:
+                    while remaining > 0:
+                        piece = fh.read(min(_DROP_PIECE, remaining))
+                        if not piece:
+                            break
+                        self.wfile.write(piece)
+                        remaining -= len(piece)
+                except (BrokenPipeError, ConnectionResetError, ssl.SSLError,
+                        socket.timeout, OSError):
+                    # The phone dropped the link; it resumes with Range.
+                    self.close_connection = True
+                    return
+                if remaining:
+                    # File shrank under us: the promised length is a lie now,
+                    # so close rather than leave the client waiting.
+                    self.close_connection = True
         finally:
             if tmp_zip:
                 try:
                     os.unlink(tmp_zip)
                 except OSError:
                     pass
-        # Content-Disposition: ASCII fallback + RFC 5987 filename* (CJK).
-        # X-Drop-Name is percent-encoded UTF-8 when it is not ASCII —
-        # send_header is latin-1, so a raw Chinese name 500s the transfer.
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Content-Disposition", _content_disposition(out_name))
-        self.send_header("Cache-Control", "no-store")
-        # out_name, not path.name: a folder arrives as <folder>.zip and the
-        # client saves it under the name it actually got.
-        self.send_header("X-Drop-Name", _header_filename(out_name))
-        self.send_header("X-Drop-Size", str(len(data)))
-        # Browser client downloads these cross-origin.
-        self.send_header("Access-Control-Expose-Headers", "X-Drop-Name, X-Drop-Size")
-        self._cors_headers()
-        self.end_headers()
-        self.wfile.write(data)
 
     def _handle_drop_delete(self, raw_name):
         """Remove one staged file or folder from the drop dir.
@@ -3685,6 +3825,67 @@ def _share_missing_html() -> bytes:
     ).encode("utf-8")
 
 
+class _HttpServer(ThreadingHTTPServer):
+    """HTTPS whose handshake cannot wedge the accept loop.
+
+    The obvious way to serve TLS from socketserver is to wrap the LISTENING
+    socket (``server.socket = ctx.wrap_socket(server.socket)``). Then every
+    ``accept()`` performs the handshake inside ``serve_forever``'s own
+    thread, with no timeout — so one client that connects and then says
+    nothing holds that thread forever, and with it every other connection:
+    the listen queue fills and the daemon goes dark while systemd still
+    reports it active and the process still answers nothing.
+
+    That is how the public host died on 2026-09-23. A port scanner opened a
+    connection at 07:26, never finished its ClientHello, and three hours
+    later py-spy found MainThread parked in ``ssl.do_handshake`` under
+    ``get_request`` with six connections queued behind it.
+
+    So the listening socket stays plain: accept it, wrap the CONNECTION with
+    the handshake deferred, and let the per-connection worker thread do the
+    handshake under a timeout. A stalled peer now costs one worker thread
+    for `handshake_timeout` seconds and nothing else.
+    """
+
+    #: Set by make_server when tls_cert / tls_key are configured.
+    ssl_context = None
+    #: A peer that cannot finish a handshake in this long is not a client.
+    handshake_timeout = 15.0
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        if self.ssl_context is None:
+            return sock, addr
+        sock.settimeout(self.handshake_timeout)
+        # do_handshake_on_connect=False: no TLS work happens on this thread.
+        return self.ssl_context.wrap_socket(
+            sock, server_side=True, do_handshake_on_connect=False), addr
+
+    def finish_request(self, request, client_address):
+        if self.ssl_context is not None:
+            try:
+                request.do_handshake()
+            except (OSError, ssl.SSLError):
+                # Scanner, health probe, or a phone that lost signal
+                # mid-handshake. shutdown_request still closes it.
+                return
+            request.settimeout(None)   # reads block as before, in this thread
+        self.RequestHandlerClass(request, client_address, self)
+
+    def handle_error(self, request, client_address):
+        """A dropped connection is weather, not a bug.
+
+        An internet-facing host collects these constantly (the journal was
+        mostly ConnectionResetError tracebacks from Cloudflare retries), and
+        a stack trace per reset buries anything real.
+        """
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ssl.SSLError, ConnectionError, socket.timeout)):
+            log.debug("connection from %s dropped: %s", client_address, exc)
+            return
+        ThreadingHTTPServer.handle_error(self, request, client_address)
+
+
 def make_server(config, token, bundles) -> ThreadingHTTPServer:
     """bundles: OrderedDict name → ProviderBundle (at least one)."""
     bundles = bundles or {}
@@ -3704,7 +3905,7 @@ def make_server(config, token, bundles) -> ThreadingHTTPServer:
         "focus": focus_store.Focus(),
         "shares": share_store.ShareStore(),
     })
-    server = ThreadingHTTPServer((config.bind, int(config.port)), handler)
+    server = _HttpServer((config.bind, int(config.port)), handler)
     cert = str(getattr(config, "tls_cert", "") or "")
     key = str(getattr(config, "tls_key", "") or "")
     if cert and key:
@@ -3713,5 +3914,7 @@ def make_server(config, token, bundles) -> ThreadingHTTPServer:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(certfile=cert, keyfile=key)
-        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        # Handed to the server, NOT wrapped around the listening socket —
+        # see _HttpServer for why that distinction is the whole point.
+        server.ssl_context = ctx
     return server

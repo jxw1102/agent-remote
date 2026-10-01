@@ -1,4 +1,4 @@
-"""Entry point: python3 -m agentremoted [--provider claude|grok|codex|deepseek|cursor]"""
+"""Entry point: python3 -m agentremoted [--provider claude|grok|codex|deepseek|cursor|copilot]"""
 
 import argparse
 import logging
@@ -16,10 +16,10 @@ def main():
     parser = argparse.ArgumentParser(
         prog="agentremoted",
         description="Serve AI agent CLI sessions (Claude Code, Grok Build, "
-                    "Codex, DeepSeek Harness, Cursor Agent) to Agent Remote clients.",
+                    "Codex, DeepSeek Harness, Cursor Agent, GitHub Copilot) to Agent Remote clients.",
     )
     parser.add_argument("--provider",
-                        choices=("claude", "grok", "codex", "deepseek", "cursor"),
+                        choices=("claude", "grok", "codex", "deepseek", "cursor", "copilot"),
                         help="force single-provider mode (overrides config)")
     parser.add_argument("--port", type=int, help="override listen port")
     parser.add_argument("--bind", help="override bind address")
@@ -86,6 +86,8 @@ def main():
             log.info("codex home: %s (scaffold)", config.codex_home_path)
         elif runner.name == "cursor":
             log.info("cursor home: %s", config.cursor_home_path)
+        elif runner.name == "copilot":
+            log.info("copilot home: %s", config.copilot_home_path)
     log.info("auth token in %s (or run: python3 -m agentremoted --print-token)",
              CONFIG_DIR / "token")
     try:

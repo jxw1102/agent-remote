@@ -36,7 +36,7 @@ import uuid
 from pathlib import Path
 
 from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
-from ..live_tui import idle_eviction_victim
+from ..live_tui import TUI_COLS, TUI_ROWS, idle_eviction_victim
 from ..render_blocks import markdown_to_blocks
 from .codex import (
     _event_chat_message,
@@ -274,7 +274,8 @@ class CodexInteractiveManager:
         ensure_tmux_server(self._tmux_bin)   # see config.ensure_tmux_server
         try:
             r = self._tmux("new-session", "-d", "-s", tui.name,
-                           "-x", "220", "-y", "50", "-c", launch_cwd, shell_cmd)
+                           "-x", str(TUI_COLS), "-y", str(TUI_ROWS),
+                           "-c", launch_cwd, shell_cmd)
         except OSError as e:
             return "tmux not available: %s" % e
         except subprocess.TimeoutExpired:

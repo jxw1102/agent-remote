@@ -171,12 +171,17 @@ DEFAULTS = {
     "max_finished_jobs": 50,
     # Where phone uploads land (POST /api/attachments). Empty -> home/uploads.
     "upload_dir": "",
-    # Cap (MB) on one uploaded attachment.
-    "max_upload_mb": 16,
+    # Cap (MB) on one uploaded attachment. Chunked uploads (512 KB POSTs,
+    # assembled on disk) make large files safe through a tunnel and on a small
+    # VPS, so the cap is about disk, not memory. Advertised on /api/ping.
+    "max_upload_mb": 256,
     # Host→phone drop folder. Empty -> ~/Public on macOS, else home/drop.
     "drop_dir": "",
-    # Cap (MB) on one file served from the drop folder.
-    "max_drop_mb": 64,
+    # Cap (MB) on one file served from the drop folder; 0 = no cap. Downloads
+    # stream from disk in small pieces and resume with HTTP Range, so size
+    # costs neither daemon nor phone RAM (the old 64 MB cap was a whole-file
+    # read on both ends).
+    "max_drop_mb": 0,
     # Extra slash commands offered to the app (merged with what the provider
     # discovers itself — claude also scans ~/.claude/commands/*.md).
     "slash_commands": [],
@@ -234,6 +239,15 @@ DEFAULTS = {
     "cursor_tui_flags": "--force --trust --approve-mcps",
     "cursor_default_cwd": "",
     "cursor_env": {},
+
+    # ---- github copilot (copilot CLI) -----------------------------------
+    "copilot_home": str(Path.home() / ".copilot"),
+    "copilot_bin": "copilot",
+    # Extra flags for every copilot launch, headless and TUI (whitespace-
+    # split). --allow-all-tools is always passed: the phone cannot answer a
+    # tool prompt. e.g. "--allow-all-paths" to lift path verification.
+    "copilot_flags": "",
+    "copilot_env": {},
 }
 
 
@@ -265,6 +279,10 @@ class Config:
         return Path(self._data["cursor_home"]).expanduser()
 
     @property
+    def copilot_home_path(self) -> Path:
+        return Path(self._data["copilot_home"]).expanduser()
+
+    @property
     def upload_path(self) -> Path:
         raw = str(self._data.get("upload_dir") or "").strip()
         return Path(raw).expanduser() if raw else CONFIG_DIR / "uploads"
@@ -291,6 +309,8 @@ class Config:
                 name = str(item or "").strip().lower()
                 if name in ("cursor-agent", "cursoragent"):
                     name = "cursor"
+                if name in ("github-copilot", "gh-copilot"):
+                    name = "copilot"
                 if name and name not in out:
                     out.append(name)
             if out:
@@ -298,6 +318,8 @@ class Config:
         name = str(self._data.get("provider") or "claude").strip().lower() or "claude"
         if name in ("cursor-agent", "cursoragent"):
             name = "cursor"
+        if name in ("github-copilot", "gh-copilot"):
+            name = "copilot"
         return [name]
 
     def multi_mode(self) -> bool:

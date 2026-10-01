@@ -10,17 +10,37 @@ import hashlib
 import re
 import time
 
-# Client key names (case-insensitive) → tmux send-keys tokens.
-_KEY_MAP = {
+# Pane geometry every interactive harness launches its tmux window with.
+#
+# 220 columns was "never wrap a long line", but nothing renders a 220-column
+# pane comfortably: the web pane reflowed it into soup and the box drawing
+# fell apart. 120 is the width a terminal agent is actually designed for,
+# and clients get it in the frame payload so they can size the pane exactly.
+TUI_COLS = 120
+TUI_ROWS = 50
+
+# Base key names (case-insensitive) → tmux send-keys tokens. Modifiers are
+# parsed separately, so this table holds bare keys only.
+_BASE_KEYS = {
     "escape": "Escape",
     "esc": "Escape",
     "enter": "Enter",
     "return": "Enter",
+    "cr": "Enter",
     "backspace": "BSpace",
+    "bspace": "BSpace",
     "bs": "BSpace",
     "delete": "DC",
     "del": "DC",
+    "dc": "DC",
+    "insert": "IC",
+    "ins": "IC",
+    "ic": "IC",
     "tab": "Tab",
+    "btab": "BTab",
+    "backtab": "BTab",
+    "space": "Space",
+    "spc": "Space",
     "up": "Up",
     "down": "Down",
     "left": "Left",
@@ -28,47 +48,92 @@ _KEY_MAP = {
     "home": "Home",
     "end": "End",
     "pageup": "PPage",
-    "pagedown": "NPage",
     "pgup": "PPage",
+    "ppage": "PPage",
+    "pagedown": "NPage",
     "pgdn": "NPage",
-    "ctrl+c": "C-c",
-    "c-c": "C-c",
-    "ctrl+d": "C-d",
-    "c-d": "C-d",
-    "ctrl+z": "C-z",
-    "c-z": "C-z",
-    "ctrl+a": "C-a",
-    "c-a": "C-a",
-    "ctrl+e": "C-e",
-    "c-e": "C-e",
-    "ctrl+u": "C-u",
-    "c-u": "C-u",
-    "ctrl+k": "C-k",
-    "c-k": "C-k",
-    "ctrl+l": "C-l",
-    "c-l": "C-l",
-    "ctrl+w": "C-w",
-    "c-w": "C-w",
+    "npage": "NPage",
+}
+for _i in range(1, 13):
+    _BASE_KEYS["f%d" % _i] = "F%d" % _i
+
+# Modifier spellings clients may use → tmux modifier letter.
+_MODS = {
+    "ctrl": "C", "control": "C", "ctl": "C", "c": "C",
+    "alt": "M", "meta": "M", "opt": "M", "option": "M", "m": "M",
+    "shift": "S", "s": "S",
 }
 
 
+def _split_mods(key: str):
+    """Peel 'ctrl+', 'alt+', 'c-', 'm-' … off the front of a lowered key name.
+
+    Accepts both the plus form clients send ("Ctrl+Shift+Tab") and the tmux
+    dash form ("C-M-x"), in any order, and returns (mods, base).
+    """
+    mods = set()
+    while True:
+        # Dash form: a single modifier letter followed by '-' and more key.
+        if len(key) > 2 and key[0] in "cms" and key[1] == "-":
+            mods.add(_MODS[key[0]])
+            key = key[2:]
+            continue
+        # Plus form: 'ctrl+…'. A trailing '+' is the key itself ("ctrl++").
+        head, sep, rest = key.partition("+")
+        if sep and rest and head in _MODS:
+            mods.add(_MODS[head])
+            key = rest
+            continue
+        return mods, key
+
+
 def map_key(name: str) -> str | None:
-    """Return a tmux send-keys token for a named key, or None if unknown."""
+    """Return a tmux send-keys token for a key name, or None if unknown.
+
+    Understands a bare printable character, a named key, and any
+    Ctrl / Alt(Option) / Shift combination of the two.
+    """
     raw = (name or "").strip()
     if not raw:
         return None
-    # Single printable character (not space-only)
+    # A single printable character is itself — including '+' and '-', which
+    # must never be read as modifier syntax.
     if len(raw) == 1 and raw.isprintable():
         return raw
-    key = raw.lower().replace(" ", "")
-    if key in _KEY_MAP:
-        return _KEY_MAP[key]
-    # Ctrl+letter form
-    if key.startswith("ctrl+") and len(key) == 6 and key[5].isalpha():
-        return "C-" + key[5]
-    if key.startswith("c-") and len(key) == 3 and key[2].isalpha():
-        return "C-" + key[2]
-    return None
+    mods, base = _split_mods(raw.lower().replace(" ", ""))
+    if not base:
+        return None
+
+    tok = _BASE_KEYS.get(base)
+    if tok is None:
+        if len(base) == 1 and base.isprintable():
+            tok = base
+        else:
+            return None
+
+    if "S" in mods:
+        # Terminals carry shift in the character itself, not as a modifier.
+        if len(tok) == 1 and tok.isalpha():
+            tok = tok.upper()
+            mods.discard("S")
+        elif tok == "Tab":
+            tok = "BTab"          # the one name tmux has for shift-tab
+            mods.discard("S")
+        elif tok == "Enter":
+            # What `claude /terminal-setup` binds shift-enter to: ESC CR.
+            # A bare shift-enter is indistinguishable from enter on the wire,
+            # so send the sequence the agent actually reads as "newline".
+            tok = "Enter"
+            mods.discard("S")
+            mods.add("M")
+        elif len(tok) == 1:
+            mods.discard("S")     # shift on a symbol is already in the symbol
+
+    prefix = ""
+    for m in ("C", "M", "S"):     # tmux accepts any order; keep one canonical
+        if m in mods:
+            prefix += m + "-"
+    return prefix + tok
 
 
 def map_keys(keys) -> list:
@@ -108,6 +173,22 @@ def _box_approx(code: int) -> str:
     if 0x2580 <= code <= 0x259F:  # block elements / shades
         return "#" if code >= 0x2588 else "."
     return "+"  # corners, tees, crosses
+
+
+def trim_blank_tail(text: str) -> str:
+    """Drop the empty rows below the last drawn line of a pane capture.
+
+    A 50-row window holding a 15-row conversation captures 35 blank rows, and
+    every client faithfully rendered them: the pane scrolled to the bottom and
+    showed a screenful of nothing. Colour runs are kept — only rows with no
+    visible character at all go.
+    """
+    if not text:
+        return ""
+    lines = text.split("\n")
+    while lines and not _ANSI_RE.sub("", lines[-1]).strip():
+        lines.pop()
+    return "\n".join(lines)
 
 
 def plain_tui_text(text: str) -> str:
@@ -200,7 +281,10 @@ def frame_payload(session_id: str, text: str, attached: bool,
         "attached": bool(attached),
         "text": body,
         "seq": seq,
-        "cols": 0,
+        # Real pane width, so a client can size its font to fit exactly
+        # instead of guessing (0 on old daemons — clients fall back to the
+        # longest line they were sent).
+        "cols": TUI_COLS if attached else 0,
         "rows": body.count("\n") + 1 if body else 0,
         "cursor": None,
         "error": error or "",
@@ -252,6 +336,7 @@ def capture_session(mgr, session_id: str, *, ansi: bool = False) -> dict:
         text = mgr._pane_text(tui.name) or ""
     if not want_ansi:
         text = plain_tui_text(text)
+    text = trim_blank_tail(text)
     job_id = ""
     job = getattr(tui, "job", None)
     if job is not None:
@@ -282,7 +367,11 @@ def send_to_session(mgr, session_id: str, keys=None, text: str = "") -> str:
                     err = r.stderr.decode("utf-8", errors="replace")[:200]
                 return "tmux send-keys failed: %s" % (err or "error")
         for tok in tokens:
-            r = mgr._tmux("send-keys", "-t", tui.name, tok)
+            # A bare character is content, not a key name: -l keeps tmux from
+            # reading it as one (and keeps '-'/';' out of argument parsing).
+            args = (["-l", "-t", tui.name, tok] if len(tok) == 1
+                    else ["-t", tui.name, tok])
+            r = mgr._tmux("send-keys", *args)
             if getattr(r, "returncode", 0) not in (0, None):
                 err = ""
                 if getattr(r, "stderr", None):

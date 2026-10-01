@@ -1,7 +1,7 @@
 {
   "bind": "0.0.0.0",
   "port": 8473,
-  "providers": ["claude", "grok", "codex", "deepseek", "cursor"],
+  "providers": ["claude", "grok", "codex", "deepseek", "cursor", "copilot"],
 
   "claude_bin": "claude",
   "permission_mode": "bypassPermissions",
@@ -30,6 +30,11 @@
   "cursor_prompt_flags": "--force --trust",
   "cursor_tui_flags": "--force --trust --approve-mcps",
   "cursor_env": {},
+
+  "copilot_bin": "copilot",
+  "copilot_home": "~/.copilot",
+  "copilot_flags": "",
+  "copilot_env": {},
 
   "turn_timeout": 1800
 }

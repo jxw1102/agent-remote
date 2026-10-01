@@ -19,6 +19,75 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.14.2** Large downloads. Drop downloads were capped at 64 MB
+(`max_drop_mb`) because the daemon read the whole file into memory before
+sending it, and every client held the whole reply in memory too. The body now
+streams from disk in 256 KB pieces, the cap defaults to none (`0`; a positive
+`max_drop_mb` still caps), and a file honours `Range` with `206` plus an
+`ETag` checked through `If-Range`, so a client that loses the link resumes
+where it stopped. Ping advertises `drop_range: true` and `max_drop_mb`. A
+zipped folder is rebuilt per request, so it is not resumable
+(`Accept-Ranges: none`). Web, Android 1.5.2 and BlackBerry 3.2.11 write to
+disk as bytes arrive, use an idle timeout instead of a total one, and resume.
+
+**2.14.1** Large attachments. The upload cap goes from 16 MB to 256 MB
+(`max_upload_mb`, advertised on `/api/ping`), and chunked uploads are
+assembled by streaming the parts to disk instead of joining them in memory,
+so a big file is safe on a small VPS. Android never managed a chunked upload
+at all: it treated the daemon's "chunk received, more to come" reply (no
+`path` yet) as a failure, so every file over one 512 KB chunk died after the
+first chunk. Android 1.5.1 accepts that reply; BlackBerry now uses the
+daemon's advertised cap instead of a hardcoded 16 MB and reads each chunk
+from the file as it is sent.
+
+**2.14.0** GitHub Copilot (`copilot`) as a sixth harness. Add `"copilot"` to
+`providers`. Sessions are read from `~/.copilot/session-state/<id>/`
+(`workspace.yaml` for cwd, name and timestamps; `events.jsonl` for the
+conversation and its tool calls, which also drive process view). Headless
+turns run `copilot -p … --output-format json --allow-all-tools`; a new turn
+passes `--session-id <uuid>` so the daemon knows the id before the CLI starts,
+a continuation passes `--resume <uuid>`. The model picker offers `auto` plus
+every model this host's own Copilot history has used, and effort maps to
+`--reasoning-effort`. Interactive mode drives the real TUI in tmux (`cop-*`,
+`copilot-tuis.json`), answers the one-time folder-trust dialog, and ends a
+turn when an assistant message with no tool requests is followed by
+`assistant.turn_end`; Live TUI works unchanged. `/rewind N` cuts
+`events.jsonl` at the Nth-last prompt (verified: a resumed session forgets the
+dropped turn). Usage is the seat's premium-request allowance from
+`api.github.com/copilot_internal/user`, read with the CLI's own login token.
+New config keys: `copilot_bin`, `copilot_home`, `copilot_flags`,
+`copilot_env`. Covered by `tests/copilot_test.py`.
+
+**2.13.0** The Live TUI takes a whole keyboard. `POST …/tui/keys` used to
+understand one fixed list (Esc / Enter / Tab / arrows / a few Ctrl letters),
+so a client had no way to send the chords a terminal agent is actually driven
+by. Key names now compose: `Shift+Tab` (→ tmux `BTab`, the permission-mode
+cycle), `Ctrl+O`, `Alt+b`, `Ctrl+Alt+k`, `Shift+Up`, `F1`–`F12`, `Ctrl+Space`,
+`Ctrl+_`, and the tmux dash spellings (`C-o`, `M-x`). Shift on a letter is the
+capital, and `Shift+Enter` is sent as ESC CR — the same sequence
+`claude /terminal-setup` binds it to — so it makes a newline instead of
+submitting. Everything the old clients send still maps. `/api/ping` advertises
+`tui_keys: 2` (also inside `caps`) so a client can tell before it binds.
+
+The host pane is **120 columns**, not 220: nothing rendered 220 comfortably,
+and reflowing it into a phone-width pane turned the box drawing into confetti.
+`GET …/tui` now reports the real `cols`, so a client can size its font to fit
+the grid instead of guessing, and the blank rows below the last drawn line are
+trimmed — a 15-row conversation in a 50-row window no longer arrives with 35
+empty rows for every client to scroll past. Covered by `tests/tui_keys_test.py`.
+Existing TUIs keep the width they were launched with; new ones get 120.
+
+**2.12.2** HTTPS no longer stops the daemon dead. The listening socket was
+TLS-wrapped, so every handshake ran inside `serve_forever`'s thread with no
+timeout: a port scanner that connected and never finished its ClientHello
+parked the accept loop forever, the listen queue filled, and the host went
+dark while systemd still called it active (public host, 2026-09-23 — nothing
+served for three hours; py-spy found MainThread in `ssl.do_handshake` under
+`get_request`). The socket stays plain now; each connection is wrapped with
+the handshake deferred and performed in its own worker thread under a 15 s
+timeout. Dropped-connection tracebacks (resets, timeouts, bad handshakes) log
+at debug instead of a stack trace apiece. Covered by `tests/tls_accept_test.py`.
+
 **2.12.1** Usage buckets may carry `"show_bar": false`. Cursor Enterprise
 seats report spend for the billing cycle, not a share of a limit, so the
 bucket has no meaningful percentage; the daemon marks it and every client
@@ -194,6 +263,7 @@ state tags on session rows, session rename / retitle, and `"focus": true` on
 | `grok`   | `~/.grok/sessions/<group>/<id>/` | `grok` (headless or interactive TUI) |
 | `codex`  | `~/.codex` state / rollouts | `codex exec` / interactive TUI |
 | `deepseek` | `dsh web` `/api` on localhost (adopted or daemon-started) | `session.prompt` / `session.cancel` |
+| `copilot` | `~/.copilot/session-state/<id>/events.jsonl` | `copilot -p` (headless) or interactive TUI |
 
 Everything CLI-specific lives in `agentremoted/providers/`. Queue, stop,
 permission bridge, and status streams are shared.
@@ -328,7 +398,7 @@ sudo systemctl enable --now agentremoted
 - `GET /api/ping` → `multi: true` when more than one provider, plus
   `providers` and per-harness `provider_details`
 - Sessions merged; each row has `provider`
-- `POST /api/sessions/new` requires `"provider": "claude"|"grok"|"codex"|"deepseek"|"cursor"`
+- `POST /api/sessions/new` requires `"provider": "claude"|"grok"|"codex"|"deepseek"|"cursor"|"copilot"`
 
 Path mounts (`/claude/…`, `/grok/…`) still work. `/internal/permission` and
 `/internal/hook` stay unprefixed (MCP / TUI).
@@ -422,6 +492,28 @@ Cap `live_tui` on `/api/ping` when the harness can host a tmux TUI. Clients
 poll `GET …/tui` (~2–5 Hz; plain by default, `?ansi=1` for colour) and send
 keys via `POST …/tui/keys`.
 
+The frame carries `cols` — the host pane width (120) — so a client can size
+its font to the grid rather than reflowing it, and blank rows below the last
+drawn line are already trimmed.
+
+`keys` takes names, not bytes, and they compose:
+
+| Form | Examples | tmux |
+|------|----------|------|
+| named key | `Escape` `Enter` `Tab` `Up` `PageUp` `Delete` `Space` `F7` | `Escape` `Enter` `Tab` `Up` `PPage` `DC` `Space` `F7` |
+| Ctrl | `Ctrl+O` `Ctrl+C` `Ctrl+Left` `Ctrl+_` | `C-o` `C-c` `C-Left` `C-_` |
+| Alt / Option | `Alt+b` `Option+Enter` | `M-b` `M-Enter` |
+| Shift | `Shift+Tab` `Shift+Up` `Shift+g` | `BTab` `S-Up` `G` |
+| combined | `Ctrl+Alt+k` `Ctrl+F12` | `C-M-k` `C-F12` |
+| tmux spelling | `C-o` `M-x` | as given |
+
+Shift on a letter is simply the capital, and `Shift+Enter` is sent as ESC CR
+(what `claude /terminal-setup` binds it to) so it makes a newline instead of
+submitting the prompt. Unknown names are dropped, never guessed. `text` is
+always literal — that is the path for IME input, which no key name can carry.
+`/api/ping` reports `tui_keys: 2` for this vocabulary; 1 (or absent) means the
+old fixed list.
+
 ### Mid-turn resume after daemon restart
 
 Interactive turns (tmux TUIs) survive a clean daemon restart:
@@ -452,6 +544,7 @@ session journal, then the next turn resumes from the rewound point.
   its TUI /rewind writes) to `updates.jsonl`; grok honors it on `--resume`.
 * codex — the rollout JSONL is truncated at the turn boundary of the
   Nth-last `user_message`.
+* copilot — `events.jsonl` is cut at the Nth-last `user.message`.
 
 Conversation only: file changes on the host are never reverted. Works in
 BOTH execution modes (the journals are what `--resume` replays); a live
@@ -470,6 +563,12 @@ shows everything. Lookups by id never filter.
 Default: **`~/Public`** on macOS, **`~/.agentremoted/drop`** elsewhere
 (`"drop_dir"` in config).
 
+`GET /api/drop/<file>` streams with a `Content-Length` and accepts one
+`Range: bytes=N-` (or `N-M`); send the `ETag` from the first reply back as
+`If-Range` so a file replaced on the host restarts from zero (`200`) instead
+of splicing two versions. `X-Drop-Size` is always the whole entry's size.
+No size cap unless `"max_drop_mb"` is set above 0.
+
 Auth: `X-Auth-Token` / `Authorization: Bearer` / `?token=`.
 
 ## Tests
@@ -478,6 +577,7 @@ Auth: `X-Auth-Token` / `Authorization: Bearer` / `?token=`.
 cd daemon
 python3 tests/smoke_test.py
 python3 tests/cursor_test.py
+python3 tests/copilot_test.py
 python3 tests/render_test.py
 python3 tests/focus_test.py        # focus state machine (unit)
 python3 tests/focus_api_test.py    # focus over HTTP, incl. enrolment rules

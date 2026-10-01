@@ -73,14 +73,16 @@ if has_bin("codex", "~/.local/bin/codex"):
     providers.append("codex")
 if has_bin("cursor-agent", "~/.local/bin/cursor-agent"):
     providers.append("cursor")
+if has_bin("copilot", "~/.local/bin/copilot"):
+    providers.append("copilot")
 # DeepSeek Harness: official UI is `dsh web` on loopback (daemon starts it).
 if has_bin("dsh") or pathlib.Path(os.path.expanduser("~/.dsh")).is_dir():
     providers.append("deepseek")
 if not providers:
     # Nothing on PATH yet — still write a multi-shaped config so adding a
     # CLI later only needs a restart, not a re-shape of the file.
-    providers = ["claude", "grok", "codex", "cursor"]
-    print("warn: no claude/grok/codex/cursor-agent on PATH; wrote all four in config")
+    providers = ["claude", "grok", "codex", "cursor", "copilot"]
+    print("warn: no claude/grok/codex/cursor-agent/copilot on PATH; wrote all five in config")
 
 cfg["providers"] = providers
 cfg.pop("provider", None)
