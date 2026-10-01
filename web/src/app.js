@@ -18,6 +18,8 @@ const PROVIDERS = {
   dsh: { label: "DeepSeek", accent: "#4d6bfe", heading: "#7b93ff", inline: "#93a8ff" },
   cursor: { label: "Cursor", accent: "#d946ef", heading: "#e879f9", inline: "#f0abfc" },
   "cursor-agent": { label: "Cursor", accent: "#d946ef", heading: "#e879f9", inline: "#f0abfc" },
+  copilot: { label: "Copilot", accent: "#8957e5", heading: "#b392f0", inline: "#d2a8ff" },
+  "github-copilot": { label: "Copilot", accent: "#8957e5", heading: "#b392f0", inline: "#d2a8ff" },
 };
 const NEUTRAL = { label: "Agent", accent: "#9aa4b2", heading: "#9aa4b2", inline: "#9aa4b2" };
 // Multi-harness host chrome (one profile, Claude+Grok+Codex) — purple, not gray.
@@ -262,7 +264,7 @@ const state = {
   liveTuiTimer: null,
   liveTuiSeq: 0,
   liveTuiKeys: false,    // pane has keyboard focus
-  liveTuiEscArmed: false,
+  liveTuiCols: 0,        // host pane width in columns (frame.cols)
   askedQuestion: null,   // request_id already auto-opened (reopen via banner)
   askedPermission: null, // request_id already auto-opened (reopen via banner)
   answeredQuestions: new Set(), // request_ids the user already submitted
@@ -698,6 +700,83 @@ async function call(profile, path, { method = "GET", body, timeout = 30000, raw 
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Download one drop entry without a size ceiling.
+ *
+ * The body is read piecewise with an IDLE timeout (no bytes for 60 s), not a
+ * total one, so a 1 GB file on a slow link is fine. When the daemon serves
+ * the file with Accept-Ranges (2.14.2+), a dropped link resumes with Range +
+ * If-Range instead of starting over; a zipped folder restarts. `sink` is
+ * either a FileSystemWritableFileStream (Chromium's save picker, straight to
+ * disk) or null to collect a Blob, which browsers spill to disk themselves.
+ */
+async function downloadDrop(profile, name, { sink = null, onProgress } = {}) {
+  const url = profile.baseUrl.replace(/\/+$/, "") + `/api/drop/${encodeURIComponent(name)}`;
+  const parts = [];
+  let got = 0;
+  let total = 0;
+  let etag = "";
+  let served = name;
+  let resumable = false;
+  for (let attempt = 0; ; attempt++) {
+    const ctrl = new AbortController();
+    let idle = setTimeout(() => ctrl.abort(), 60000);
+    const poke = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), 60000); };
+    const headers = { "X-Auth-Token": profile.token };
+    if (got > 0) {
+      headers.Range = `bytes=${got}-`;
+      if (etag) headers["If-Range"] = etag;
+    }
+    try {
+      const res = await fetch(url, {
+        headers, signal: ctrl.signal, credentials: "omit", cache: "no-store",
+      });
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try { const j = await res.json(); if (j && j.error) msg = j.error; } catch { /* binary */ }
+        throw new DaemonError(res.status, msg);
+      }
+      if (got > 0 && res.status !== 206) {
+        // The host file changed (or a zip was rebuilt): start over.
+        got = 0;
+        parts.length = 0;
+        if (sink) { await sink.truncate(0); await sink.seek(0); }
+      }
+      const hdrName = res.headers.get("X-Drop-Name");
+      if (hdrName) {
+        try { served = decodeURIComponent(hdrName); } catch { served = hdrName; }
+      }
+      total = Number(res.headers.get("X-Drop-Size")) || total;
+      etag = res.headers.get("ETag") || etag;
+      resumable = res.headers.get("Accept-Ranges") === "bytes";
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        poke();
+        if (sink) await sink.write(value); else parts.push(value);
+        got += value.length;
+        if (onProgress) onProgress(got, total);
+      }
+      clearTimeout(idle);
+      if (total && got < total) throw new Error("connection closed early");
+      break;
+    } catch (e) {
+      clearTimeout(idle);
+      if (e instanceof DaemonError) throw e;
+      // Only a resumable, part-received file is worth another go; anything
+      // else would just repeat the same failure.
+      if (!(resumable && got > 0) || attempt >= 8) {
+        throw new DaemonError(0, e.name === "AbortError"
+          ? "The download stalled (no data for 60 s)"
+          : (e.message || "Download failed"));
+      }
+      await new Promise((r) => setTimeout(r, Math.min(15000, 1000 * 2 ** attempt)));
+    }
+  }
+  return { name: served, size: got, blob: sink ? null : new Blob(parts) };
 }
 
 // ------------------------------------------------------------------ time
@@ -2288,24 +2367,31 @@ function openLiveTui() {
   if (!state.open || !state.open.sessionId) return;
   state.liveTui = true;
   state.liveTuiSeq = 0;
+  state.liveTuiCols = 0;
   $("live-tui").classList.remove("hidden");
   $("transcript").classList.add("hidden");
   $("composer").classList.add("hidden");
   updateLiveTuiButton();
-  const pane = $("live-tui-pane");
-  pane.textContent = "Connecting to host TUI…";
-  pane.classList.add("empty-tui");
+  const screen = $("live-tui-screen");
+  screen.textContent = "Connecting to host TUI…";
+  $("live-tui-pane").classList.add("empty-tui");
+  $("live-tui-pane").style.fontSize = "";
   $("live-tui-status").textContent = "Host TUI";
   $("live-tui-status").classList.remove("live");
+  // Capture from the first frame: the pane is the whole point of this view,
+  // and one click on the text field below hands the keyboard (and the IME)
+  // straight back.
+  focusLiveTuiPane();
+  updateLiveTuiCapture();
   pollLiveTui(true);
   clearInterval(state.liveTuiTimer);
   state.liveTuiTimer = setInterval(() => pollLiveTui(false), 400);
 }
 
 function closeLiveTui() {
+  flushLiveTuiText();
   state.liveTui = false;
   state.liveTuiKeys = false;
-  state.liveTuiEscArmed = false;
   clearInterval(state.liveTuiTimer);
   state.liveTuiTimer = null;
   const box = $("live-tui");
@@ -2315,6 +2401,7 @@ function closeLiveTui() {
   if (state.open) {
     $("composer")?.classList.remove("hidden");
   }
+  updateLiveTuiCapture();
   updateLiveTuiButton();
 }
 
@@ -2335,13 +2422,15 @@ async function pollLiveTui(force) {
     if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) return;
     const status = $("live-tui-status");
     const pane = $("live-tui-pane");
+    const screen = $("live-tui-screen");
     if (!frame || frame.attached === false) {
       status.textContent = frame?.error || "No host TUI attached";
       status.classList.remove("live");
       if (force || !pane.dataset.hadFrame) {
-        pane.textContent = frame?.error
+        screen.textContent = frame?.error
           || "No interactive TUI for this session. Start a turn in Interactive mode.";
         pane.classList.add("empty-tui");
+        pane.style.fontSize = "";
         delete pane.dataset.hadFrame;
       }
       return;
@@ -2354,10 +2443,17 @@ async function pollLiveTui(force) {
     // Coloured SGR when ?ansi=1 (default plain has no escapes).
     const raw = frame.text || "(empty pane)";
     if (frame.ansi || raw.includes("\u001b[") || raw.includes("\x1b[")) {
-      pane.innerHTML = ansiToHtml(raw);
+      screen.innerHTML = ansiToHtml(raw);
     } else {
-      pane.textContent = raw;
+      screen.textContent = raw;
     }
+    // Host pane width: daemon >= 2.13.0 reports it. Older ones get measured,
+    // and that measurement only ever grows — sizing to the widest line of
+    // each frame would re-scale the whole pane every time a line was drawn.
+    state.liveTuiCols = frame.cols > 0
+      ? frame.cols
+      : Math.max(state.liveTuiCols, widestLine(raw));
+    fitLiveTuiPane();
     if (atBottom) pane.scrollTop = pane.scrollHeight;
     status.textContent = frame.job_id
       ? `Host TUI · job ${String(frame.job_id).slice(0, 8)}`
@@ -2370,7 +2466,66 @@ async function pollLiveTui(force) {
   }
 }
 
-async function sendLiveTuiKeys(keys, text) {
+/** Longest visible line of a frame — the pane width an old daemon never sent. */
+function widestLine(raw) {
+  let wide = 0;
+  const plain = String(raw || "").replace(/\u001b\[[0-9;:<=>?]*[ -/]*[@-~]/g, "");
+  for (const line of plain.split("\n")) {
+    if (line.length > wide) wide = line.length;
+  }
+  return Math.min(Math.max(wide, 40), 220);
+}
+
+// A TUI is a grid, so the pane never reflows it — it scales the glyphs until
+// the host's own column count fits the window (down to a floor, after which
+// the pane scrolls). Wrapping 120 columns into a narrow pane turned every box
+// border into confetti, which is what "too wide" actually looked like.
+const TUI_FONT_MIN = 7.5;
+const TUI_FONT_MAX = 13;
+let _tuiCharRatio = 0;
+
+/** Width of one monospace glyph, as a fraction of the font size. */
+function tuiCharRatio(pane) {
+  if (_tuiCharRatio) return _tuiCharRatio;
+  try {
+    const cs = getComputedStyle(pane);
+    const ctx = document.createElement("canvas").getContext("2d");
+    ctx.font = `${cs.fontWeight} 100px ${cs.fontFamily}`;
+    const w = ctx.measureText("0".repeat(64)).width / 64 / 100;
+    if (w > 0.2 && w < 1) _tuiCharRatio = w;
+  } catch (_e) { /* canvas blocked — fall through to the usual mono ratio */ }
+  if (!_tuiCharRatio) _tuiCharRatio = 0.6;
+  return _tuiCharRatio;
+}
+
+function fitLiveTuiPane() {
+  const pane = $("live-tui-pane");
+  const cols = state.liveTuiCols;
+  if (!pane || !cols) return;
+  const cs = getComputedStyle(pane);
+  const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  const avail = pane.clientWidth - padX;
+  if (avail <= 0) return;              // pane still hidden
+  const want = avail / (cols * tuiCharRatio(pane));
+  const size = Math.max(TUI_FONT_MIN, Math.min(TUI_FONT_MAX, Math.floor(want * 10) / 10));
+  pane.style.fontSize = size + "px";
+}
+
+// Keystrokes are a stream, so they are sent as one: each POST waits for the
+// one before it. Fired off in parallel they can reach a threaded daemon out
+// of order, and "cd " arriving as "c d" is not a typo the user made.
+let _tuiSendChain = Promise.resolve();
+
+function sendLiveTuiKeys(keys, text) {
+  // Anything queued as plain typing goes first, or a chord would overtake it.
+  if (!(text && !keys)) flushLiveTuiText();
+  _tuiSendChain = _tuiSendChain
+    .catch(() => {})
+    .then(() => postLiveTuiKeys(keys, text));
+  return _tuiSendChain;
+}
+
+async function postLiveTuiKeys(keys, text) {
   if (!state.open || !state.open.sessionId) return;
   const profile = profileById(state.open.profileId);
   if (!profile) return;
@@ -2391,27 +2546,132 @@ async function sendLiveTuiKeys(keys, text) {
   }
 }
 
-function liveTuiKeyName(e) {
-  if (e.ctrlKey || e.metaKey) {
-    const k = (e.key || "").toLowerCase();
-    if (k.length === 1 && k >= "a" && k <= "z") return "Ctrl+" + k.toUpperCase();
-    return null;
+// Typed characters are gathered for a frame or two before they are sent. One
+// POST per keystroke (each behind a CORS preflight) is fine on localhost and
+// miserable over a tunnel — a fast typist would outrun the link.
+let _tuiTextBuf = "";
+let _tuiTextTimer = null;
+const TUI_TYPE_COALESCE_MS = 35;
+
+function typeLiveTuiText(ch) {
+  _tuiTextBuf += ch;
+  if (_tuiTextTimer === null) {
+    _tuiTextTimer = setTimeout(flushLiveTuiText, TUI_TYPE_COALESCE_MS);
   }
-  if (e.key === "Escape") return "Escape";
-  if (e.key === "Enter") return "Enter";
-  if (e.key === "Backspace") return "Backspace";
-  if (e.key === "Tab") return "Tab";
-  if (e.key === "ArrowUp") return "Up";
-  if (e.key === "ArrowDown") return "Down";
-  if (e.key === "ArrowLeft") return "Left";
-  if (e.key === "ArrowRight") return "Right";
-  if (e.key === "Home") return "Home";
-  if (e.key === "End") return "End";
-  if (e.key === "PageUp") return "PageUp";
-  if (e.key === "PageDown") return "PageDown";
-  if (e.key === "Delete") return "Delete";
-  if (e.key.length === 1 && !e.altKey) return e.key; // printable
-  return null;
+}
+
+function flushLiveTuiText() {
+  if (_tuiTextTimer !== null) {
+    clearTimeout(_tuiTextTimer);
+    _tuiTextTimer = null;
+  }
+  const text = _tuiTextBuf;
+  _tuiTextBuf = "";
+  if (text) sendLiveTuiKeys(null, text);
+}
+
+// ---- keyboard capture ---------------------------------------------------
+// Two keyboards share this view. The pane forwards raw keystrokes to the
+// host terminal; the text field below is an ordinary input, so a system IME
+// (Chinese, Japanese, …) can compose there and send a finished line. Whoever
+// holds DOM focus owns the keyboard — nothing is ever forwarded twice.
+
+/** Named keys the daemon maps to tmux tokens (modifiers compose onto these). */
+const TUI_NAMED_KEYS = {
+  Escape: "Escape",
+  Enter: "Enter",
+  Backspace: "Backspace",
+  Tab: "Tab",
+  Delete: "Delete",
+  Insert: "Insert",
+  ArrowUp: "Up",
+  ArrowDown: "Down",
+  ArrowLeft: "Left",
+  ArrowRight: "Right",
+  Home: "Home",
+  End: "End",
+  PageUp: "PageUp",
+  PageDown: "PageDown",
+};
+/** Keydowns that carry no character: modifiers, locks, IME bookkeeping. */
+const TUI_MODIFIER_KEYS = new Set([
+  "Shift", "Control", "Alt", "Meta", "CapsLock", "NumLock", "ScrollLock",
+  "AltGraph", "ContextMenu", "Dead", "Unidentified", "Process",
+]);
+// Chrome and Safari keep these for themselves: forwarding Ctrl+W would close
+// the tab mid-turn instead of deleting a word. The soft-key row is the way in.
+const TUI_BROWSER_CTRL = new Set(["n", "t", "w", "q"]);
+
+/**
+ * Turn a keydown on the pane into what the daemon should receive:
+ * `{text}` for a character the user typed, `{keys:[name]}` for a chord,
+ * or null to leave the event to the browser.
+ */
+function liveTuiKeySpec(e) {
+  if (e.isComposing || e.keyCode === 229) return null;   // IME mid-composition
+  const k = e.key || "";
+  if (!k || TUI_MODIFIER_KEYS.has(k)) return null;
+  // ⌘ stays with the browser so Cmd+C / Cmd+V / Cmd+R still work on a Mac.
+  if (e.metaKey) return null;
+  const mods = [];
+  if (e.ctrlKey) mods.push("Ctrl");
+  if (e.altKey) mods.push("Alt");
+
+  const named = TUI_NAMED_KEYS[k] || (/^F([1-9]|1[0-2])$/.test(k) ? k : "");
+  if (named) {
+    // Shift is a real modifier on a named key: Shift+Tab, Shift+↑, Shift+↵.
+    if (e.shiftKey) mods.push("Shift");
+    return { keys: [mods.concat(named).join("+")] };
+  }
+
+  if (!mods.length) {
+    // Plain typing — the browser already applied shift and the layout.
+    return k.length === 1 ? { text: k } : null;
+  }
+  // Ctrl/Alt with a character: read the physical key, because Alt+b on macOS
+  // arrives as "∫" and Ctrl+· on some layouts arrives as nothing useful.
+  const base = tuiChordChar(e);
+  if (!base) return null;
+  if (e.ctrlKey && !e.altKey && TUI_BROWSER_CTRL.has(base.toLowerCase())) return null;
+  // Ctrl+C copies when there is something selected, and interrupts otherwise —
+  // the same bargain every terminal emulator in a browser makes.
+  if (e.ctrlKey && !e.altKey && base.toLowerCase() === "c"
+      && String(window.getSelection?.() || "").trim()) return null;
+  return { keys: [mods.concat(base).join("+")] };
+}
+
+/** The character a Ctrl/Alt chord means, from the physical key where needed. */
+function tuiChordChar(e) {
+  const code = e.code || "";
+  let m = /^Key([A-Z])$/.exec(code);
+  if (m) return m[1];
+  m = /^Digit([0-9])$/.exec(code);
+  if (m) return m[1];
+  const k = e.key || "";
+  return k.length === 1 ? k : "";
+}
+
+function focusLiveTuiPane() {
+  const pane = $("live-tui-pane");
+  if (!pane) return;
+  pane.focus({ preventScroll: true });
+}
+
+/** One chip, one truth: where the next keystroke goes. */
+function updateLiveTuiCapture() {
+  const on = !!state.liveTuiKeys;
+  const chip = $("btn-tui-capture");
+  if (chip) {
+    chip.textContent = on ? "Keys: TUI" : "Keys: text field";
+    chip.setAttribute("aria-pressed", on ? "true" : "false");
+    chip.classList.toggle("on", on);
+  }
+  const hint = $("live-tui-hint");
+  if (hint) {
+    hint.textContent = on
+      ? "Shift+Esc (or the text field) takes the keyboard back"
+      : "Click the pane to send keys";
+  }
 }
 
 /**
@@ -3682,7 +3942,7 @@ function normalizeProfile(p) {
   let url = String(p.baseUrl || "").trim().replace(/\/+$/, "");
   if (url && !/^https?:\/\//i.test(url)) url = "http://" + url;
   // Strip accidental /claude|/grok|/codex suffixes — multi lives at the root.
-  url = url.replace(/\/(claude|grok|codex|deepseek|dsh|cursor|cursor-agent)$/i, "");
+  url = url.replace(/\/(claude|grok|codex|deepseek|dsh|cursor|cursor-agent|copilot)$/i, "");
   return {
     id: p.id || uuid(),
     name: p.name || url.replace(/^https?:\/\//, ""),
@@ -4530,18 +4790,43 @@ async function openInbox() {
           // Zipping happens host-side before a byte moves, so a big folder
           // sits on "…" with no progress — say what it is doing.
           dl.textContent = isDir ? "Zipping…" : "…";
+          const saveAs = isDir ? `${row.file.name}.zip` : row.file.name;
+          let sink = null;
+          let handle = null;
           try {
-            const blob = await call(row.profile,
-              `/api/drop/${encodeURIComponent(row.file.name)}`,
-              { raw: true, timeout: 600000 });
-            const url = URL.createObjectURL(blob);
-            const a = el("a");
-            a.href = url;
-            a.download = isDir ? `${row.file.name}.zip` : row.file.name;
-            a.click();
-            setTimeout(() => URL.revokeObjectURL(url), 10000);
+            // Big files go straight to disk where the browser lets us pick
+            // the destination (Chromium); elsewhere the Blob path is used.
+            // The picker must open first, while the click still counts.
+            if (window.showSaveFilePicker && (row.file.size || 0) > 64 * 1024 * 1024) {
+              try {
+                handle = await window.showSaveFilePicker({ suggestedName: saveAs });
+                sink = await handle.createWritable();
+              } catch (e) {
+                if (e && e.name === "AbortError") { dl.textContent = dlLabel; dl.disabled = false; return; }
+                sink = null;
+              }
+            }
+            const got = await downloadDrop(row.profile, row.file.name, {
+              sink,
+              onProgress: (n, total) => {
+                dl.textContent = total
+                  ? `${Math.floor((n * 100) / total)}%`
+                  : `${(n / (1024 * 1024)).toFixed(0)} MB`;
+              },
+            });
+            if (sink) {
+              await sink.close();
+            } else {
+              const url = URL.createObjectURL(got.blob);
+              const a = el("a");
+              a.href = url;
+              a.download = got.name || saveAs;
+              a.click();
+              setTimeout(() => URL.revokeObjectURL(url), 60000);
+            }
             dl.textContent = "Saved";
           } catch (e) {
+            if (sink) { try { await sink.abort(); } catch { /* already closed */ } }
             toast(e.message);
             dl.textContent = dlLabel;
           }
@@ -4958,44 +5243,63 @@ function wire() {
     if (state.liveTui) closeLiveTui();
     else openLiveTui();
   });
+  // A resized window changes how many glyphs fit, never how many the host
+  // draws — so the pane rescales instead of reflowing.
+  window.addEventListener("resize", () => {
+    if (state.liveTui) fitLiveTuiPane();
+  });
   $("btn-live-tui-close")?.addEventListener("click", () => closeLiveTui());
   $("live-tui")?.querySelectorAll("[data-tui-key]").forEach((btn) => {
+    // mousedown, not click: a plain click would blur the pane first and the
+    // next typed character would land in the page instead of the terminal.
+    btn.addEventListener("mousedown", (e) => e.preventDefault());
     btn.addEventListener("click", () => {
       sendLiveTuiKeys([btn.getAttribute("data-tui-key")]);
-      $("live-tui-pane")?.focus();
+      focusLiveTuiPane();
     });
+  });
+  // preventDefault: taking focus would flip the state this handler reads.
+  $("btn-tui-capture")?.addEventListener("mousedown", (e) => e.preventDefault());
+  $("btn-tui-capture")?.addEventListener("click", () => {
+    if (state.liveTuiKeys) $("live-tui-input")?.focus();
+    else focusLiveTuiPane();
   });
   $("live-tui-pane")?.addEventListener("focus", () => {
     state.liveTuiKeys = true;
-    state.liveTuiEscArmed = false;
+    updateLiveTuiCapture();
   });
   $("live-tui-pane")?.addEventListener("blur", () => {
     state.liveTuiKeys = false;
-    state.liveTuiEscArmed = false;
+    flushLiveTuiText();
+    updateLiveTuiCapture();
   });
   $("live-tui-pane")?.addEventListener("keydown", (e) => {
     if (!state.liveTui) return;
-    // Double Esc releases keyboard capture back to the page.
-    if (e.key === "Escape") {
-      if (state.liveTuiEscArmed) {
-        e.preventDefault();
-        state.liveTuiEscArmed = false;
-        $("live-tui-input")?.focus();
-        return;
-      }
-      state.liveTuiEscArmed = true;
-      setTimeout(() => { state.liveTuiEscArmed = false; }, 600);
-    } else {
-      state.liveTuiEscArmed = false;
+    // The text field owns the keyboard whenever it has focus — that is where
+    // a system IME composes, and none of it may leak into the terminal.
+    if (document.activeElement !== e.currentTarget) return;
+    // Release chord. NOT Esc Esc: that is the agent's own rewind, and this
+    // pane exists to deliver it.
+    if (e.key === "Escape" && e.shiftKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      $("live-tui-input")?.focus();
+      return;
     }
-    const name = liveTuiKeyName(e);
-    if (!name) return;
+    const spec = liveTuiKeySpec(e);
+    if (!spec) return;
     e.preventDefault();
-    if (name.length === 1 && !e.ctrlKey && !e.metaKey) {
-      sendLiveTuiKeys(null, name);
-    } else {
-      sendLiveTuiKeys([name]);
-    }
+    e.stopPropagation();
+    if (spec.text) typeLiveTuiText(spec.text);
+    else sendLiveTuiKeys(spec.keys);
+  });
+  // Paste straight into the terminal (Cmd/Ctrl+V is left to the browser so
+  // this event is what actually carries the text).
+  $("live-tui-pane")?.addEventListener("paste", (e) => {
+    if (!state.liveTui) return;
+    const text = e.clipboardData?.getData("text") || "";
+    if (!text) return;
+    e.preventDefault();
+    sendLiveTuiKeys(null, text);
   });
   $("btn-live-tui-send")?.addEventListener("click", () => {
     const input = $("live-tui-input");
@@ -5006,7 +5310,9 @@ function wire() {
     if (input) input.value = "";
   });
   $("live-tui-input")?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
+    // isComposing: Enter while an IME candidate window is open commits the
+    // candidate — it is not the user sending the line.
+    if (e.key === "Enter" && !e.isComposing) {
       e.preventDefault();
       $("btn-live-tui-send")?.click();
     }

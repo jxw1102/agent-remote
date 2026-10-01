@@ -993,6 +993,27 @@ button.icon-btn.icon-idle {
 .live-tui-keys button[data-tui-key="Ctrl+C"] {
   width: 2.25rem;
 }
+/* Keystrokes reach the host only while the pane holds focus — this chip is
+   the switch and the indicator, so the state is never a guess. */
+.tui-capture {
+  flex: none;
+  padding: 2px 8px;
+  height: 22px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+}
+.tui-capture.on {
+  color: var(--ok, #5fc98b);
+  border-color: color-mix(in srgb, var(--ok, #5fc98b) 55%, transparent);
+  background: color-mix(in srgb, var(--ok, #5fc98b) 14%, transparent);
+}
 .live-tui-pane {
   flex: 1;
   min-height: 0;
@@ -1000,16 +1021,28 @@ button.icon-btn.icon-idle {
   padding: 12px 14px;
   overflow: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12.5px;
+  /* Start at the cap; app.js scales it down until the host's own column
+     count fits the window. */
+  font-size: 13px;
   line-height: 1.35;
-  white-space: pre-wrap;
-  word-break: break-word;
+  /* `pre`, never `pre-wrap`: a terminal frame is a grid, and reflowing it
+     shredded every box border. Too narrow to fit at the minimum font size
+     scrolls sideways instead. */
+  white-space: pre;
   color: #d0d4dc;
   background: #0a0c10;
   outline: none;
   cursor: text;
 }
-/* ANSI colour spans from ansiToHtml() — keep mono + pre-wrap on parent. */
+/* The screen itself: exactly as wide as the host pane, centred in a window
+   wider than that instead of stretching across it. */
+#live-tui-screen {
+  display: block;
+  width: max-content;
+  margin: 0 auto;
+  font: inherit;
+}
+/* ANSI colour spans from ansiToHtml() — keep mono + pre on the parent. */
 .live-tui-pane span {
   white-space: inherit;
   font-family: inherit;
@@ -1021,6 +1054,11 @@ button.icon-btn.icon-idle {
 .live-tui-pane.empty-tui {
   color: var(--dim);
   font-style: italic;
+}
+/* Status copy, not a frame — let it wrap in the pane's width. */
+.live-tui-pane.empty-tui #live-tui-screen {
+  white-space: pre-wrap;
+  width: auto;
 }
 .live-tui-line {
   display: flex;

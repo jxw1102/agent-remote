@@ -134,10 +134,22 @@
         <!-- Meta row (status may change length) — never shares a line with keys. -->
         <div class="live-tui-meta">
           <span id="live-tui-status" class="live-tui-status">Host TUI</span>
-          <span class="live-tui-hint">Click pane to capture keys · Esc Esc releases</span>
+          <!-- Capture chip: the one place that says where the keyboard goes.
+               Pressed = the pane owns every keystroke; released = the text
+               field below does, so a system IME can compose there. -->
+          <button id="btn-tui-capture" type="button" class="tui-capture"
+                  aria-pressed="false"
+                  title="Send every keystroke to the host terminal">
+            Keys: text field
+          </button>
+          <span id="live-tui-hint" class="live-tui-hint">
+            Click the pane to send keys
+          </span>
           <button id="btn-live-tui-close" type="button" class="ghost">Transcript</button>
         </div>
-        <!-- Soft keys: fixed-size buttons on their own row so layout never shifts. -->
+        <!-- Soft keys: fixed-size buttons on their own row so layout never
+             shifts. This row is deliberately the original eight — everything
+             else reaches the host by being typed at the focused pane. -->
         <div class="live-tui-keys" role="toolbar" aria-label="Live TUI keys">
           <button type="button" data-tui-key="Escape" title="Escape">Esc</button>
           <button type="button" data-tui-key="Enter" title="Enter">Enter</button>
@@ -149,10 +161,15 @@
           <button type="button" data-tui-key="Ctrl+C" title="Ctrl+C">^C</button>
         </div>
       </div>
-      <pre id="live-tui-pane" class="live-tui-pane" aria-live="polite"></pre>
+      <!-- tabindex: a <pre> takes no focus of its own, so without this the
+           pane could never receive a keystroke. The inner <code> is the
+           screen — it keeps the host's column count and centres in a wide
+           window instead of stretching across it. -->
+      <pre id="live-tui-pane" class="live-tui-pane" tabindex="0"
+           role="group" aria-label="Host terminal"><code id="live-tui-screen"></code></pre>
       <div class="live-tui-line">
         <input id="live-tui-input" type="text" autocomplete="off" spellcheck="false"
-               placeholder="Type here, or focus the pane for direct keys · Enter sends line">
+               placeholder="Type here (IME welcome) · Enter sends the line">
         <button id="btn-live-tui-send" class="primary" type="button">Send line</button>
       </div>
     </div>
