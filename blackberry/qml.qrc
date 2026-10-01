@@ -1,0 +1,26 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<!--
+  QML documents compiled into the binary by rcc.
+
+  Qt 4.8 has no bytecode form of QML. rcc embeds the text and
+  QDeclarative still parses it. The aliases keep every document
+  flat at qrc:///, so relative sources and implicit types resolve
+  the same way they did under asset:///.
+
+  assets/ still ships the same files. The app falls back to
+  asset:/// if the resource copy will not build a scene.
+-->
+<qresource prefix="/">
+    <file alias="DropSheet.qml">assets/DropSheet.qml</file>
+    <file alias="LiveTuiSheet.qml">assets/LiveTuiSheet.qml</file>
+    <file alias="NewSessionSheet.qml">assets/NewSessionSheet.qml</file>
+    <file alias="ProjectsPage.qml">assets/ProjectsPage.qml</file>
+    <file alias="QuestionSheet.qml">assets/QuestionSheet.qml</file>
+    <file alias="QueueSheet.qml">assets/QueueSheet.qml</file>
+    <file alias="SessionSheet.qml">assets/SessionSheet.qml</file>
+    <file alias="SettingsSheet.qml">assets/SettingsSheet.qml</file>
+    <file alias="TranscriptPage.qml">assets/TranscriptPage.qml</file>
+    <file alias="UsageSheet.qml">assets/UsageSheet.qml</file>
+    <file alias="main.qml">assets/main.qml</file>
+</qresource>
+</RCC>

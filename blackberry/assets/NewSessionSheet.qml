@@ -61,6 +61,7 @@ Sheet {
             else if (h == "codex") label = "Codex";
             else if (h == "deepseek" || h == "dsh") label = "DeepSeek";
             else if (h == "cursor" || h == "cursor-agent") label = "Cursor";
+            else if (h == "copilot" || h == "github-copilot") label = "Copilot";
             else if (label.length > 0)
                 label = label.charAt(0).toUpperCase() + label.substring(1);
             harnessModel.append({
@@ -218,6 +219,8 @@ Sheet {
                              || newSessionSheet.harness == "dsh") name = "DeepSeek";
                     else if (newSessionSheet.harness == "cursor"
                              || newSessionSheet.harness == "cursor-agent") name = "Cursor";
+                    else if (newSessionSheet.harness == "copilot"
+                             || newSessionSheet.harness == "github-copilot") name = "Copilot";
                     else if (a) name = a.agentName;
                     return qsTr("What should %1 do?").arg(name);
                 }

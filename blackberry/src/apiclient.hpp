@@ -1,10 +1,12 @@
 #ifndef APICLIENT_HPP
 #define APICLIENT_HPP
 
+#include <QFile>
 #include <QHash>
 #include <QMap>
 #include <QNetworkAccessManager>
 #include <QObject>
+#include <QPointer>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -219,6 +221,14 @@ class ApiClient : public QObject
     // the edit travels on its own pin and QML mutates its model in place.
     // action: insert | remove | replace; index is the C++ m_messages index
     // (QML adds 1 when its model is showing the "older" row on top).
+    // "Load older" page: travels on its OWN pin so QML can insert the rows
+    // above what is on screen instead of clearing and re-filling the model
+    // (a messageRev rebuild snaps the list to the top, then jumps back to an
+    // anchor). prependItems are the new rows only, oldest first; the model
+    // gains them just below the "older" row, which QML drops once
+    // canLoadOlder is false. Same idea as BBCord's chatMessagesPrepended.
+    Q_PROPERTY(int prependRev READ prependRev NOTIFY prependChanged)
+    Q_PROPERTY(QVariantList prependItems READ prependItems NOTIFY prependChanged)
     Q_PROPERTY(int stepEditRev READ stepEditRev NOTIFY stepEditChanged)
     Q_PROPERTY(QString stepEditAction READ stepEditAction NOTIFY stepEditChanged)
     Q_PROPERTY(int stepEditIndex READ stepEditIndex NOTIFY stepEditChanged)
@@ -545,6 +555,8 @@ public:
 
     // ---- Process view ----
     bool processView() const;
+    int prependRev() const { return m_prependRev; }
+    QVariantList prependItems() const { return m_prependItems; }
     int stepEditRev() const { return m_stepEditRev; }
     QString stepEditAction() const { return m_stepEditAction; }
     int stepEditIndex() const { return m_stepEditIndex; }
@@ -583,6 +595,7 @@ Q_SIGNALS:
     void questionChanged();
     void queueChanged();
     void processViewChanged();
+    void prependChanged();
     void stepEditChanged();
     void newSessionRequestChanged();
     void attachChanged();
@@ -593,9 +606,13 @@ Q_SIGNALS:
 private Q_SLOTS:
     void onFinished(QNetworkReply *reply);
     void onRenamePromptFinished(bb::system::SystemUiResult::Type result);
-    // Inbox download progress — a 50 MB zip over Wi-Fi is many seconds of
-    // otherwise-dead "Downloading..." text.
-    void onDropDownloadProgress(qint64 received, qint64 total);
+    // Inbox download: the body is written to a .part file as it arrives
+    // (never held in RAM), an idle timer aborts a stalled link, and a lost
+    // link resumes with Range (daemon 2.14.2+) instead of starting over.
+    void startDropRequest();
+    void onDropReadyRead();
+    void onDropReplyFinished();
+    void onDropIdle();
     void pollJob();
     void pollTui();
     void onStatusFrame(const QByteArray &payload);
@@ -887,7 +904,10 @@ private:
 
     int m_attachRev;
     QString m_lastAttachmentPath;
-    QByteArray m_uploadPayload;
+    // Chunked upload reads each chunk from the file as it is sent; the
+    // whole file is never held in memory (a 200 MB upload on a phone).
+    QString m_uploadPath;
+    qint64 m_uploadSize;
     QString m_uploadName;
     QString m_uploadId;
     QString m_uploadSid;
@@ -935,8 +955,25 @@ private:
     qint64 m_stepsLiveAtMs;
     bool m_stepsLivePending;
     qint64 m_dropProgressAtMs;
+    // The one inbox download in flight (the sheet has one status line).
+    QPointer<QNetworkReply> m_dlReply;
+    QFile *m_dlFile;
+    QTimer m_dlIdle;
+    QString m_dlName, m_dlBase, m_dlToken, m_dlServed, m_dlEtag;
+    qint64 m_dlGot, m_dlTotal;
+    bool m_dlResumable, m_dlHeadSeen;
+    int m_dlAttempt;
+    void updateDropProgress(bool force);
+    void failDropDownload(const QString &why);
+    void finishDropDownload();
     void publishStepEdit(const QString &action, int index,
                          const QVariantMap &item);
+    // Diagnostic build: ship the previous run's trace (trace.hpp) and any
+    // crash log to the daemon once per launch, so the grey-icon hang can be
+    // read on the host without digging through the phone's File Manager.
+    void sendTraceOnce();
+    int m_prependRev;
+    QVariantList m_prependItems;
     int m_stepEditRev;
     QString m_stepEditAction;
     int m_stepEditIndex;

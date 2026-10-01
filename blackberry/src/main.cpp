@@ -6,9 +6,13 @@
 #include <QColor>
 #include <QTextCodec>
 
+#include <unistd.h>
+
 #include "applicationui.hpp"
 #include "brand.hpp"
 #include "crashguard.hpp"
+#include "socksproxy.hpp"
+#include "trace.hpp"
 
 using namespace bb::cascades;
 
@@ -17,8 +21,14 @@ Q_DECL_EXPORT int main(int argc, char **argv)
     // Before anything else: fatal signals dump a backtrace to the sandbox
     // (shown in Settings -> Crash / error log on the next launch).
     CrashGuard::install();
+    traceInit("3.2.6");
 
     Application app(argc, argv);
+    traceMark("Application constructed");
+
+    // QNetworkAccessManager + QTcpSocket: V2Ray SOCKS5 127.0.0.1:10808 when up.
+    installSocks10808ApplicationProxy();
+    traceMark("app-wide SOCKS proxy factory installed");
 
     // The sources are UTF-8, but Qt 4.8 decodes plain char* literals and
     // tr() through Latin-1 by default — a source "·" (bytes C2 B7) rendered
@@ -49,5 +59,12 @@ Q_DECL_EXPORT int main(int argc, char **argv)
 
     ApplicationUI appui;
     Q_UNUSED(appui);
-    return Application::exec();
+    traceMark("entering event loop");
+    const int rc = Application::exec();
+    traceMark("event loop returned rc=%d; _exit now", rc);
+    // Skip teardown on purpose: it is where the proxied network stack
+    // stalled, leaving a grey icon that would not relaunch (see
+    // ApplicationUI::armQuitWatchdog). Settings are already on disk.
+    _exit(rc);
+    return rc;
 }

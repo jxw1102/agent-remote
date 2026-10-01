@@ -33,7 +33,9 @@ SOURCES += $${PWD}/src/main.cpp \
            $${PWD}/src/statussse.cpp \
            $${PWD}/src/crashguard.cpp \
            $${PWD}/src/chime.cpp \
-           $${PWD}/src/richpaint.cpp
+           $${PWD}/src/richpaint.cpp \
+           $${PWD}/src/socksproxy.cpp \
+           $${PWD}/src/trace.cpp
 
 HEADERS += $${PWD}/src/applicationui.hpp \
            $${PWD}/src/apiclient.hpp \
@@ -42,9 +44,17 @@ HEADERS += $${PWD}/src/applicationui.hpp \
            $${PWD}/src/crashguard.hpp \
            $${PWD}/src/chime.hpp \
            $${PWD}/src/richpaint.hpp \
-           $${PWD}/src/brand.hpp
+           $${PWD}/src/brand.hpp \
+           $${PWD}/src/socksproxy.hpp \
+           $${PWD}/src/trace.hpp
 
-INCLUDEPATH += $${PWD}/src
+# A/B build switch: `touch blackberry/NO_SOCKS` builds with the V2Ray SOCKS
+# proxy compiled OUT (everything else identical), to prove whether the
+# Qt-level proxy is what leaves a grey, un-relaunchable icon after close.
+exists($${PWD}/NO_SOCKS): DEFINES += AR_NO_SOCKS
+SOCKS10808_ROOT = $${PWD}/../../third_party/socks10808
+INCLUDEPATH += $${PWD}/src $${SOCKS10808_ROOT}
+SOURCES += $${SOCKS10808_ROOT}/socks10808.c
 
 lupdate_inclusion {
     SOURCES += $${PWD}/assets/*.qml
@@ -58,3 +68,7 @@ device {
         DESTDIR = $${PWD}/arm/o.le-v7
     }
 }
+
+# QML documents compiled into the binary by rcc. See qml.qrc.
+# Qt 4.8 embeds the text; assets/ remains the fallback.
+RESOURCES += $${PWD}/qml.qrc

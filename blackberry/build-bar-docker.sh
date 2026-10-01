@@ -28,6 +28,7 @@ fi
 TARGET=AgentRemote
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+WS_DIR="$(cd "$APP_DIR/../.." && pwd)"
 OUTDIR="${OUTDIR:-$(cd "$APP_DIR/.." && pwd)/dist}"
 mkdir -p "$OUTDIR"
 # Container users (e.g. admin in delaya73/bbndk) often cannot write a 0755
@@ -78,9 +79,11 @@ fi
 BUILD=/tmp/build
 rm -rf "$BUILD"; mkdir -p "$BUILD"
 cp -a /src/. "$BUILD/"
+cp -a /third_party /tmp/third_party
 cd "$BUILD"
 rm -rf arm Makefile Makefile.* release debug 2>/dev/null || true
 mkdir -p arm/o.le-v7 arm/o.le-v7-g release debug
+sed -i "s|^SOCKS10808_ROOT = .*|SOCKS10808_ROOT = /tmp/third_party/socks10808|" app.pro
 
 SPEC=blackberry-armv7le-qcc
 [ -d "$QNX_TARGET/usr/share/qt4/mkspecs/$SPEC" ] || SPEC=blackberry-armle-v7-qcc
@@ -127,6 +130,7 @@ for IMG in $IMAGES; do
     echo "=== trying image: $IMG ==="
     if docker run --rm --platform linux/amd64 \
         -v "$APP_DIR":/src:ro \
+        -v "$WS_DIR/third_party":/third_party:ro \
         -v "$OUTDIR":/out \
         "$IMG" bash -c "$INNER"; then
         echo "OK: $OUTDIR/$TARGET.bar (built in $IMG)"

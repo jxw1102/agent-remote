@@ -138,9 +138,21 @@ Sheet {
                                 textStyle.fontWeight: FontWeight.Bold
                             }
 
-                            // Progress bar: filled portion + remainder (track
-                            // shows through the transparent remainder). Filled
-                            // color follows severity (green / amber / red).
+                            // Progress bar: a grey track with one filled
+                            // child. Its width is a PIXEL COUNT the C++ side
+                            // computed from the device screen width and the
+                            // percentage (ApiClient stampUsageBar) and stamped
+                            // into the row, because Cascades has no fractional
+                            // width and the two QML ways of faking one both
+                            // failed on device (2026-09-19): a StackLayout
+                            // spaceQuota of 0 means "use your preferred size",
+                            // not "no width", so 0% still drew a stub and 100%
+                            // never closed the last of the track; and a width
+                            // that reaches through ListItem.view is not
+                            // re-evaluated when a row visual is recycled, so
+                            // one 100% row drew half full. ListItemData is the
+                            // channel a recycled row does re-read.
+                            //
                             // A spend-only row (show_bar false: Cursor
                             // Enterprise reports dollars, no limit) has no
                             // percentage, so no bar; absent means true.
@@ -161,15 +173,12 @@ Sheet {
                                         ? "#e0524f"
                                         : (ListItemData.severity == "warning"
                                            ? "#e0a020" : "#4a9d5b"))
-                                    layoutProperties: StackLayoutProperties {
-                                        spaceQuota: ListItemData.percent
-                                    }
-                                }
-                                Container {
-                                    verticalAlignment: VerticalAlignment.Fill
-                                    layoutProperties: StackLayoutProperties {
-                                        spaceQuota: 100 - ListItemData.percent
-                                    }
+                                    preferredWidth: ListItemData.bar_width
+                                                    ? ListItemData.bar_width : 0
+                                    // 0% asks for no control at all rather
+                                    // than a 0-wide one.
+                                    visible: (ListItemData.bar_width
+                                              ? ListItemData.bar_width : 0) > 0
                                 }
                             }
 

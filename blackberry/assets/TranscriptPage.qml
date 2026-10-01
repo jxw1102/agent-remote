@@ -112,6 +112,55 @@ Page {
             messagesModel.replace(idx, a.stepEditItem);
     }
 
+    // Loading state of the top row. It is a DIFFERENT row type while a page
+    // is in flight ("olderloading": a spinner), swapped in the model here.
+    // Restyling one row through ListItem.view did not update on device - the
+    // up arrow stayed while the page loaded - so the state travels the one
+    // way a list row reliably picks up: the model itself.
+    property bool olderLoadingPin: transcriptPage.api
+                                   ? transcriptPage.api.loadingOlder : false
+    onOlderLoadingPinChanged: {
+        if (messagesModel.size() <= 0)
+            return;
+        var k = "" + messagesModel.data([ 0 ]).kind;
+        if (k != "older" && k != "olderloading")
+            return;
+        var want = olderLoadingPin ? "olderloading" : "older";
+        if (k != want)
+            messagesModel.replace(0, { kind: want, text: "", rich: "", live: false });
+    }
+
+    // A "load older" page arrived: insert it ABOVE the rows on screen,
+    // below the "older" row, instead of clearing and re-filling the model.
+    // rebuild() snaps the list to the top and then jumps back to an anchor,
+    // which read as a flicker every time; an insert into the live model
+    // lets the ListView hold the reader's place by itself (BBCord does the
+    // same with m_chatDataModel->insert). The "older" row goes once there
+    // is nothing further back.
+    property int prependPin: transcriptPage.api
+                             ? transcriptPage.api.prependRev : -1
+    property int seenPrependRev: -1
+    onPrependPinChanged: {
+        if (seenPrependRev < 0 || ! transcriptPage.api) {
+            seenPrependRev = prependPin;
+            return;
+        }
+        if (prependPin == seenPrependRev)
+            return;
+        seenPrependRev = prependPin;
+        var a = transcriptPage.api;
+        var topKind = messagesModel.size() > 0
+                ? "" + messagesModel.data([ 0 ]).kind : "";
+        var hasOlderRow = topKind == "older" || topKind == "olderloading";
+        if (hasOlderRow && ! a.canLoadOlder) {
+            messagesModel.removeAt(0);
+            hasOlderRow = false;
+        }
+        var items = a.prependItems;
+        if (items && items.length > 0)
+            messagesModel.insert(hasOlderRow ? 1 : 0, items);
+    }
+
     // The pusher sets `api` after creation completes.
     onApiChanged: {
         if (ready && transcriptPage.api)
@@ -122,9 +171,13 @@ Page {
         var a = transcriptPage.api;
         if (! a)
             return;
+        // A rebuild scrolls on its own (clear -> top, then to the end);
+        // none of that is the reader asking for history.
+        messagesList.olderArmed = false;
         messagesModel.clear();
         if (a.canLoadOlder)
-            messagesModel.append({ kind: "older", text: "", rich: "", live: false });
+            messagesModel.append({ kind: a.loadingOlder ? "olderloading" : "older",
+                                   text: "", rich: "", live: false });
         messagesModel.append(a.messages);
         // Clearing the model reset the list to the top. A "load older"
         // prepend carries the index of the row the reader was on — scroll
@@ -325,9 +378,18 @@ Page {
             // Called from the "older" list item (ListItem.view bridge -
             // list item components can't see the page's `api` pin).
             function loadOlderNow() {
-                if (transcriptPage.api)
-                    transcriptPage.api.loadOlder();
+                var a = transcriptPage.api;
+                if (a && a.canLoadOlder && ! a.loadingOlder)
+                    a.loadOlder();
             }
+
+            // Load older history on its own when the reader scrolls to the
+            // top (BBCord's ListScrollStateHandler pattern). Armed only
+            // once the list has been AWAY from the top: the first render
+            // starts at the top before it scrolls to the end, and that must
+            // not count as asking for more. The "older" row stays as a tap
+            // fallback, for a transcript short enough never to scroll.
+            property bool olderArmed: false
 
             // Brand theme bridged to the item components (they can't see
             // the page's `api` pin - GrokRemote lesson).
@@ -358,6 +420,14 @@ Page {
                         if (layoutFrame.width > 0)
                             messagesList.rowWidth = layoutFrame.width
                     }
+                },
+                ListScrollStateHandler {
+                    onAtBeginningChanged: {
+                        if (! atBeginning)
+                            messagesList.olderArmed = true;
+                        else if (messagesList.olderArmed)
+                            messagesList.loadOlderNow();
+                    }
                 }
             ]
 
@@ -384,7 +454,8 @@ Page {
                 if (! data || ! data.kind)
                     return "p";
                 var k = "" + data.kind;
-                if (k == "older" || k == "gap" || k == "hr" || k == "user"
+                if (k == "older" || k == "olderloading"
+                        || k == "gap" || k == "hr" || k == "user"
                         || k == "meta" || k == "h" || k == "li" || k == "code"
                         || k == "paintimg" || k == "th" || k == "tr"
                         || k == "step" || k == "stepbody")
@@ -409,9 +480,44 @@ Page {
                         layout: DockLayout {}
                         Label {
                             horizontalAlignment: HorizontalAlignment.Center
-                            text: qsTr("↑  Load older messages")
+                            text: qsTr("↑  Earlier messages")
                             textStyle.fontSize: FontSize.Small
                             textStyle.color: Color.create(ListItem.view.accent)
+                        }
+                    }
+                },
+                // The same top row while a page is loading: a spinner in
+                // place of the arrow. Scrolling to the top starts the page
+                // automatically, and this row is what is on screen then.
+                ListItemComponent {
+                    type: "olderloading"
+                    Container {
+                        horizontalAlignment: HorizontalAlignment.Fill
+                        preferredWidth: ListItem.view
+                                        ? ListItem.view.rowWidth : 720
+                        background: Color.create("#121212")
+                        topPadding: 12
+                        bottomPadding: 12
+                        layout: DockLayout {}
+                        Container {
+                            horizontalAlignment: HorizontalAlignment.Center
+                            verticalAlignment: VerticalAlignment.Center
+                            layout: StackLayout {
+                                orientation: LayoutOrientation.LeftToRight
+                            }
+                            ActivityIndicator {
+                                verticalAlignment: VerticalAlignment.Center
+                                preferredWidth: 32
+                                preferredHeight: 32
+                                rightMargin: 12
+                                running: true
+                            }
+                            Label {
+                                verticalAlignment: VerticalAlignment.Center
+                                text: qsTr("Loading earlier messages…")
+                                textStyle.fontSize: FontSize.Small
+                                textStyle.color: Color.create("#9a9a9a")
+                            }
                         }
                     }
                 },
