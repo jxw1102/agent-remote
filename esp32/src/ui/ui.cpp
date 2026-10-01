@@ -220,6 +220,9 @@ void cue(chime::Cue c) {
 lv_color_t providerColor(const String &p) {
   if (p.startsWith("cl")) return lv_color_hex(0xd97757);  // Claude warm orange
   if (p.startsWith("cu")) return lv_color_hex(0xd946ef);  // Cursor magenta
+  // "cop" before "co": Copilot would otherwise take Codex's teal.
+  if (p.startsWith("cop") || p.startsWith("github-cop"))
+    return lv_color_hex(0x8957e5);                         // Copilot purple
   if (p.startsWith("co")) return lv_color_hex(0x10a37f);  // Codex teal
   if (p.startsWith("gr")) return lv_color_hex(0x00d4ff);  // Grok icon cyan
   if (p.startsWith("de") || p.startsWith("ds")) return lv_color_hex(0x4d6bfe);
