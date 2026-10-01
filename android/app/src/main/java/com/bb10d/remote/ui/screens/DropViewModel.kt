@@ -22,6 +22,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
+import java.io.OutputStream
 
 data class DropFeed(
     val loading: Boolean = false,
@@ -87,6 +89,11 @@ class DropViewModel(private val repo: AgentRepository) : ViewModel() {
 
     fun isDownloading(profileId: String, name: String) = downloading.contains("$profileId/$name")
 
+    /** Fraction received per download key; absent while the size is unknown. */
+    private var progress by mutableStateOf<Map<String, Float>>(emptyMap())
+
+    fun downloadProgress(profileId: String, name: String): Float? = progress["$profileId/$name"]
+
     fun clearMessage() {
         _message.value = null
     }
@@ -126,59 +133,99 @@ class DropViewModel(private val repo: AgentRepository) : ViewModel() {
         }
     }
 
-    /**
-     * Saves into the phone's Downloads.
-     *
-     * MediaStore is the only way to write there without a storage permission,
-     * and it only exists from Android 10 — older devices fall back to the
-     * app's own external files directory, which needs no permission either.
-     */
+    /** Saves into the phone's Downloads, written to disk as it arrives. */
     fun download(context: Context, profileId: String, name: String) {
         val client = repo.client(profileId) ?: return
         val key = "$profileId/$name"
         if (downloading.contains(key)) return
         downloading = downloading + key
         viewModelScope.launch {
+            val sink = DownloadSink(context)
+            var lastPct = -1
             runCatching {
                 // Save under the name the daemon served, not the entry name:
                 // a folder arrives zipped, so its download is "<name>.zip".
-                val payload = client.dropDownload(name)
-                withContext(Dispatchers.IO) { save(context, payload.name, payload.bytes) }
+                val saved = client.dropDownload(name, sink::open) { got, total ->
+                    if (total > 0) {
+                        val pct = ((got * 100) / total).toInt()
+                        if (pct != lastPct) {
+                            lastPct = pct
+                            viewModelScope.launch { progress = progress + (key to pct / 100f) }
+                        }
+                    }
+                }
+                withContext(Dispatchers.IO) { sink.finish() }
+                saved
             }
-                .onSuccess { _message.value = "Saved to $it" }
-                .onFailure { _message.value = repo.reason(it) }
+                .onSuccess { _message.value = "Saved to ${sink.where}" }
+                .onFailure {
+                    withContext(Dispatchers.IO) { sink.discard() }
+                    _message.value = repo.reason(it)
+                }
             downloading = downloading - key
+            progress = progress - key
         }
     }
 
-    private fun save(context: Context, name: String, bytes: ByteArray): String {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, name)
-                // application/zip, so tapping the finished download opens the
-                // archive instead of the "can't open this file" dialog.
-                val mime = if (name.endsWith(".zip", ignoreCase = true)) {
-                    "application/zip"
-                } else {
-                    "application/octet-stream"
+    /**
+     * Where a download lands in the phone's Downloads, written as it arrives.
+     *
+     * MediaStore is the only way to write there without a storage permission,
+     * and it only exists from Android 10 — older devices fall back to the
+     * app's own external files directory, which needs no permission either.
+     * [open] may be called a second time (the host's file changed mid-resume):
+     * the half-written entry is dropped and a fresh one begun.
+     */
+    private class DownloadSink(private val context: Context) {
+        private var uri: android.net.Uri? = null
+        private var file: File? = null
+        var where: String = ""
+            private set
+
+        fun open(name: String): OutputStream {
+            discard()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, name)
+                    // application/zip, so tapping the finished download opens
+                    // the archive instead of the "can't open this file" dialog.
+                    val mime = if (name.endsWith(".zip", ignoreCase = true)) {
+                        "application/zip"
+                    } else {
+                        "application/octet-stream"
+                    }
+                    put(MediaStore.Downloads.MIME_TYPE, mime)
+                    put(MediaStore.Downloads.IS_PENDING, 1)
                 }
-                put(MediaStore.Downloads.MIME_TYPE, mime)
-                put(MediaStore.Downloads.IS_PENDING, 1)
+                val resolver = context.contentResolver
+                val u = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: error("Could not create the download")
+                uri = u
+                where = "Downloads/$name"
+                return resolver.openOutputStream(u) ?: error("Could not write the download")
             }
-            val resolver = context.contentResolver
-            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: error("Could not create the download")
-            resolver.openOutputStream(uri)?.use { it.write(bytes) }
-                ?: error("Could not write the download")
-            values.clear()
-            values.put(MediaStore.Downloads.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
-            return "Downloads/$name"
+            val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                ?: context.filesDir
+            val f = File(dir, name)
+            file = f
+            where = f.absolutePath
+            return FileOutputStream(f)
         }
-        val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-            ?: context.filesDir
-        val file = File(dir, name)
-        file.writeBytes(bytes)
-        return file.absolutePath
+
+        /** Publishes the finished MediaStore entry (no-op for a plain file). */
+        fun finish() {
+            val u = uri ?: return
+            val values = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
+            context.contentResolver.update(u, values, null, null)
+            uri = null
+        }
+
+        /** Removes a half-written download so a failure leaves no stub. */
+        fun discard() {
+            uri?.let { runCatching { context.contentResolver.delete(it, null, null) } }
+            file?.let { runCatching { it.delete() } }
+            uri = null
+            file = null
+        }
     }
 }

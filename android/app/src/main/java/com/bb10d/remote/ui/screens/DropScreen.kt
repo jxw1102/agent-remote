@@ -146,6 +146,7 @@ fun DropScreen(vm: DropViewModel, onBack: () -> Unit) {
                 DropFileRow(
                     row = row,
                     downloading = vm.isDownloading(row.profileId, row.file.name),
+                    progress = vm.downloadProgress(row.profileId, row.file.name),
                     onDownload = { vm.download(context, row.profileId, row.file.name) },
                     onDelete = { vm.delete(row.profileId, row.file.name) },
                 )
@@ -168,6 +169,7 @@ fun DropScreen(vm: DropViewModel, onBack: () -> Unit) {
 private fun DropFileRow(
     row: DropRow,
     downloading: Boolean,
+    progress: Float?,
     onDownload: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -208,7 +210,13 @@ private fun DropFileRow(
                 )
             }
         }
-        if (downloading) {
+        if (downloading && progress != null) {
+            CircularProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+            )
+        } else if (downloading) {
             CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
         } else {
             IconButton(onClick = onDownload) {

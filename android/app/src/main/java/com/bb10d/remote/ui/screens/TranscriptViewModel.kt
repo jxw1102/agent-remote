@@ -989,6 +989,13 @@ class TranscriptViewModel(
             return
         }
         val safeName = name.ifBlank { "file" }
+        // Say so up front rather than upload hundreds of chunks for the
+        // daemon to refuse at the end.
+        val maxMb = profile.value?.caps?.maxUploadMb ?: 16
+        if (bytes.size.toLong() > maxMb.toLong() * 1024 * 1024) {
+            setStatus("$safeName is too large (max $maxMb MB on this daemon)")
+            return
+        }
         val chip = ComposerAttachment(id = UUID.randomUUID().toString(), name = safeName)
         _attachments.value = _attachments.value + chip
         viewModelScope.launch {

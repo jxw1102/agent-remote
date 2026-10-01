@@ -21,6 +21,7 @@ import com.bb10d.remote.data.TitleDto
 import com.bb10d.remote.data.TuiFrameDto
 import com.bb10d.remote.data.UsageDto
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.JsonArray
@@ -38,6 +39,7 @@ import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.IOException
+import java.io.OutputStream
 import java.net.SocketTimeoutException
 import java.net.URLDecoder
 import java.util.concurrent.TimeUnit
@@ -55,8 +57,8 @@ class DaemonException(
     val conflict: Boolean get() = status == 409
 }
 
-/** One downloaded drop entry: its bytes plus the name the daemon served it as. */
-class DropPayload(val name: String, val bytes: ByteArray)
+/** One finished drop download: the name the daemon served it as, and its size. */
+class DropSaved(val name: String, val bytes: Long)
 
 /**
  * HTTP access to one agentremoted host.
@@ -660,6 +662,15 @@ class DaemonClient(
             Json.parseToJsonElement(text) as? JsonObject
         }.getOrNull()
         if (obj != null) {
+            // A chunk the daemon has stored while it waits for the rest:
+            // {"ok": true, "complete": false} and deliberately no path yet.
+            // Treating that as a failure is why every Android upload over one
+            // chunk (512 KB) died right after the first chunk.
+            val complete = (obj["complete"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull()
+            val okFlag = (obj["ok"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull()
+            if (complete == false && okFlag != false) {
+                return AttachmentDto(ok = true, path = "", size = 0, complete = false)
+            }
             val path = primitiveString(obj["path"]).orEmpty()
             if (path.isNotBlank()) {
                 val size = (obj["size"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L
@@ -680,15 +691,90 @@ class DaemonClient(
         call(request(url("api/drop")).get().build(), DropListDto.serializer())
 
     /**
+     * Streams one drop entry into the stream [start] opens, so its size never
+     * touches the heap (the whole-body read capped downloads at what fit in
+     * RAM, and the daemon used to refuse anything over 64 MB).
+     *
      * The daemon names what it actually served in X-Drop-Name — a folder
-     * arrives zipped as `<name>.zip` — so the caller saves under that, not
-     * under the entry name it asked for.
+     * arrives zipped as `<name>.zip` — and [start] gets that name. The read
+     * timeout is an IDLE limit (60 s without a byte), not a total one. When
+     * the daemon serves the file with Accept-Ranges (2.14.2+), a dropped link
+     * resumes with Range + If-Range; if the host's copy changed meanwhile the
+     * reply is a whole 200 and [start] is called again to begin from zero.
      */
-    suspend fun dropDownload(name: String): DropPayload {
-        val (headers, bytes) =
-            rawResponse(request(url("api/drop/$name")).get().build(), timeoutSeconds = 180)
-        val served = decodeDropName(headers["X-Drop-Name"], name)
-        return DropPayload(served, bytes)
+    suspend fun dropDownload(
+        name: String,
+        start: (served: String) -> OutputStream,
+        onProgress: (received: Long, total: Long) -> Unit = { _, _ -> },
+    ): DropSaved = withContext(Dispatchers.IO) {
+        val client = clientFor(readTimeoutSeconds = 60)
+        var out: OutputStream? = null
+        var served = name
+        var got = 0L
+        var total = 0L
+        var etag = ""
+        var resumable = false
+        var attempt = 0
+        try {
+            while (true) {
+                val builder = request(url("api/drop/$name")).get()
+                if (got > 0) {
+                    builder.header("Range", "bytes=$got-")
+                    if (etag.isNotEmpty()) builder.header("If-Range", etag)
+                }
+                try {
+                    client.newCall(builder.build()).execute().use { resp ->
+                        if (resp.code !in 200..299) {
+                            val bytes = resp.body?.bytes() ?: ByteArray(0)
+                            throw DaemonException(resp.code, errorText(resp.code, bytes))
+                        }
+                        served = decodeDropName(resp.header("X-Drop-Name"), served)
+                        total = resp.header("X-Drop-Size")?.toLongOrNull() ?: total
+                        etag = resp.header("ETag") ?: etag
+                        resumable = resp.header("Accept-Ranges") == "bytes"
+                        var sink = out
+                        if (sink == null || resp.code != 206) {
+                            runCatching { sink?.close() }
+                            sink = start(served)
+                            out = sink
+                            got = 0
+                        }
+                        val src = resp.body?.byteStream() ?: throw IOException("empty reply")
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = src.read(buf)
+                            if (n < 0) break
+                            sink.write(buf, 0, n)
+                            got += n
+                            onProgress(got, total)
+                        }
+                        if (total > 0 && got < total) throw IOException("connection closed early")
+                    }
+                    out?.close()
+                    out = null
+                    return@withContext DropSaved(served, got)
+                } catch (e: IOException) {
+                    // Only a resumable, part-received file is worth another go.
+                    if (!(resumable && got > 0) || attempt >= 8) {
+                        throw DaemonException(
+                            0,
+                            if (e is SocketTimeoutException) {
+                                "The download stalled (no data for 60 s)"
+                            } else {
+                                e.message?.takeIf { it.isNotBlank() } ?: "Download failed"
+                            },
+                            transport = true,
+                        )
+                    }
+                    delay(minOf(15_000L, 1000L shl attempt))
+                    attempt++
+                }
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("unreachable")
+        } finally {
+            runCatching { out?.close() }
+        }
     }
 
     suspend fun dropDelete(name: String) {

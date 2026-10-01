@@ -499,6 +499,8 @@ data class Caps(
     val share: Boolean = false,
     /** Chunked attachments (agentremoted >= 2.8.6). */
     val chunkedUpload: Boolean = false,
+    /** Largest attachment the daemon accepts (ping max_upload_mb). */
+    val maxUploadMb: Int = 16,
     val providers: List<String> = emptyList(),
     val providerDetails: Map<String, ProviderDetailDto> = emptyMap(),
     val auth: AuthHealthDto? = null,
@@ -625,6 +627,7 @@ data class Caps(
             focus = ping.focus,
             share = ping.share,
             chunkedUpload = ping.chunkedUpload || ping.caps["chunked_upload"] == true,
+            maxUploadMb = ping.maxUploadMb.takeIf { it > 0 } ?: 16,
             providers = ping.providers,
             providerDetails = ping.providerDetails,
             auth = ping.auth,
