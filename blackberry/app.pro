@@ -50,7 +50,11 @@ HEADERS += $${PWD}/src/applicationui.hpp \
 # proxy compiled OUT (everything else identical), to prove whether the
 # Qt-level proxy is what leaves a grey, un-relaunchable icon after close.
 exists($${PWD}/NO_SOCKS): DEFINES += AR_NO_SOCKS
+# The SOCKS tunnel helper is shared by the CyberBerry apps: the
+# cloud-projects monorepo keeps it two levels up, the public mirror
+# carries a copy at third_party/ in the repo root.
 SOCKS10808_ROOT = $${PWD}/../../third_party/socks10808
+!exists($${SOCKS10808_ROOT}/socks10808.c): SOCKS10808_ROOT = $${PWD}/../third_party/socks10808
 INCLUDEPATH += $${PWD}/src $${SOCKS10808_ROOT}
 SOURCES += $${SOCKS10808_ROOT}/socks10808.c
 

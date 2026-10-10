@@ -29,6 +29,14 @@ TARGET=AgentRemote
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 WS_DIR="$(cd "$APP_DIR/../.." && pwd)"
+# Shared helper sources (socks10808): ../../third_party in the monorepo,
+# ../third_party in the public mirror.
+THIRD_PARTY="$WS_DIR/third_party"
+[ -d "$THIRD_PARTY/socks10808" ] || THIRD_PARTY="$(cd "$APP_DIR/.." && pwd)/third_party"
+if [ ! -f "$THIRD_PARTY/socks10808/socks10808.c" ]; then
+    echo "ERROR: third_party/socks10808 not found beside the repo (looked in $WS_DIR and $APP_DIR/..)" >&2
+    exit 2
+fi
 OUTDIR="${OUTDIR:-$(cd "$APP_DIR/.." && pwd)/dist}"
 mkdir -p "$OUTDIR"
 # Container users (e.g. admin in delaya73/bbndk) often cannot write a 0755
@@ -135,7 +143,7 @@ for IMG in $IMAGES; do
     echo "=== trying image: $IMG ==="
     if docker run --rm --platform linux/amd64 \
         -v "$APP_DIR":/src:ro \
-        -v "$WS_DIR/third_party":/third_party:ro \
+        -v "$THIRD_PARTY":/third_party:ro \
         -v "$OUTDIR":/out \
         "$IMG" bash -c "$INNER"; then
         echo "OK: $OUTDIR/$TARGET.bar (built in $IMG)"
