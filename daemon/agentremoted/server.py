@@ -2544,9 +2544,6 @@ class ApiHandler(BaseHTTPRequestHandler):
         if self._deny_if_provider_blocked():
             return
 
-        if path == "/api/clientlog":
-            self._handle_client_log(body)
-            return
 
         if path == "/api/shell":
             self._handle_shell(body)
@@ -2611,9 +2608,6 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _route_post_multi(self, path, query, body):
         """Root POST routes when one profile owns every harness."""
-        if path == "/api/clientlog":
-            self._handle_client_log(body)
-            return
         if path == "/api/shell":
             # Resolve store via session_id so cwd lookup still works.
             sid = ""
@@ -2743,29 +2737,6 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._error(404, "not found")
 
     # -- handlers ----------------------------------------------------------
-
-    def _handle_client_log(self, body):
-        """Append a client-side line (e.g. transcript-load timing) to
-        ~/.agentremoted/client-timing.log so it can be analyzed off-device."""
-        if not isinstance(body, dict):
-            self._send_json({"ok": False}, status=400)
-            return
-        line = str(body.get("line", "")).replace("\n", " ").replace("\r", " ")
-        if not line:
-            self._send_json({"ok": False}, status=400)
-            return
-        tag = str(body.get("app", ""))[:40]
-        try:
-            path = self.config.log_path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            with open(path, "a", encoding="utf-8") as f:
-                f.write("%s [%s %s] %s\n" % (stamp, tag, self.address_string(), line))
-        except OSError as e:
-            log.warning("client log write failed: %s", e)
-            self._send_json({"ok": False}, status=500)
-            return
-        self._send_json({"ok": True})
 
     def _handle_shell(self, body):
         if not isinstance(body, dict) or not isinstance(body.get("command"), str) \

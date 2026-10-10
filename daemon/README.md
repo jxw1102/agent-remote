@@ -19,6 +19,11 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.14.3** The client timing log is gone. `POST /api/clientlog` used to
+append phones' transcript-load timings to `~/.agentremoted/client-timing.log`
+for off-device analysis; nothing has posted to it since the August builds,
+so the endpoint and the file are removed (delete any old copy by hand).
+
 **2.14.2** Large downloads. Drop downloads were capped at 64 MB
 (`max_drop_mb`) because the daemon read the whole file into memory before
 sending it, and every client held the whole reply in memory too. The body now

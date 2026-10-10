@@ -296,10 +296,6 @@ class Config:
             return Path.home() / "Public"
         return CONFIG_DIR / "drop"
 
-    @property
-    def log_path(self) -> Path:
-        return CONFIG_DIR / "client-timing.log"
-
     def provider_names(self) -> list:
         """Ordered list of harnesses this process should load."""
         raw = self._data.get("providers")
