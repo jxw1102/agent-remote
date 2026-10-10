@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Remote — Pebble Time 2 spec</title>
+<style>
+  :root {
+    --page: #14120e;
+    --panel: #1c1914;
+    --ink: #f2ead8;
+    --mute: #9a8f78;
+    --rule: #3a3428;
+    --orange: #FF5500;
+    --cerulean: #00AAFF;
+    --jaeger: #00AA55;
+    --yellow: #FFAA00;
+    --sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Times New Roman", serif;
+    --mono: "SF Mono", "Menlo", "Consolas", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  html, body { margin: 0; background: var(--page); color: var(--ink); }
+  body { font-family: var(--serif); }
+  .rail {
+    position: fixed; top: 0; left: 0; bottom: 0; width: 148px;
+    background: #1c1a16; border-right: 1px solid var(--rule);
+    overflow-y: auto; padding: 16px 10px 32px; z-index: 20;
+  }
+  .rail .brand {
+    font-family: var(--sans); font-size: 11px; color: var(--yellow);
+    margin: 0 0 12px; padding: 0 4px; line-height: 1.3;
+  }
+  .rail a {
+    display: block; text-decoration: none; color: var(--mute);
+    font-family: var(--sans); font-size: 12px; line-height: 1.25;
+    padding: 6px 8px; border: 1px solid transparent;
+    border-radius: 2px 8px 8px 2px; margin-bottom: 4px;
+  }
+  .rail a:hover, .rail a:focus-visible { color: var(--ink); border-color: #5a554c; outline: none; }
+  .rail a.on { background: var(--orange); color: #000; border-color: var(--orange); }
+  .wrap { margin-left: 148px; padding: 40px 48px 96px; max-width: 920px; }
+  .topnav {
+    font-family: var(--sans); font-size: 13px; color: var(--mute); margin: 0 0 28px;
+  }
+  .topnav a { color: var(--cerulean); text-decoration: none; }
+  .topnav a:hover { text-decoration: underline; }
+  h1 {
+    font-size: clamp(28px, 4vw, 44px); letter-spacing: -0.03em;
+    line-height: 1.1; margin: 0 0 12px; font-weight: 700;
+  }
+  h2 {
+    font-size: 26px; letter-spacing: -0.02em; margin: 48px 0 12px;
+    padding-top: 12px; border-top: 1px solid var(--rule); font-weight: 700;
+  }
+  h2:first-of-type { border-top: 0; margin-top: 8px; }
+  h3 { font-size: 18px; margin: 28px 0 8px; font-weight: 700; }
+  h4 { font-size: 16px; margin: 20px 0 8px; font-weight: 700; font-family: var(--sans); }
+  p, li { font-size: 17px; line-height: 1.5; color: var(--ink); }
+  p { margin: 0 0 12px; max-width: 42em; }
+  li { margin: 0 0 6px; }
+  ul, ol { margin: 0 0 16px; padding-left: 1.3em; max-width: 44em; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 28px 0; }
+  a { color: var(--cerulean); }
+  code {
+    font-family: var(--mono); font-size: 0.86em;
+    background: #1f1c18; padding: 0.05em 0.3em; color: #f0e6c8;
+  }
+  pre {
+    background: #0e0d0b; border: 1px solid var(--rule);
+    padding: 14px 16px; overflow-x: auto; font-family: var(--mono);
+    font-size: 13px; line-height: 1.45; color: #e6dcc4; margin: 0 0 18px;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; color: inherit; }
+  pre.mermaid { background: #1a1814; text-align: center; }
+  .table-wrap { overflow-x: auto; margin: 0 0 18px; }
+  table {
+    border-collapse: collapse; font-family: var(--sans); font-size: 14px;
+    width: 100%; min-width: 480px;
+  }
+  th, td {
+    text-align: left; padding: 8px 10px;
+    border-bottom: 1px solid var(--rule); vertical-align: top;
+  }
+  th { color: var(--mute); font-weight: 500; }
+  strong { font-weight: 700; }
+  .lede { color: var(--mute); font-size: 18px; max-width: 40em; margin: 0 0 24px; }
+  .mnav { display: none; }
+  .mnav a {
+    flex: 0 0 auto; text-decoration: none; color: var(--ink);
+    font-family: var(--sans); font-size: 13px; font-weight: 700;
+    line-height: 32px; padding: 0 10px; border: 1px solid #5a554c; background: #2c2924;
+  }
+  @media (max-width: 860px) {
+    .rail { display: none; }
+    .wrap { margin-left: 0; padding: 20px 18px 72px; }
+    .mnav {
+      display: flex; position: sticky; top: 0; z-index: 20;
+      background: #1c1a16; border-bottom: 1px solid var(--rule);
+      padding: 8px 12px; gap: 6px; overflow-x: auto;
+    }
+    h2 { scroll-margin-top: 52px; }
+  }
+</style>
+</head>
+<body>
+<nav class="mnav" aria-label="Jump"><a href="index.html">Mockups</a><a href="#overview">Overview</a><a href="#background-motivation">Why</a><a href="#goals-non-goals">Goals</a><a href="#key-decisions">Decisions</a><a href="#runtime-c-not-alloy">Runtime</a><a href="#proposed-design">Design</a><a href="#api-interface-changes">API</a><a href="#data-model-changes">Data</a><a href="#appmessage-dictionary">AppMessage</a><a href="#poll-strategy-honest">Poll</a><a href="#sequence-diagrams">Sequences</a><a href="#pkjs-module-map">PKJS</a><a href="#watch-module-map">Watch</a><a href="#error-states">Errors</a><a href="#security-privacy-considerations">Security</a><a href="#observability">Logs</a><a href="#battery">Battery</a><a href="#rollout-plan">Rollout</a><a href="#client-parity-agents-md">Client parity (A…</a><a href="#alternatives-considered">Alts</a><a href="#risks">Risks</a><a href="#open-questions">Open</a><a href="#references">Refs</a><a href="#pr-plan">PRs</a></nav>
+<nav class="rail" aria-label="Spec sections">
+  <p class="brand">D+B · Time 2<br>PKJS · voice</p>
+  <a href="index.html">Mockups</a>
+  <a href="#overview">Overview</a>
+  <a href="#background-motivation">Why</a>
+  <a href="#goals-non-goals">Goals</a>
+  <a href="#key-decisions">Decisions</a>
+  <a href="#runtime-c-not-alloy">Runtime</a>
+  <a href="#proposed-design">Design</a>
+  <a href="#api-interface-changes">API</a>
+  <a href="#data-model-changes">Data</a>
+  <a href="#appmessage-dictionary">AppMessage</a>
+  <a href="#poll-strategy-honest">Poll</a>
+  <a href="#sequence-diagrams">Sequences</a>
+  <a href="#pkjs-module-map">PKJS</a>
+  <a href="#watch-module-map">Watch</a>
+  <a href="#error-states">Errors</a>
+  <a href="#security-privacy-considerations">Security</a>
+  <a href="#observability">Logs</a>
+  <a href="#battery">Battery</a>
+  <a href="#rollout-plan">Rollout</a>
+  <a href="#client-parity-agents-md">Client parity (A…</a>
+  <a href="#alternatives-considered">Alts</a>
+  <a href="#risks">Risks</a>
+  <a href="#open-questions">Open</a>
+  <a href="#references">Refs</a>
+  <a href="#pr-plan">PRs</a>
+</nav>
+<div class="wrap">
+  <p class="topnav"><a href="index.html">Mockups</a> · spec · emery 200×228</p>
+  <h1 id='agent-remote-pebble-time-2-client'>Agent Remote — Pebble Time 2 Client</h1>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody><tr><td>Author</td><td>TBD</td></tr><tr><td>Date</td><td>2026-09-09</td></tr><tr><td>Status</td><td>Draft</td></tr><tr><td>Product</td><td><strong>D Pocket agent + B Talk</strong>, one watchapp</td></tr><tr><td>Hardware</td><td>Pebble Time 2 only (<code>emery</code>, 200×228, 64-color MIP)</td></tr><tr><td>Companion</td><td>PKJS inside the official Pebble iOS/Android app + Clay</td></tr><tr><td>Workspace</td><td><code>/Users/xiaowen.ji/Developer/cloud-projects/bb10-remote</code></td></tr><tr><td>Related</td><td><a href="design-preview/index.html"><code>pebble/design-preview/index.html</code></a>, <code>`AGENTS.md`</code>, <code>`daemon/README.md`</code>, <code>`esp32/README.md`</code></td></tr></tbody></table></div>
+<p>This is an implementation spec, not an options document. Product A (Pager pins), C (Desk watchface), Duo/flint, and an Android-<code>PebbleKit</code> companion are out of scope for v1.</p>
+<hr>
+<h2 id='overview'>Overview</h2>
+<p>Agent Remote is a self-hosted daemon (<code>agentremoted</code> 2.9.2) plus clients (web, Android, BlackBerry 10, LILYGO T-LoRa Pager). Clients speak HTTP+JSON to one host. A Pebble Time 2 has <strong>no Wi-Fi</strong>: the watchapp never calls the daemon. PebbleKit JS (PKJS) in the official phone app holds the base URL and token, polls a <strong>reshaped</strong> slice of the existing API, and pushes short UTF-8 strings to the watch over AppMessage.</p>
+<p>The watchapp is <strong>one</strong> native C app on <code>emery</code>:</p>
+<ul><li><strong>Home</strong> is the Focus list (D): urgency order identical to <code>GET /api/focus</code>, provider colour tick, MenuLayer-style rows, last row is <strong>New session</strong>.</li><li><strong>Select</strong> opens the current session (B Talk home + D’s last two plain-text messages). Footer <code>SELECT talk</code>.</li><li><strong>Select</strong> again starts <code>dictation_session_*</code>. Confirm, then <code>POST /api/sessions/&lt;id&gt;/continue</code>.</li><li>Permissions and AskUserQuestion <strong>take over</strong> the display. Long-Select on a running session <strong>stops</strong>. All text input is voice.</li></ul>
+<p>v1 talks to <strong>one daemon</strong>. Provider identity is never hard-coded: <code>GET /api/ping</code> (<code>providers</code>, <code>multi</code>, <code>focus</code>, caps) is the source of truth, matching <code>`AGENTS.md`</code>.</p>
+<hr>
+<h2 id='background-motivation'>Background &amp; Motivation</h2>
+<p>The Time 2 is the only Pebble that can do this job honestly: 200×228 64-colour MIP, four buttons, touch, mic, speaker, RGB backlight, 128 KB app RAM, ~30-day battery if we do not poll at 1 Hz. The useful wrist jobs are: notice that an agent <strong>needs you</strong>, Allow/Deny or pick an AskUserQuestion option, speak a prompt while walking, start a new session without a keyboard.</p>
+<p>Closest existing constrained client is <code>`esp32/`</code> (Focus ranking, compose, chimes, deferred Live TUI / share / multi-profile). Closest Time 2 SDK tree already in daily use is <code>`../pebble-map-demo/`</code> (<code>targetPlatforms: [&quot;emery&quot;]</code>, PKJS outbox queue, <code>app_message_inbox_size_maximum()</code>, 200×228, 64-colour cube).</p>
+<p>The locked mockups live in <a href="design-preview/index.html"><code>pebble/design-preview/index.html</code></a> sections <strong>B Talk</strong> and <strong>D Pocket</strong>. Combine them; do not ship two apps. Ignore C Desk as a product (no always-on face in v1). A-style permission action-bar chrome is reused.</p>
+<p>Pain points this client exists to solve:</p>
+<ul><li>Phone in a pocket cannot Allow a Bash prompt or answer a question without unlocking.</li><li>The pager (<code>esp32/</code>) has a keyboard and Wi-Fi; the watch has neither — voice is the only honest composer.</li><li>Timeline pins (product A) cannot start a turn; a Desk face (product C) cannot act.</li></ul>
+<hr>
+<h2 id='goals-non-goals'>Goals &amp; Non-Goals</h2>
+<h3 id='goals-v1'>Goals (v1)</h3>
+<ul><li>One watchapp, <code>targetPlatforms: [&quot;emery&quot;]</code> only.</li><li>PKJS companion in the official Pebble app; Clay for URL + token + optional poll seconds.</li><li>Focus list, session (phase · elapsed · last two messages), dictation continue, permission Allow/Deny (including Claude 2.9.0 pane Yes/No on the question channel), AskUserQuestion (all questions, one POST), stop, new session (provider from ping, cwd / interactive from <strong>that</strong> provider’s caps), live phase while the app is <strong>open</strong>.</li><li>Chimes = the same Status / Done / Error / Attention family as <code>`esp32/src/hw/chime.h`</code> and <code>`android/.../Chime.kt`</code>, expressed as vibe patterns. RGB backlight = BB10 LED (orange held while blocked).</li><li>Zero daemon API changes. PKJS reshapes existing JSON.</li></ul>
+<h3 id='non-goals-v1-documented-per-agents-md'>Non-Goals (v1, documented per AGENTS.md)</h3>
+<div class="table-wrap"><table><thead><tr><th>Deferred</th><th>Why</th></tr></thead><tbody><tr><td>C Desk watchface / Timeline pins / Quick View</td><td>User declined C; no always-on face.</td></tr><tr><td>Pebble 2 Duo / flint / aplite / basalt / chalk / diorite / gabbro</td><td>Colour, mic, RAM, geometry.</td></tr><tr><td>PebbleKit inside Android Agent Remote</td><td>No <code>android/</code> companion in v1.</td></tr><tr><td>Native iOS Agent Remote companion</td><td>No <code>ios/</code> tree.</td></tr><tr><td>On-watch keyboard, Clay prompt field, phone type-a-prompt UI</td><td>All text input is voice. Clay may only collect <strong>URL, token, and poll seconds</strong> — never a prompt textarea, even “for debugging”.</td></tr><tr><td>Multi-host profiles</td><td>One daemon. (Pager already supports 3; watch does not.)</td></tr><tr><td>Live TUI, attachments, drop, share, rewind, usage, slash commands, queue UI</td><td>Off-watch.</td></tr><tr><td>Markdown transcript, model/cwd/effort pickers</td><td>Phone strips markdown; daemon defaults.</td></tr><tr><td>Wakeup API / background worker / 1 Hz radio</td><td>Battery.</td></tr><tr><td><code>?format=watch</code> on the daemon</td><td>Phone-side truncation is enough.</td></tr></tbody></table></div>
+<hr>
+<h2 id='key-decisions'>Key Decisions</h2>
+<ol><li><strong>Product = D + B, one app.</strong> Home is D’s Focus list; session is B Talk chrome plus D’s two messages; new session is a list action. Not two <code>.pbw</code> files.</li><li><strong>Companion = PKJS + Clay</strong>, not Android <code>PebbleKit</code>. Works on iOS and Android with no Agent Remote app changes. Token never leaves the phone. Clay is constructed with <code>{ autoAppMessage: false }</code>; URL, token, and poll seconds have no <code>messageKey</code> and are written only to PKJS <code>localStorage</code>.</li><li><strong>Voice is the only composer.</strong> <code>dictation_session_create</code> / <code>start</code> / <code>destroy</code>. System confirmation <strong>off</strong>; our confirm screen matches mockup B. Back = speak again.</li><li><strong>Hardware = Time 2 / emery only.</strong> <code>package.json</code> <code>targetPlatforms: [&quot;emery&quot;]</code>. No <code>#if PBL_PLATFORM</code> soup.</li><li><strong>Watch runtime = C (SDK 3 native), not Alloy.</strong> See <a href="#runtime-c-not-alloy">Runtime: C, not Alloy</a>. PKJS is the same either way.</li><li><strong>Watch never HTTP.</strong> PKJS uses the same endpoints and auth headers as Android <code>`DaemonClient.kt`</code>.</li><li><strong>Poll while open, sleep when closed.</strong> 4 s working / 25 s idle. No SSE, no Wakeup, no Timeline in v1.</li><li><strong><code>permission_mode</code> follows that provider’s <code>interactive</code> cap, never the multi root union.</strong> Multi <code>/api/ping</code> <code>caps</code> is a union that <strong>initializes <code>requires_cwd: True</code></strong> (<code>`server.py` ~1907–1920</code>). <strong><code>provider_details</code> exists only on the multi catalogue ping</strong> (<code>server.py</code> 1892). A single-harness process returns <code>{provider, caps: runner.capabilities()}</code> with <strong>no</strong> <code>provider_details</code> and typically <code>multi</code> absent/false. Lookup: <code>if (ping.multi &amp;&amp; ping.provider_details) use details[name].caps; else use ping.caps</code> for <code>ping.provider</code>. Never use root <code>caps</code> to decide cwd or mode <strong>on multi</strong>. Continue/new send <code>&quot;interactive&quot;</code> only if <strong>that</strong> harness’s resolved <code>caps.interactive</code> is true (Claude, Grok, Codex-with-tmux); else <code>&quot;bypassPermissions&quot;</code> and no Perm/Quest UI (DeepSeek is <code>&quot;interactive&quot;: False</code>). Omitting the field falls through to daemon <code>config.permission_mode</code> (<code>bypassPermissions</code> in <code>`deploy/config.example.json`</code>) — always send one or the other. <strong>Claude’s interactive TUI still launches with <code>--permission-mode bypassPermissions</code></strong> (daemon 2.9.0, <code>`claude_interactive._permission_panel`</code>); pane Yes/No lands on <code>pending_question</code> with <code>header: &quot;Permission&quot;</code>, not on <code>pending_permission</code>. PermWindow is reserved for real MCP <code>/internal/permission</code> objects (<code>tool_name</code> / <code>detail</code>).</li><li><strong>Provider from <code>/api/ping</code>, never a build flag.</strong> Required on <code>POST /api/sessions/new</code> when <code>multi: true</code> (<code>`server.py` `_route_post_multi`</code>).</li><li><strong>CWD uses that provider’s <code>requires_cwd</code> via the same lookup as (8).</strong> Grok on a multi host must omit cwd even when root <code>caps.requires_cwd</code> is true (<code>grok.py</code> <code>&quot;requires_cwd&quot;: False</code>). A Grok-only daemon uses root <code>caps.requires_cwd === false</code> and also omits cwd. If the chosen provider requires cwd, PKJS takes the most recently active <code>GET /api/projects</code> row for that provider. If none, error — do not invent a path.</li><li><strong>Chimes are PKJS-owned.</strong> PKJS diffs jobs like <code>esp32</code> <code>diffFeed</code> / <code>runJobEndChecks</code> and sends <code>KIND=9 CHIME</code>. The watch <strong>plays that</strong> and locally repeats Attention every 30 s while Perm/Quest is up. The watch does not infer Done/Error/Status from FOCUS/JOB (reconnect would double-buzz). Floor 2 s Status on PKJS so a dropped CHIME is not invented on the watch.</li><li><strong>Orange backlight held only while a takeover is on screen.</strong> <code>light.c</code>: Attention = <code>light_set_color(GColorOrange)</code> + <code>light_enable(true)</code>; Status = <code>light_set_color(provider)</code> + <code>light_enable_interaction()</code> (never <code>enable(true)</code>); leave = <code>light_enable(false)</code> + <code>light_set_system_color()</code>. Working never holds the lamp.</li></ol>
+<hr>
+<h2 id='runtime-c-not-alloy'>Runtime: C, not Alloy</h2>
+<p>Alloy (Moddable XS on emery/gabbro) is allowed — Time 2 only — and has <code>pebble/dictation</code>, <code>pebble/message</code>, <code>pebble/vibes</code>, <code>watch.light()</code>. We still ship <strong>C</strong>.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th>C native</th><th>Alloy</th></tr></thead><tbody><tr><td>Author’s working emery tree</td><td><code>`../pebble-map-demo/src/c/main.c`</code></td><td>none in-repo</td></tr><tr><td>Dictation</td><td><code>dictation_session_*</code> (the API this spec names)</td><td><code>pebble/dictation</code> wrapper</td></tr><tr><td>Pixel geometry (6 px stripe, 20 px bar, 30 px action bar, 42 px rows)</td><td><code>Layer</code> + <code>MenuLayer</code> + <code>ActionBarLayer</code></td><td>Piu/Poco, extra heap</td></tr><tr><td>App RAM 128 KB</td><td>map demo uses ~2.8 KB; we budget ~40 KB</td><td>XS slot/stack + Piu scene graph</td></tr><tr><td>Custom vibe patterns</td><td><code>vibes_enqueue_custom</code></td><td><code>Vibes.pattern</code></td></tr><tr><td>RGB backlight</td><td><code>light_set_color</code> / <code>light_enable</code> (<code>PBL_RGB_BACKLIGHT</code>)</td><td><code>watch.light()</code></td></tr><tr><td>Duo later</td><td>painful either way; we are not doing Duo</td><td>emery/gabbro only</td></tr></tbody></table></div>
+<p>PKJS (<code>src/pkjs/index.js</code>) is independent of the watch language. If Alloy later proves faster for UI iteration, the AppMessage dictionary in this spec stays the contract.</p>
+<p>C window structure:</p>
+<pre><code>Window stack
+  FocusWindow     MenuLayer-style list + custom status bar
+  SessionWindow   stripe + title + phase + two bubbles + footer
+  ConfirmWindow   transcribed text + ActionBarLayer (Select send, Down discard)
+  PermWindow      takeover + ActionBarLayer (Up Allow, Down Deny)
+  QuestionWindow  takeover + ActionBarLayer (Up/Down, Select)
+  NewWindow       provider MenuLayer
+  ErrorWindow     one-shot card (phone / 401 / daemon / dictation)</code></pre>
+<p>Dictation UI is the <strong>system</strong> overlay on top of ConfirmWindow’s predecessor; we disable the system confirmation dialog and push ConfirmWindow ourselves.</p>
+<hr>
+<h2 id='proposed-design'>Proposed Design</h2>
+<h3 id='architecture'>Architecture</h3>
+<pre class="mermaid">flowchart LR
+  subgraph Watch[&quot;Pebble Time 2 (emery)&quot;]
+    C[&quot;Native C watchapp\nFocus / Session / Confirm\nPerm / Question / New&quot;]
+    Dic[&quot;dictation_session_*&quot;]
+    Vibe[&quot;vibes + RGB backlight&quot;]
+    C --&gt; Dic
+    C --&gt; Vibe
+  end
+
+  subgraph Phone[&quot;Official Pebble iOS/Android app&quot;]
+    PKJS[&quot;src/pkjs/index.js&quot;]
+    Clay[&quot;Clay settings\nURL + token + poll s&quot;]
+    HTTP[&quot;http.js XMLHttpRequest&quot;]
+    Clay --&gt; PKJS
+    PKJS --&gt; HTTP
+  end
+
+  subgraph Host[&quot;agentremoted :8473&quot;]
+    Ping[&quot;GET /api/ping&quot;]
+    Focus[&quot;GET /api/focus&quot;]
+    Jobs[&quot;GET /api/jobs\nGET /api/jobs/id?since=&quot;]
+    Msg[&quot;GET /api/sessions/id/messages&quot;]
+    Post[&quot;POST continue / new\npermission / question / stop&quot;]
+  end
+
+  C --&gt;|&quot;AppMessage dict&quot;| PKJS
+  PKJS --&gt;|&quot;AppMessage short UTF-8&quot;| C
+  HTTP --&gt; Ping
+  HTTP --&gt; Focus
+  HTTP --&gt; Jobs
+  HTTP --&gt; Msg
+  HTTP --&gt; Post</pre>
+<p>The watch holds <strong>no token, no URL, no session journal</strong>. It holds: connection enum, a Focus ring (≤12 rows of truncated fields), the open session snapshot, two message buffers, and the in-flight permission/question ids.</p>
+<h3 id='navigation'>Navigation</h3>
+<pre class="mermaid">stateDiagram-v2
+  [*] --&gt; Focus
+  Focus --&gt; Session: Select on a row
+  Focus --&gt; New: Select on &quot;New session&quot;
+  Focus --&gt; Perm: MCP pending_permission
+  Focus --&gt; Question: pending_question (incl. 2.9.0 Yes/No)
+  Session --&gt; Confirm: Select / footer SELECT talk
+  Session --&gt; Focus: Back
+  Session --&gt; Perm: MCP pending_permission
+  Session --&gt; Question: pending_question
+  Session --&gt; Session: Down = older pair
+  Session --&gt; Session: Long-Select = stop
+  Confirm --&gt; Session: Select sends / Down discards
+  Confirm --&gt; Confirm: Back = dictation again
+  New --&gt; Confirm: Select provider, then dictate
+  New --&gt; Focus: Back
+  Perm --&gt; Prev: Allow / Deny / Back=Deny → pop
+  Question --&gt; Prev: one POST of all answers → pop</pre>
+<p>Buttons (right Up / Select / Down, left Back). Touch may pan the Focus and provider lists; it is never required. Long-Select = ~500 ms.</p>
+<p><strong>Takeover rules (any screen):</strong></p>
+<ol><li>Before pushing Perm or Quest, call <code>dictation_session_stop</code> (discard Confirm if it is on the stack). Firmware STT and PermWindow must not overlap.</li><li>Push on the <strong>current</strong> stack. After resolve or 404, <strong>pop</strong> — do not force Session. A takeover that interrupted Focus returns to Focus.</li><li>If several jobs are blocked, take the first Focus row (<code>needs_answer</code> already sorts first). One takeover at a time.</li><li>MCP Perm <strong>Back</strong> = Deny with empty <code>message</code> (same as Down). QKIND=1 Perm chrome <strong>Back</strong> = the <strong>No option’s full label</strong> via <code>CMD=QUESTION</code> (not <code>cancel</code>, not <code>&quot;No&quot;</code>). Normal Quest <strong>Back</strong> = <code>cancel: true</code>.</li><li>Every exit (Allow, Deny, Back, 404, host-cleared pending) runs <code>takeover_leave()</code>: <code>light_enable(false); light_set_system_color();</code>.</li><li>Claude 2.9.0 pane Yes/No is a <strong>question</strong>, not a permission. Classify in PKJS. QKIND=1 paints Perm chrome but <strong>always</strong> <code>CMD=QUESTION</code> with the <strong>verbatim option label</strong> (see §5). Never <code>CMD=PERM</code> (that 404s <code>no matching pending permission</code>). <code>_answer_permission</code> does <code>picked = [l for l in answers[0] if l in labels]</code> and <strong>Escape-declines</strong> if nothing matches — <code>&quot;No&quot;</code> against <code>&quot;No (esc)&quot;</code> is a silent decline.</li></ol>
+<h3 id='screen-by-screen-layout-200-228'>Screen-by-screen layout (200×228)</h3>
+<p>All coordinates are pixels. Background <code>GColorBlack</code>, body text <code>GColorWhite</code>. Do <strong>not</strong> use <code>StatusBarLayer</code> (16 px); paint a <strong>20 px</strong> custom bar to match the mockups. Action bar is <strong>30 px</strong> (<code>ACTION_BAR_WIDTH</code>). Footer is <strong>28 px</strong>.</p>
+<pre><code>y=0        ┌──────────────────────────────────────────┐
+           │ 20 px status bar  (time left, label right)│
+y=20       ├──────────────────────────────────────────┤
+           │ 1 px dashed separator #555               │
+           │                                          │
+           │ content (stripe 6 px on session screens) │
+           │                                          │
+y=200      ├──────────────────────────────────────────┤  ← footer on session
+           │ 28 px footer                             │
+y=228      └──────────────────────────────────────────┘
+           x=0     x=6                          x=170  x=200
+                   stripe                         action bar when present</code></pre>
+<h4 id='1-focus-list-home'>1. Focus list (home)</h4>
+<p>Matches D mockup (<code>#d</code> in <code>design-preview/index.html</code>), urgency order from the daemon.</p>
+<div class="table-wrap"><table><thead><tr><th>Region</th><th>Geometry</th><th>Content</th></tr></thead><tbody><tr><td>Status</td><td>0,0 200×20</td><td><code>strftime</code> <code>%H:%M</code> left; <code>&quot;Focus&quot;</code> right. If disconnected, right label is <code>&quot;phone&quot;</code> / <code>&quot;401&quot;</code> / <code>&quot;daemon&quot;</code>.</td></tr><tr><td>Separator</td><td>y=20, 1 px</td><td><code>#555555</code> dashed (2 on, 2 off)</td></tr><tr><td>Rows</td><td>y=21, each <strong>42 px</strong>, 1 px <code>#555</code> rule</td><td>tick 6×42; name <code>FONT_KEY_GOTHIC_14_BOLD</code> 40-byte UTF-8; subtitle <code>FONT_KEY_GOTHIC_14</code> dim</td></tr><tr><td>Highlight</td><td>selected row</td><td>fill <code>GColorWindsorTan</code> <code>#AA5500</code>; subtitle <code>GColorMelon</code> <code>#FFAAAA</code></td></tr><tr><td>Empty</td><td>centred</td><td><code>&quot;No sessions&quot;</code> in <code>GColorLightGray</code></td></tr><tr><td>Last row</td><td>always</td><td>tick <code>GColorPurple</code> <code>#AA00FF</code>; name <code>&quot;New session&quot;</code>; subtitle host from ping (<code>host</code> field) or <code>&quot;daemon&quot;</code></td></tr></tbody></table></div>
+<p>Subtitle format: <code>{verb} · {Provider}</code>. Verbs follow the <strong>D mockup</strong>, not <code>focus_store.STATE_LABELS</code> (<code>&quot;needs answer&quot;</code> / <code>&quot;turn finished&quot;</code>). The pager’s <code>focusStateLabel()</code> is a third variant (<code>&quot;finished&quot;</code>); we stay with D.</p>
+<div class="table-wrap"><table><thead><tr><th><code>focus_state</code></th><th>subtitle verb</th><th>tick</th></tr></thead><tbody><tr><td><code>needs_answer</code></td><td><code>needs you</code></td><td>provider (always; state is the text)</td></tr><tr><td><code>failed</code></td><td><code>failed</code></td><td>provider</td></tr><tr><td><code>working</code></td><td>live <code>phase</code> if known (<code>writing</code>, <code>bash</code>, …) else <code>working</code></td><td>provider</td></tr><tr><td><code>turn_finished</code></td><td><code>finished</code></td><td>provider</td></tr></tbody></table></div>
+<p>Tick is <strong>always the provider cube colour</strong>, same as D mockup. Highlight is the D tan fill, not B’s cyan.</p>
+<p>Provider ticks (64-colour cube, locked):</p>
+<div class="table-wrap"><table><thead><tr><th>Provider (ping id)</th><th>Cube</th><th><code>GColor</code></th></tr></thead><tbody><tr><td><code>claude</code></td><td><code>#FF5500</code></td><td><code>GColorOrange</code></td></tr><tr><td><code>grok</code></td><td><code>#00AAFF</code></td><td><code>GColorVividCerulean</code></td></tr><tr><td><code>codex</code></td><td><code>#00AA55</code></td><td><code>GColorJaegerGreen</code></td></tr><tr><td><code>deepseek</code> / <code>dsh</code></td><td><code>#0055FF</code></td><td><code>GColorBlueMoon</code></td></tr><tr><td>unknown</td><td><code>#AAAAAA</code></td><td><code>GColorLightGray</code></td></tr></tbody></table></div>
+<p>Web/Android accents (<code>#d97757</code>, <code>#00d4ff</code>, <code>#10a37f</code>, <code>#4d6bfe</code> in <code>`web/src/app.js`</code> <code>PROVIDERS</code>) snap to that cube. Do not invent a fifth harness colour; unknown → dim.</p>
+<p>Up/Down walk the highlight (B Talk “walk Focus”). Select opens the session, or New. Touch pan = same as scroll.</p>
+<p>Cap at <strong>12</strong> rows plus the New row. Daemon Focus can be larger; PKJS sends the first 12 in daemon order (<code>needs_answer</code>, <code>failed</code>, <code>working</code>, <code>turn_finished</code>, then <code>-last_active</code>). Same comparator as <code>`server.py` `_handle_focus_list`</code> and <code>`esp32/src/ui/ui.cpp`</code> <code>weight()</code>.</p>
+<h4 id='2-session-talk-home-two-messages'>2. Session (Talk home + two messages)</h4>
+<p>Matches B home + D transcript.</p>
+<div class="table-wrap"><table><thead><tr><th>Region</th><th>Geometry</th><th>Content</th></tr></thead><tbody><tr><td>Status</td><td>200×20</td><td>time; right = provider label (<code>Grok</code>, …)</td></tr><tr><td>Stripe</td><td>x=0,y=20, 6×208</td><td>provider cube colour</td></tr><tr><td>Title</td><td>x=14,y=28, w=178</td><td><code>FONT_KEY_GOTHIC_18_BOLD</code>, 2 lines max, 40-byte title</td></tr><tr><td>Phase</td><td>x=14,y=74</td><td><code>GColorChromeYellow</code> <code>#FFAA00</code>, <code>{phase} · {m}:{ss}</code></td></tr><tr><td>Bubbles</td><td>x=8,y=96, w=184</td><td>last <strong>two</strong> plain-text messages (see Transcript)</td></tr><tr><td>Footer</td><td>y=200, h=28, 1 px rule</td><td>left <code>{n} msgs</code> on the tail (<code>CHUNK=0</code>); <code>{n-k}/{n}</code> when paging older. Right <strong><code>SELECT talk</code></strong> white bold. Never <code>FOCUS i/n</code> here — that is the list.</td></tr></tbody></table></div>
+<p>Bubble chrome (D):</p>
+<ul><li>You: fill <code>#555555</code>, label <code>&quot;You&quot;</code> 12 px dim.</li><li>Agent: fill black, 1 px provider-colour border, label = provider name.</li></ul>
+<p>If a permission or question is pending for this session, push takeover <strong>on top</strong> of this window (do not replace it). Pop returns here. <code>CMD=OPEN</code> always triggers <code>GET /api/jobs</code> (and a snapshot if <code>pending_*</code>) so a Focus row that showed <code>needs_answer</code> during an idle skip still gets <code>request_id</code> when opened.</p>
+<p>Down: <code>CMD=CHUNK</code> with <code>k+1</code> (older pair). Up: <code>k-1</code>, clamp at 0. Back: Focus. Select: dictation. Long-Select: <code>POST /api/jobs/&lt;id&gt;/stop</code> if the jobs overlay has a live <code>JID</code> for this <code>SID</code>; idle Focus rows have <strong>no</strong> <code>job_id</code> (<code>`SessionDto`</code> does not declare it — the daemon only overlays <code>job_id</code> / <code>running</code> in <code>`_apply_running`</code> while live).</p>
+<p>Elapsed is computed on the watch from <code>STARTED</code> (unix <strong>int</strong> seconds, floored from brief <code>started_at</code>). Ticked locally with <code>tick_timer_service</code> <code>SECOND_UNIT</code> <strong>only while a job is running and this window is on top</strong>. That is a CPU tick, not a radio tick. If the brief is gone, <code>STARTED=0</code> and the watch freezes elapsed.</p>
+<h4 id='3-dictation-confirm'>3. Dictation confirm</h4>
+<p>Matches B confirm (<code>has-ab</code>).</p>
+<div class="table-wrap"><table><thead><tr><th>Region</th><th>Geometry</th><th>Content</th></tr></thead><tbody><tr><td>Status</td><td></td><td>time; <code>&quot;Talk&quot;</code></td></tr><tr><td>Stripe</td><td>6 px</td><td>provider</td></tr><tr><td>Caption</td><td>x=14,y=28</td><td>dim <code>&quot;To {title}&quot;</code></td></tr><tr><td>Body</td><td>x=8,y=48, 154×88 (action bar eats 30)</td><td>1 px <code>#555</code> box, 14 px / 18 lh, the transcription</td></tr><tr><td>Action bar</td><td>30×228</td><td>Up empty; Select <code>✓</code>; Down <code>×</code></td></tr></tbody></table></div>
+<p>Select sends. Down discards and pops. Back starts <code>dictation_session_start</code> again (does not pop).</p>
+<p>System dictation confirmation is <strong>disabled</strong> (<code>dictation_session_enable_confirmation(session, false)</code>) so we own this screen. Error dialogs stay <strong>enabled</strong> so the firmware can retry no-speech / recognizer errors.</p>
+<p>Dictation buffer: <strong>400 bytes</strong> UTF-8. Longer speech is truncated by the firmware; PKJS must not clip further before POST.</p>
+<p>If a PERM/QUEST AppMessage arrives while dictation is up: <code>dictation_session_stop</code>, pop Confirm if present, then push the takeover. The transcription is discarded.</p>
+<h4 id='4-permission-takeover-mcp-pending-permission-only'>4. Permission takeover (MCP <code>pending_permission</code> only)</h4>
+<p>Matches B permission + A action-bar chrome. This window is <strong>only</strong> for snapshot <code>pending_permission</code> <code>{request_id, tool_name, detail}</code> — the headless <code>/internal/permission</code> helper. Interactive Claude Yes/No is a question (next section).</p>
+<div class="table-wrap"><table><thead><tr><th>Region</th><th>Geometry</th><th>Content</th></tr></thead><tbody><tr><td>Status</td><td></td><td>time; provider</td></tr><tr><td>Stripe</td><td><code>GColorOrange</code></td><td>need-you, not provider</td></tr><tr><td>Tool</td><td>x=8,y=28, 18 bold</td><td><code>&quot;Allow {tool_name}?&quot;</code></td></tr><tr><td>Detail</td><td>x=8,y=56, 162× wide, 14 px dim</td><td><code>detail</code> truncated to 120 bytes, then session title</td></tr><tr><td>Action bar</td><td>20×20 bitmaps</td><td>Up <code>✓</code> Allow; Down <code>×</code> Deny</td></tr></tbody></table></div>
+<p>RGB: Attention contract in Key Decision 12. Leave via <code>takeover_leave()</code>.</p>
+<p>These bindings are <strong>MCP <code>KIND=PERM</code> only</strong>. Do not reuse them for QKIND=1 (table in §5).</p>
+<ul><li>Up / Select: <code>CMD=PERM</code> → <code>POST /api/jobs/&lt;id&gt;/permission</code> <code>{request_id, allow: true}</code>.</li><li>Down / Back: <code>CMD=PERM</code> <code>{allow: false}</code> empty message.</li><li>Long-Select (hardware, after PR 5): dictation for an optional deny <code>message</code>, then <code>{allow: false, message}</code>. v1 Allow/Deny itself does <strong>not</strong> need the mic.</li></ul>
+<h4 id='5-askuserquestion-takeover-includes-2-9-0-pane-permissions'>5. AskUserQuestion takeover (includes 2.9.0 pane permissions)</h4>
+<p><code>Job.resolve_question</code> clears <code>pending_question</code> on the <strong>first</strong> POST and wakes the TUI with whatever <code>answers</code> arrived (<code>`jobs.py`</code>). Android <code>`QuestionSheet`</code> requires a pick for <strong>every</strong> question, then POSTs one <code>answers</code> list-of-lists. The watch does the same. <strong>Never POST a partial <code>answers</code> array.</strong> The pager is not a precedent (<code>esp32</code> never answers questions).</p>
+<p>PKJS classifies the payload before sending QUEST/PERM-chrome:</p>
+<p><strong>Proceed dialog</strong> (<code>QKIND=1</code>, paint PermWindow, POST <code>/question</code>): <code>questions.length === 1</code>, <code>!multi_select</code>, <code>header === &quot;Permission&quot;</code> (or the question text contains <code>Do you want to proceed?</code>), and at least one option label starts with <code>Yes</code> and one with <code>No</code>. <code>_permission_panel</code> two-option fixtures are <code>[&quot;Yes&quot;,&quot;No&quot;]</code>; three-way don’t-ask is <code>&quot;Yes&quot;</code> / <code>&quot;Yes, and don&#x27;t ask again for grep commands…&quot;</code> / <code>&quot;No (esc)&quot;</code>. The <strong>edit</strong> fixture is <code>&quot;Yes&quot;</code> / <code>&quot;Yes, allow all edits during this session&quot;</code> / <code>&quot;No (esc)&quot;</code> — that third Yes is <strong>not</strong> <code>don&#x27;t ask</code>.</p>
+<p>PKJS maps candidate slots (first match, case-insensitive prefix/contains):</p>
+<div class="table-wrap"><table><thead><tr><th>Slot</th><th>Rule</th><th>Typical label</th></tr></thead><tbody><tr><td><code>yes_label</code></td><td>first option whose label starts with <code>Yes</code> and does <strong>not</strong> contain <code>don&#x27;t ask</code></td><td><code>Yes</code></td></tr><tr><td><code>no_label</code></td><td>first option whose label starts with <code>No</code></td><td><code>No (esc)</code> or <code>No</code></td></tr><tr><td><code>always_label</code></td><td>first option whose label contains <code>don&#x27;t ask</code>, or empty</td><td><code>Yes, and don&#x27;t ask again…</code></td></tr></tbody></table></div>
+<p><strong>Coverage gate:</strong> <code>QKIND=1</code> only when <strong>every</strong> snapshot option is exactly one of <code>{yes_label, no_label, always_label}</code> (empty <code>always_label</code> means 2-option Yes/No). If any option is leftover — <code>&quot;Yes, allow all edits during this session&quot;</code> is the usual one — send <code>QKIND=0</code> and QuestionWindow so every verbatim <code>QOPT</code> is reachable. Do not hide “allow all” behind Select=Yes. Keep the Yes/No/don’t-ask table only for true 2-option and don’t-ask 3-option panes.</p>
+<p>Each QUEST <code>QOPT</code> is the <strong>verbatim</strong> snapshot <code>options[].label</code> (<code>_permission_panel</code> already caps at 60 chars). PKJS does not utf8clip further; if a label would exceed 80 bytes, treat the panel as unclassifiable and use QuestionWindow (or cancel — never POST a clipped synonym). For <code>QKIND=1</code> the watch stores the mapped strings from those <code>QOPT</code>s. <code>CMD</code> is always <code>QUESTION</code>; <code>ANSWERS</code> is the <strong>full label</strong>, never <code>&quot;Yes&quot;</code> / <code>&quot;No&quot;</code> unless that is the actual option text.</p>
+<div class="table-wrap"><table><thead><tr><th>Button</th><th>MCP <code>KIND=PERM</code> → <code>CMD=PERM</code></th><th><code>QKIND=1</code> → <code>CMD=QUESTION</code></th></tr></thead><tbody><tr><td>Up</td><td><code>{allow: true}</code></td><td><code>ANSWERS = yes_label</code></td></tr><tr><td>Down</td><td><code>{allow: false}</code></td><td><code>ANSWERS = no_label</code></td></tr><tr><td>Back</td><td><code>{allow: false}</code></td><td><code>ANSWERS = no_label</code> (not <code>cancel</code>)</td></tr><tr><td>Select</td><td><code>{allow: true}</code></td><td><code>always_label</code> if present, else <code>yes_label</code></td></tr><tr><td>Long-Select</td><td>deny <code>message</code> (PR 5)</td><td>unused</td></tr></tbody></table></div>
+<p>If there is no don’t-ask option, Select = Yes (same as Up). <code>perm_win.c</code> must branch on <code>QKIND</code>: MCP bindings vs this table. Emitting <code>CMD=PERM</code> for QKIND=1 404s <code>no matching pending permission</code>.</p>
+<p><strong>Otherwise</strong> QuestionWindow:</p>
+<div class="table-wrap"><table><thead><tr><th>Region</th><th>Geometry</th><th>Content</th></tr></thead><tbody><tr><td>Status</td><td></td><td><code>&quot;Ask&quot;</code> plus <code>qIndex+1/qCount</code> when <code>questions.length &gt; 1</code></td></tr><tr><td>Stripe</td><td><code>GColorRajah</code> <code>#FFAA55</code></td><td></td></tr><tr><td>Prompt</td><td>x=8,y=26, 14/18, max 2 lines</td><td><code>question</code> (80 bytes)</td></tr><tr><td>Options</td><td>x=8, <strong>4 visible</strong> × 28 px = 112 px</td><td><code>label</code> <strong>80</strong> bytes; selected fill <code>GColorRajah</code>. Up/Down scroll the window when <code>Q_N &gt; 4</code>.</td></tr><tr><td>Action bar</td><td>20×20 bitmaps</td><td>Up <code>▲</code>; Select <code>✓</code>; Down <code>▼</code></td></tr></tbody></table></div>
+<p>Geometry budget: 20 bar + 36 prompt + 112 options + 30 action-bar overlap on the right = 168, plus 8 px pad — fits 228. No sixth option on screen.</p>
+<p><strong>Multi-question:</strong> QUEST messages carry <code>Q_QI</code> (question index) and <code>Q_QN</code> (question count). The watch collects answers <strong>sequentially</strong> (show question 0, store pick, show question 1, …). One <code>CMD=QUESTION</code> at the end with all answers. Back on any question cancels the whole panel (<code>cancel: true</code>) — there is no “submit questions[0] and wait for a second gate”.</p>
+<p>If <code>questions.length &gt; 4</code>, PKJS does <strong>not</strong> burst a prefix and does <strong>not</strong> POST a short <code>answers</code> list (<code>resolve_question</code> would consume the panel). Send <code>KIND=8 ERR</code> <code>&quot;open on phone&quot;</code> and <code>CMD</code> is unused — PKJS itself POSTs <code>{cancel: true}</code>. Same cancel if the <strong>watch→phone dictionary</strong> (<code>CMD</code>+<code>SID</code>+<code>JID</code>+<code>RID</code>+<code>ANSWERS</code>+optional <code>QNOTE</code>) would exceed <code>AR_OUTBOX</code> (768). Options beyond 6 are still sent (scroll already shows 4); do not drop options of a question we intend to answer.</p>
+<p>Single-select: Select stores the label and advances, or submits if last question.</p>
+<p>Multi-select (<code>multi_select: true</code>): Select toggles a check; <strong>hold Select</strong> commits that question (advances or submits). Footer hint <code>&quot;HOLD ✓&quot;</code>.</p>
+<p>If the chosen label equals <code>note_for</code>, run dictation for that question’s note <strong>before</strong> advancing (hardware PR 5). <code>notes[]</code> is one string per question, empty if unused, submitted with the final POST.</p>
+<p>RGB orange held, same as permission. Leave via <code>takeover_leave()</code>.</p>
+<h4 id='6-new-session'>6. New session</h4>
+<p>Matches D provider list.</p>
+<div class="table-wrap"><table><thead><tr><th>Region</th><th>Geometry</th><th>Content</th></tr></thead><tbody><tr><td>Status</td><td></td><td><code>&quot;New&quot;</code></td></tr><tr><td>Separator</td><td>y=20</td><td></td></tr><tr><td>Rows</td><td>48 px</td><td>12×12 swatch + 18 bold name</td></tr></tbody></table></div>
+<p>Rows come from <code>ping.providers</code> (or <code>[ping.provider]</code> if <code>providers</code> is empty). Never hard-code the four names. If <code>multi: false</code> and a single provider, <strong>skip this screen</strong> and go straight to dictation.</p>
+<p>Select → dictation for the first prompt → <code>POST /api/sessions/new</code>. Back → Focus.</p>
+<h3 id='colour-chime-backlight-map'>Colour / chime / backlight map</h3>
+<p>PKJS owns the diff (<code>poll.js</code>), matching <code>esp32</code> <code>diffFeed</code> + <code>runJobEndChecks</code>. The watch <strong>only</strong> plays <code>KIND=9 CHIME</code> plus the 30 s Attention reminder while a takeover window is up. No second source.</p>
+<div class="table-wrap"><table><thead><tr><th>Cue</th><th>When (PKJS)</th><th><code>CHIME</code></th><th>Vibe</th><th>Backlight (watch)</th></tr></thead><tbody><tr><td><strong>Status</strong></td><td>new job, or tool/phase change (floored 2 s on PKJS)</td><td>0</td><td>18 ms pulse</td><td><code>set_color(provider)</code> + <code>enable_interaction()</code> — never <code>enable(true)</code></td></tr><tr><td><strong>Done</strong></td><td>job left the active set; confirmed <code>GET /api/jobs/&lt;id&gt;</code> status not <code>error</code></td><td>1</td><td>45 ms</td><td>system</td></tr><tr><td><strong>Error</strong></td><td>confirmed <code>error</code>, or HTTP/send failure</td><td>2</td><td>55 on / 70 off / 55 on</td><td>system</td></tr><tr><td><strong>Attention</strong></td><td><code>pending_permission</code> or <code>pending_question</code> boolean became true</td><td>3</td><td>35 / 90 / 35</td><td><strong>orange <code>enable(true)</code></strong> until <code>takeover_leave()</code></td></tr><tr><td><em>(Tick)</em></td><td>tool change inside the 2 s floor</td><td>skip</td><td>skip</td><td>skip</td></tr></tbody></table></div>
+<p>Haptic numbers match <code>`Chime.kt`</code> <code>buzz()</code>. Speaker tones (C5–E5–G5 family) are <strong>deferred</strong>. Quiet Time: <code>vibes_enqueue_custom</code> already respects it.</p>
+<p>Attention reminder: if Perm/Quest is still up after <strong>30 s</strong> (<code>kRemindMs</code> in <code>ui.cpp</code>), the <strong>watch</strong> replays Attention once per 30 s (no extra radio).</p>
+<h3 id='transcript'>Transcript</h3>
+<p>Phone-side only. <strong>Pair paging — pick is this, not “one MSG per Down”:</strong></p>
+<ol><li><code>GET /api/sessions/&lt;id&gt;/messages?limit=8</code> with <strong>no <code>offset</code></strong> (daemon default = tail; <code>`_send_session_messages`</code> <code>offset=None</code>).</li><li>Drop <code>role === &quot;status&quot;</code> (Grok thought/worked lines; <code>`MessageDto.role`</code>).</li><li><code>stripMarkdown(text)</code>: fences, <code>**</code>/<code>__</code>/<code>#</code> headings, <code>[text](url)</code> → <code>text</code>, collapse whitespace.</li><li>PKJS holds <code>messages[]</code> newest-last, length ≤ 8. Each <code>text</code> is <code>utf8clip(..., 180)</code>.</li><li><code>CHUNK=k</code> (0 = tail) means: send <strong>two</strong> <code>MSG</code> tuples, <code>messages[n-2-k]</code> then <code>messages[n-1-k]</code> (if an index is &lt; 0, send one). <code>MSG_I = k</code>, <code>MSG_N = n</code>, <code>MSG_MORE = 1</code> iff <code>k &lt; n-2</code>.</li><li>After OPEN, PKJS sends <code>k=0</code> unsolicited. Down on the watch increments <code>k</code>; Up decrements. The watch always paints exactly the last pair it received — it does <strong>not</strong> store all 8.</li></ol>
+<p>CJK is <strong>not</strong> stripped (unlike <code>`pebble-map-demo` `toWatchText`</code>); Time 2 gothic can draw it. Truncate by <strong>bytes</strong>, never <code>string.length</code>.</p>
+<p>No <code>?detail=steps</code>. No full journal on the watch.</p>
+<hr>
+<h2 id='api-interface-changes'>API / Interface Changes</h2>
+<p><strong>Daemon: none.</strong> No version bump. No <code>?format=watch</code>. Existing payloads after phone-side truncation fit AppMessage (see sizes below). Other clients ignore us.</p>
+<h3 id='http-surface-pkjs-actually-calls'>HTTP surface PKJS actually calls</h3>
+<p>Auth on every call except ping-without-token. Match Android <strong>and</strong> the pager: send both headers (<code>`DaemonClient.kt`</code> uses <code>X-Auth-Token</code>; <code>`esp32/src/net/agentapi.cpp`</code> sends both). Daemon extractor in <code>`server.py` `_extract_token`</code>:</p>
+<pre><code>X-Auth-Token  OR  Authorization: Bearer &lt;token&gt;  OR  X-Grok-Token  OR  ?token=</code></pre>
+<p>Do <strong>not</strong> put the token in the query string (it lands in proxy logs). Do <strong>not</strong> use <code>?token=</code> except as a last-resort debug.</p>
+<div class="table-wrap"><table><thead><tr><th>Method</th><th>Path</th><th>When</th></tr></thead><tbody><tr><td>GET</td><td><code>/api/ping</code></td><td>open, Clay save, reconnect. Unauthenticated for connectivity; with token for <code>models</code> we do not need.</td></tr><tr><td>GET</td><td><code>/api/focus</code></td><td>if <code>ping.focus === true</code> (daemon ≥ 2.6). Membership-filtered, urgency-sorted.</td></tr><tr><td>GET</td><td><code>/api/sessions?limit=12</code></td><td>fallback if <code>focus</code> cap is false. Rank locally with the same four-state weight.</td></tr><tr><td>GET</td><td><code>/api/projects</code></td><td>new session when <code>capsFor(provider).requires_cwd</code> is true.</td></tr><tr><td>GET</td><td><code>/api/jobs</code></td><td>overlay live ids, <code>started_at</code>, boolean <code>pending_*</code>, <code>event_count</code>. Every HELLO and OPEN; every poll tick where Focus has <code>working</code>/<code>needs_answer</code> or the last jobs list was nonempty.</td></tr><tr><td>GET</td><td><code>/api/jobs/&lt;id&gt;?since=&lt;n&gt;</code></td><td>doorbell. First subscribe: <code>since=event_count</code> (empty <code>events</code>, pending <strong>objects</strong>). Later: <code>since=last next_seq</code> for phase deltas only. <strong>Never <code>since=0</code> after subscribe</strong> — a long turn’s full log blows PKJS <code>JSON.parse</code>.</td></tr><tr><td>GET</td><td><code>/api/sessions/&lt;id&gt;/messages?limit=8</code></td><td>open session, then on job <code>done</code>.</td></tr><tr><td>POST</td><td><code>/api/sessions/&lt;id&gt;/continue</code></td><td>dictation send. <code>{prompt, permission_mode}</code> per <a href="#new-session-body">New session body</a>. 200 <code>{job_id}</code>. In-flight continue is <strong>queued</strong> and returns 200 of the running job (<code>`_handle_continue`</code>); 409 is <code>&quot;queue full&quot;</code> (<code>_MAX_QUEUED=10</code>) or <code>&quot;job not running&quot;</code>, not “queue closed”.</td></tr><tr><td>POST</td><td><code>/api/sessions/new</code></td><td>first prompt. <code>{prompt, permission_mode, provider?, cwd?}</code>. 200 <code>{job_id}</code>.</td></tr><tr><td>POST</td><td><code>/api/jobs/&lt;id&gt;/permission</code></td><td><code>{request_id, allow, message?}</code>. MCP helper path only.</td></tr><tr><td>POST</td><td><code>/api/jobs/&lt;id&gt;/question</code></td><td><code>{request_id, answers:[[…] per question]}</code> or <code>{request_id, cancel:true}</code> plus <code>notes</code> aligned with questions. One POST for the whole panel.</td></tr><tr><td>POST</td><td><code>/api/jobs/&lt;id&gt;/stop</code></td><td>long-Select. <code>{}</code>.</td></tr></tbody></table></div>
+<p>Not called in v1: <code>/sse/status</code>, <code>/ws/status</code>, <code>/api/jobs/&lt;id&gt;/queue</code>, <code>/input</code>, <code>/tui</code>, <code>/share</code>, <code>/usage</code>, <code>/drop</code>, <code>/attachments</code>, <code>/focus/&lt;key&gt;/done</code>, title, rewind.</p>
+<p><code>GET /sse/status</code> is what the web client uses (<code>EventSource</code> + <code>?token=</code> because EventSource cannot set headers — <code>`web/src/app.js`</code> ~3427). PKJS <em>might</em> have EventSource, but iOS will suspend it when the watchapp closes, and a hanging GET blocks the tiny JS context. <strong>v1 is poll-only.</strong></p>
+<h3 id='ping-source-of-truth'>Ping (source of truth)</h3>
+<p>Multi root (typical):</p>
+<pre><code class="lang-json">{
+  &quot;ok&quot;: true,
+  &quot;app&quot;: &quot;agentremoted&quot;,
+  &quot;version&quot;: &quot;2.9.2&quot;,
+  &quot;host&quot;: &quot;mac.local&quot;,
+  &quot;multi&quot;: true,
+  &quot;providers&quot;: [&quot;claude&quot;, &quot;grok&quot;, &quot;codex&quot;, &quot;deepseek&quot;],
+  &quot;provider&quot;: &quot;claude&quot;,
+  &quot;focus&quot;: true,
+  &quot;focus_states&quot;: [&quot;needs_answer&quot;, &quot;failed&quot;, &quot;working&quot;, &quot;turn_finished&quot;],
+  &quot;caps&quot;: { &quot;stop&quot;: true, &quot;queue&quot;: true, &quot;requires_cwd&quot;: true, &quot;live_tui&quot;: true }
+}</code></pre>
+<p>PKJS keeps <code>providers</code>, <code>multi</code>, <code>focus</code>, <code>host</code>, <code>version</code>, <code>caps</code>, and <code>provider_details</code> when present. <strong>Caps lookup</strong> (cwd, interactive, stop):</p>
+<pre><code class="lang-javascript">function capsFor(prov) {
+  if (ping.multi &amp;&amp; ping.provider_details &amp;&amp; ping.provider_details[prov])
+    return ping.provider_details[prov].caps || {};
+  return ping.caps || {}; // single-harness ping: no provider_details
+}</code></pre>
+<p>Never use root <code>caps</code> to decide cwd or <code>permission_mode</code> <strong>on multi</strong> (union initializes <code>requires_cwd: True</code>). On a Grok-only or Claude-only daemon, <code>provider_details</code> is absent — root <code>caps</code> <strong>is</strong> <code>runner.capabilities()</code> and must be used. Ignore models, efforts, slash_commands, drop_path, share, chunked_upload.</p>
+<p>Single-harness example (no <code>multi</code>, no <code>provider_details</code>):</p>
+<pre><code class="lang-json">{
+  &quot;ok&quot;: true,
+  &quot;app&quot;: &quot;agentremoted&quot;,
+  &quot;version&quot;: &quot;2.9.2&quot;,
+  &quot;provider&quot;: &quot;grok&quot;,
+  &quot;caps&quot;: { &quot;requires_cwd&quot;: false, &quot;interactive&quot;: true, &quot;stop&quot;: true },
+  &quot;focus&quot;: true
+}</code></pre>
+<h3 id='focus-row-already-small-enough'>Focus row (already small enough)</h3>
+<p><code>`FocusDto`</code> / Android <code>`SessionDto`</code>: <code>id</code>, <code>title</code>, <code>provider</code>, <code>focus_state</code>, <code>focus_unread</code>, <code>last_text</code>, <code>last_role</code>, <code>last_active</code>, <code>cwd</code>. <code>job_id</code> and <code>running</code> are <strong>not</strong> FocusDto fields; the daemon JSON overlays them in <code>`_apply_running`</code> / synthetic <code>job:</code> rows <strong>only while live</strong>. Idle Focus rows have no <code>job_id</code>. PERM/STOP/phase key off <code>GET /api/jobs</code>, which the doorbell already has. <code>last_text</code> is the session-screen “last line” until messages arrive.</p>
+<h3 id='job-brief-vs-snapshot'>Job brief vs snapshot</h3>
+<p>Two shapes. Merge them on the phone; do not pretend snapshot has brief fields.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th><code>GET /api/jobs</code> brief (<code>`Job.brief`</code>)</th><th><code>GET /api/jobs/&lt;id&gt;?since=</code> snapshot (<code>`Job.snapshot`</code>)</th></tr></thead><tbody><tr><td>Has</td><td><code>id</code>, <code>session_id</code>, <code>new_session_id</code>, <code>status</code>, <code>started_at</code> (float), <code>provider</code>, <code>event_count</code>, boolean <code>pending_*</code></td><td><code>pending_*</code> <strong>objects</strong>, <code>next_seq</code>, <code>events[since:]</code>, <code>session_id</code>/<code>new_session_id</code>/<code>status</code></td></tr><tr><td>Missing</td><td>phase, elapsed, pending objects</td><td><code>started_at</code>, <code>provider</code>, <code>phase</code>, <code>elapsed_s</code></td></tr></tbody></table></div>
+<p><code>phase</code> / <code>elapsed_s</code> on <code>/ws/status</code> <code>active[]</code> (<code>ActiveJobDto</code>) — v1 does not call it.</p>
+<p>PKJS merge:</p>
+<ul><li><code>STARTED = Math.floor(brief.started_at)</code> (int seconds). If the brief is gone, <code>STARTED=0</code>; watch stops ticking.</li><li><code>elapsed</code> computed on the watch from <code>STARTED</code>, not from a snapshot field.</li><li>Pending <strong>objects</strong>: <code>GET /api/jobs/&lt;id&gt;?since=&lt;brief.event_count&gt;</code> so <code>events</code> is empty and the payload is small. Do this when boolean <code>pending_*</code> is true and we do not yet have <code>request_id</code>.</li><li>Phase: only from <strong>event deltas</strong>. Store <code>cursor = next_seq</code>. On <code>event_count</code> growth, <code>GET ...?since=cursor</code>. <code>kind=tool</code> → <code>name</code>; pending question → <code>asking</code>; pending permission → <code>Allow {tool}?</code>; else <code>working</code>.</li><li><strong>Never <code>since=0</code> after the first subscribe.</strong> A first <code>since=0</code> on a long turn returns the full event log (tool details, question payloads) and <code>JSON.parse</code> of <code>responseText</code> is the real memory limit, not the 1024-byte inbox.</li><li>Elapsed/phase for the open session refresh from the brief + last delta every working poll — not from re-downloading events.</li></ul>
+<h3 id='new-session-body'>New session body</h3>
+<pre><code class="lang-json">{
+  &quot;prompt&quot;: &quot;&lt;dictation&gt;&quot;,
+  &quot;permission_mode&quot;: &quot;interactive&quot;,
+  &quot;provider&quot;: &quot;grok&quot;
+}</code></pre>
+<p><code>provider</code> omitted when <code>multi !== true</code>; <strong>required</strong> when <code>multi: true</code> (<code>_route_post_multi</code>).</p>
+<p><code>permission_mode</code>: <code>&quot;interactive&quot;</code> iff <code>capsFor(prov).interactive</code>; else <code>&quot;bypassPermissions&quot;</code> (DeepSeek, Codex without tmux). On a Claude-only daemon this reads root <code>caps.interactive</code>.</p>
+<p><code>cwd</code>: omitted unless <code>capsFor(prov).requires_cwd</code>. When required, latest <code>GET /api/projects</code> row whose <code>provider</code> matches (or any row if untagged). Claude <strong>400s</strong> without cwd (<code>`_handle_new_session`</code>). Grok on a multi host must <strong>not</strong> inherit the root union; Grok-only uses root <code>caps.requires_cwd === false</code>.</p>
+<p>Do <strong>not</strong> send <code>model</code> / <code>effort</code>. The pager’s <code>esp32</code> <code>newSession()</code> always sends <code>bypassPermissions</code> — we do not, except for harnesses that cannot be interactive.</p>
+<p>Continue uses the <strong>session’s</strong> provider the same way.</p>
+<h3 id='permission-question-bodies-verbatim-daemon-contract'>Permission / question bodies (verbatim daemon contract)</h3>
+<pre><code class="lang-json">{&quot;request_id&quot;: &quot;…-p1&quot;, &quot;allow&quot;: true}
+{&quot;request_id&quot;: &quot;…-p1&quot;, &quot;allow&quot;: false, &quot;message&quot;: &quot;optional deny note&quot;}
+{&quot;request_id&quot;: &quot;…-q1&quot;, &quot;answers&quot;: [[&quot;TomTom Orbis&quot;]]}
+{&quot;request_id&quot;: &quot;…-q1&quot;, &quot;answers&quot;: [[&quot;A&quot;],[&quot;C&quot;]], &quot;notes&quot;: [&quot;&quot;,&quot;&quot;]}
+{&quot;request_id&quot;: &quot;…-q1&quot;, &quot;answers&quot;: [[&quot;A&quot;,&quot;C&quot;]], &quot;notes&quot;: [&quot;&quot;]}
+{&quot;request_id&quot;: &quot;…-q1&quot;, &quot;cancel&quot;: true}</code></pre>
+<p><code>answers</code> is <strong>one inner list per question</strong>, in order, same length as <code>questions</code>. <code>notes</code> is one string per question (empty if unused). 2.9.0 proceed dialogs POST <code>/question</code> with the <strong>verbatim option label</strong>, never <code>/permission</code>:</p>
+<pre><code class="lang-json">{&quot;request_id&quot;: &quot;…-q1&quot;, &quot;answers&quot;: [[&quot;Yes&quot;]]}
+{&quot;request_id&quot;: &quot;…-q1&quot;, &quot;answers&quot;: [[&quot;No (esc)&quot;]]}
+{&quot;request_id&quot;: &quot;…-q1&quot;, &quot;answers&quot;: [[&quot;Yes, and don&#x27;t ask again for grep commands…&quot;]]}</code></pre>
+<p>The first line is valid <strong>only</strong> when the snapshot option is exactly <code>&quot;Yes&quot;</code> (two-option <code>_permission_panel</code> fixture). Never invent <code>&quot;No&quot;</code> for <code>&quot;No (esc)&quot;</code>.</p>
+<p>404 <code>no matching pending permission/question</code> → pop takeover, Error chime (<code>CHIME=2</code>), <code>takeover_leave()</code>. Do not force Session.</p>
+<hr>
+<h2 id='data-model-changes'>Data Model Changes</h2>
+<p>None on the daemon. No migration.</p>
+<p>Watch persistent storage (<code>persist_write_*</code>): <strong>nothing in v1</strong>. URL and token live in PKJS <code>localStorage</code> via Clay. A reboot of the watch just re-hellos.</p>
+<p>PKJS <code>localStorage</code>:</p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody><tr><td><code>ar.base</code></td><td>normalised URL, no trailing slash (<code>http://10.0.0.5:8473</code>)</td></tr><tr><td><code>ar.token</code></td><td>raw token string</td></tr><tr><td><code>ar.pollIdle</code></td><td>seconds, default <code>25</code></td></tr><tr><td><code>ar.pollWork</code></td><td>seconds, default <code>4</code></td></tr></tbody></table></div>
+<p>Never write the token to AppMessage, <code>console.log</code>, or Clay’s outbound dictionary.</p>
+<hr>
+<h2 id='appmessage-dictionary'>AppMessage dictionary</h2>
+<p>Named keys in <code>package.json</code> <code>pebble.messageKeys</code> (SDK assigns ints; C uses <code>MESSAGE_KEY_*</code>).</p>
+<p>Open sizes (heap vs reliability):</p>
+<pre><code class="lang-c">#define AR_INBOX  1024
+#define AR_OUTBOX 768
+app_message_open(AR_INBOX, AR_OUTBOX);</code></pre>
+<p>Do <strong>not</strong> call <code>app_message_inbox_size_maximum()</code> (the map demo does, because it streams a binary map). 1024+768 ≈ 1.8 KB of the 128 KB heap; plenty for UI. Dictionary overhead is ~7 bytes/tuple + 1-byte type + payload.</p>
+<p>PKJS outbox is a queue inspired by <code>`pebble-map-demo/src/pkjs/index.js`</code> <code>outbox[]</code> / <code>kickOutbox()</code> — one in-flight <code>Pebble.sendAppMessage</code>. Deltas from the demo:</p>
+<ul><li><strong>Retry once on NACK</strong>, then drop that message and continue (the demo does not retry).</li><li><strong>Generation cap:</strong> each poll that produces Focus rows bumps <code>FOCUS_GEN</code>. A queued <code>FOCUS_ROW</code>/<code>FOCUS_END</code> with an older gen is dropped when a newer gen is enqueued. At most one generation in the queue.</li><li><strong>Coalesce HTTP:</strong> at most one poll XHR in flight. If the 4 s timer fires while a request is open, skip and reschedule. Burst 2 s / 15 s after CONTINUE <strong>replaces</strong> the interval (clear, then set); it does not stack a second timer.</li><li>Closing the watchapp <strong>kills the PKJS context</strong>; there is no <code>ready</code> teardown. <code>ready</code> is start. Timers die with the context.</li></ul>
+<h3 id='watch-phone-cmd-discriminator'>Watch → phone (<code>CMD</code> discriminator)</h3>
+<p><code>CMD</code> is <code>int32</code>. Optional fields ignored if absent.</p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Max</th><th>Meaning</th></tr></thead><tbody><tr><td><code>CMD</code></td><td>int</td><td></td><td><code>1</code> HELLO_REQ, <code>2</code> POLL_NOW, <code>3</code> OPEN, <code>4</code> CONTINUE, <code>5</code> NEW, <code>6</code> PERM, <code>7</code> QUESTION, <code>8</code> STOP, <code>9</code> CHUNK, <code>10</code> PROVIDERS_REQ</td></tr><tr><td><code>SID</code></td><td>cstring</td><td>64</td><td>session id (UUID or <code>job:&lt;id&gt;</code>)</td></tr><tr><td><code>JID</code></td><td>cstring</td><td>48</td><td>job id</td></tr><tr><td><code>RID</code></td><td>cstring</td><td>48</td><td><code>request_id</code></td></tr><tr><td><code>PROMPT</code></td><td>cstring</td><td>400</td><td>dictation text (CONTINUE / NEW / deny note / question note)</td></tr><tr><td><code>PROV</code></td><td>cstring</td><td>16</td><td><code>claude</code> / <code>grok</code> / <code>codex</code> / <code>deepseek</code></td></tr><tr><td><code>ALLOW</code></td><td>int</td><td></td><td>1 allow / 0 deny (CMD=PERM only)</td></tr><tr><td><code>CANCEL</code></td><td>int</td><td></td><td>1 → question cancel</td></tr><tr><td><code>ANSWERS</code></td><td>cstring</td><td>400</td><td><strong>never JSON.</strong> Packing rule below. 4×80 + <code>\x1e</code> is 323 B.</td></tr><tr><td><code>CHUNK</code></td><td>int</td><td></td><td>pair offset <code>k</code>; 0 = newest pair</td></tr><tr><td><code>QNOTE</code></td><td>cstring</td><td>200</td><td><code>notes</code> packed with <code>\x1e</code> between questions. <strong>Omit the tuple</strong> when every note is empty (an empty 200 B field plus <code>ANSWERS</code> 400 plus ids is ~817 B &gt; 768). Sent only on the final QUESTION after every question is collected.</td></tr></tbody></table></div>
+<p><strong>Outbox fit (cancel, do not clip):</strong> C packs <code>CMD</code>+<code>SID</code>+<code>JID</code>+<code>RID</code> (~199 B) + <code>ANSWERS</code> + <code>QNOTE</code> only if any note is nonempty. Dictionary overhead ~8 B/tuple. If the encoded dict would exceed <code>AR_OUTBOX</code> 768, the watch sends <code>CANCEL=1</code> with no <code>ANSWERS</code>/<code>QNOTE</code> (or PKJS POSTs <code>{cancel: true}</code> and <code>ERR</code> <code>&quot;open on phone&quot;</code>). Never drop a question slot to shrink the payload. The 4×80 design point plus a 200 B note still fits (~740 B); the 400 B <code>ANSWERS</code> cap alone does not.</p>
+<p><strong>ANSWERS packing (one rule):</strong> C never sends JSON. Labels can contain commas (<code>Yes, and don&#x27;t ask again…</code>).</p>
+<ul><li>Single question, single-select: the label string.</li><li>Single question, multi-select: labels joined with <code>\x1f</code> (unit separator), <strong>never comma</strong>.</li><li>Several questions: slots joined with <code>\x1e</code> (record separator); each slot uses <code>\x1f</code> if that question was multi-select.</li></ul>
+<p>PKJS always wraps to <code>answers: [[...], ...]</code>: split <code>\x1e</code> then <code>\x1f</code>. Never <code>JSON.parse</code> the raw label.</p>
+<p>HELLO_REQ is sent from <code>app_ready</code> and whenever Bluetooth reconnects (<code>connection_service_subscribe</code>).</p>
+<h3 id='phone-watch'>Phone → watch</h3>
+<p>Keep each <strong>message</strong> under ~900 bytes so it fits <code>AR_INBOX</code> with overhead.</p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Max</th><th>Meaning</th></tr></thead><tbody><tr><td><code>KIND</code></td><td>int</td><td></td><td><code>1</code> HELLO, <code>2</code> FOCUS_ROW, <code>3</code> FOCUS_END, <code>4</code> SESS, <code>5</code> MSG, <code>6</code> PERM, <code>7</code> QUEST, <code>8</code> ERR, <code>9</code> CHIME, <code>10</code> TX, <code>11</code> JOB</td></tr><tr><td><code>CONN</code></td><td>int</td><td></td><td><code>0</code> no phone (watch-local), <code>1</code> no daemon, <code>2</code> ok, <code>3</code> 401, <code>4</code> clay missing</td></tr><tr><td><code>HOST</code></td><td>cstring</td><td>24</td><td>ping <code>host</code></td></tr><tr><td><code>VER</code></td><td>cstring</td><td>12</td><td>ping <code>version</code></td></tr><tr><td><code>MULTI</code></td><td>int</td><td></td><td>0/1</td></tr><tr><td><code>PROVS</code></td><td>cstring</td><td>64</td><td><code>&quot;claude,grok,codex,deepseek&quot;</code></td></tr><tr><td><code>FOCUS_N</code></td><td>int</td><td></td><td>total rows (≤12)</td></tr><tr><td><code>FOCUS_I</code></td><td>int</td><td></td><td>row index</td></tr><tr><td><code>FOCUS_GEN</code></td><td>int</td><td></td><td>poll generation; stale outbox rows with older gen are dropped</td></tr><tr><td><code>SID</code></td><td>cstring</td><td>64</td><td></td></tr><tr><td><code>TITLE</code></td><td>cstring</td><td>40</td><td></td></tr><tr><td><code>STATE</code></td><td>cstring</td><td>16</td><td><code>needs_answer</code> / <code>failed</code> / <code>working</code> / <code>turn_finished</code></td></tr><tr><td><code>PROV</code></td><td>cstring</td><td>16</td><td></td></tr><tr><td><code>PHASE</code></td><td>cstring</td><td>24</td><td><code>writing</code>, <code>asking</code>, <code>bash</code>, …</td></tr><tr><td><code>ELAPSED</code></td><td>int</td><td></td><td>seconds</td></tr><tr><td><code>STARTED</code></td><td>int</td><td></td><td>unix seconds, 0 if idle</td></tr><tr><td><code>LAST</code></td><td>cstring</td><td>96</td><td>last_text / last assistant line</td></tr><tr><td><code>JID</code></td><td>cstring</td><td>48</td><td></td></tr><tr><td><code>STATUS</code></td><td>cstring</td><td>12</td><td><code>starting</code>/<code>running</code>/<code>done</code>/<code>error</code>/<code>stopped</code></td></tr><tr><td><code>UNREAD</code></td><td>int</td><td></td><td><code>focus_unread</code></td></tr><tr><td><code>MSG_I</code></td><td>int</td><td></td><td>chunk index</td></tr><tr><td><code>MSG_N</code></td><td>int</td><td></td><td>total plain messages PKJS holds (≤8)</td></tr><tr><td><code>MSG_ROLE</code></td><td>int</td><td></td><td><code>0</code> user <code>1</code> assistant</td></tr><tr><td><code>MSG_TEXT</code></td><td>cstring</td><td>180</td><td></td></tr><tr><td><code>MSG_MORE</code></td><td>int</td><td></td><td>1 if older exists</td></tr><tr><td><code>RID</code></td><td>cstring</td><td>48</td><td></td></tr><tr><td><code>TOOL</code></td><td>cstring</td><td>24</td><td><code>Bash</code>, …</td></tr><tr><td><code>DETAIL</code></td><td>cstring</td><td>120</td><td>permission detail</td></tr><tr><td><code>QTEXT</code></td><td>cstring</td><td>80</td><td></td></tr><tr><td><code>QOPT</code></td><td>cstring</td><td>80</td><td>one option per QUEST message (80 so 2.9.0 “don’t ask again…” stays distinct)</td></tr><tr><td><code>Q_I</code> / <code>Q_N</code></td><td>int</td><td></td><td>option index / count among <strong>this</strong> question</td></tr><tr><td><code>Q_QI</code> / <code>Q_QN</code></td><td>int</td><td></td><td>question index / count in the panel (1-based display, 0-based wire)</td></tr><tr><td><code>QMULTI</code></td><td>int</td><td></td><td>0/1 for this question</td></tr><tr><td><code>QNOTEFOR</code></td><td>cstring</td><td>40</td><td><code>note_for</code> label or empty</td></tr><tr><td><code>QKIND</code></td><td>int</td><td></td><td><code>0</code> normal Ask; <code>1</code> proceed dialog (PermWindow chrome, still QUEST)</td></tr><tr><td><code>ERR</code></td><td>cstring</td><td>48</td><td>user-visible error</td></tr><tr><td><code>CHIME</code></td><td>int</td><td></td><td><code>0</code> Status <code>1</code> Done <code>2</code> Error <code>3</code> Attention</td></tr><tr><td><code>TX</code></td><td>int</td><td></td><td><code>0</code> sending <code>1</code> accepted <code>2</code> failed</td></tr></tbody></table></div>
+<p><strong>HELLO</strong> (<code>KIND=1</code>): <code>CONN</code>, <code>HOST</code>, <code>VER</code>, <code>MULTI</code>, <code>PROVS</code>. Watch may then <code>CMD=10</code> if it needs the provider list for New (or parse <code>PROVS</code>). <code>CONN=2</code> only after ping succeeded.</p>
+<p><strong>FOCUS_ROW</strong> diffs, then <strong>FOCUS_END</strong>: PKJS diffs by <code>SID</code>. Send only changed rows plus <code>FOCUS_END</code> with <code>FOCUS_N</code> and <code>FOCUS_GEN</code>. If the set shrinks, still send END so the watch drops the tail. Full refresh only when gen 0 (first paint) or SID set membership changes by more than half.</p>
+<p><strong>SESS</strong>: snapshot for the open session (title, phase, <code>STARTED</code>, last, jid, status). <code>STARTED</code> from the <strong>brief</strong>, not the snapshot.</p>
+<p><strong>MSG</strong>: always a <strong>pair</strong>. After OPEN, two MSG with <code>MSG_I=0</code>. Each <code>CMD=CHUNK</code> <code>k</code> is answered with two MSG (<code>messages[n-2-k]</code>, <code>messages[n-1-k]</code>). <code>MSG_MORE=1</code> iff older pairs exist (<code>k &lt; n-2</code>).</p>
+<p><strong>PERM</strong>: MCP <code>pending_permission</code> object.</p>
+<p><strong>QUEST</strong>: one message per option of <strong>one</strong> question (<code>Q_I</code>/<code>Q_N</code>) plus <code>QTEXT</code> on <code>Q_I=0</code>, plus <code>Q_QI</code>/<code>Q_QN</code>. <code>QKIND=1</code> means proceed-dialog chrome; <code>QOPT</code> is the verbatim snapshot label. <strong>Burst:</strong> send every option of every question up front when <code>questions.length ≤ 4</code> (options of one question are all sent, even if <code>&gt; 6</code>; scroll shows 4). If <code>questions.length &gt; 4</code>, do <strong>not</strong> burst a prefix: PKJS POSTs <code>{cancel: true}</code> and sends <code>ERR</code> <code>&quot;open on phone&quot;</code>. Watch pages questions locally and POSTs once. Do not stream questions one POST at a time. Do not POST a short <code>answers</code> list.</p>
+<p><strong>JOB</strong>: doorbell overlay (<code>SID</code>, <code>JID</code>, <code>PHASE</code>, <code>STARTED</code>, <code>STATUS</code>) without rewriting the whole Focus list. <code>ELAPSED</code> is optional; the watch prefers <code>now - STARTED</code>.</p>
+<p><strong>CHIME</strong>: the only chime source. Watch plays it; does not infer.</p>
+<p><strong>ERR</strong>: <code>KIND=8</code> + <code>ERR</code> text; watch pushes <code>ErrorWindow</code>.</p>
+<p>String truncation helper (PKJS). After a surrogate <code>i++</code>, <code>slice(0, i+1)</code> includes the trail — cover this with a test (emoji + CJK):</p>
+<pre><code class="lang-javascript">function utf8clip(s, max) {
+  s = String(s || &#x27;&#x27;);
+  var out = &#x27;&#x27;, i, c, n = 0;
+  for (i = 0; i &lt; s.length; i++) {
+    c = s.charCodeAt(i);
+    n += c &lt; 0x80 ? 1 : c &lt; 0x800 ? 2 : (c &gt;= 0xd800 &amp;&amp; c &lt;= 0xdbff) ? 4 : 3;
+    if (c &gt;= 0xd800 &amp;&amp; c &lt;= 0xdbff) i++; // skip trail surrogate
+    if (n &gt; max) break;
+    out = s.slice(0, i + 1);
+  }
+  return out;
+}</code></pre>
+<hr>
+<h2 id='poll-strategy-honest'>Poll strategy (honest)</h2>
+<pre class="mermaid">sequenceDiagram
+  participant W as Watch C
+  participant P as PKJS
+  participant D as agentremoted
+  W-&gt;&gt;P: CMD HELLO_REQ
+  P-&gt;&gt;D: GET /api/ping
+  P-&gt;&gt;D: GET /api/focus
+  P-&gt;&gt;D: GET /api/jobs
+  P--&gt;&gt;W: HELLO CONN=2
+  P--&gt;&gt;W: FOCUS_ROW × N + FOCUS_END
+  loop while watchapp in foreground
+    Note over P: 4s if jobs live OR Focus has&lt;br/&gt;working/needs_answer; else 25s
+    P-&gt;&gt;D: GET /api/focus
+    opt live Focus or last jobs nonempty or OPEN/HELLO
+      P-&gt;&gt;D: GET /api/jobs
+    end
+    opt pending_* true and no request_id yet
+      P-&gt;&gt;D: GET /api/jobs/id?since=event_count
+    end
+    opt event_count grew
+      P-&gt;&gt;D: GET /api/jobs/id?since=cursor
+    end
+    P--&gt;&gt;W: FOCUS_ROW diffs + FOCUS_END(GEN), JOB, PERM/QUEST, CHIME
+  end
+  Note over P: watchapp close kills PKJS context&lt;br/&gt;no SSE, no Wakeup, no pins</pre>
+<div class="table-wrap"><table><thead><tr><th>App state</th><th>Radio</th></tr></thead><tbody><tr><td>Watchapp foreground, live</td><td><strong>4 s</strong> (<code>ar.pollWork</code>) focus <strong>and</strong> jobs whenever <strong>either</strong> the last jobs list has <code>starting</code>/<code>running</code>/<code>pending_*</code> <strong>or</strong> any Focus row is <code>working</code> / <code>needs_answer</code>. Snapshot: <code>since=event_count</code> for pending objects; <code>since=cursor</code> for phase deltas. Never <code>since=0</code> after subscribe.</td></tr><tr><td>Watchapp foreground, idle</td><td><strong>25 s</strong> (<code>ar.pollIdle</code>) focus. Skip <code>GET /api/jobs</code> <strong>only</strong> when Focus has <strong>no</strong> <code>working</code>/<code>needs_answer</code> rows <strong>and</strong> the last jobs list was empty. A Focus <code>needs_answer</code> while jobs was empty (turn blocked after the last idle tick) <strong>must</strong> GET jobs on that tick so <code>request_id</code> arrives and takeover can fire.</td></tr><tr><td><code>CMD=HELLO_REQ</code> / <code>CMD=OPEN</code></td><td><strong>Always</strong> <code>GET /api/jobs</code> (and snapshot if <code>pending_*</code>), even if the previous tick skipped jobs. OPEN loads messages <strong>and</strong> the job snapshot — not messages alone.</td></tr><tr><td>After CONTINUE/NEW (15 s)</td><td><strong>2 s</strong> burst <strong>replaces</strong> the interval (one timer)</td></tr><tr><td>Permission/question showing</td><td><strong>4 s</strong> (catch timeout/host-answered-in-TUI)</td></tr><tr><td>Watchapp closed</td><td><strong>zero</strong>. Closing the watchapp kills PKJS; timers die with the context. <code>ready</code> is start, not stop.</td></tr><tr><td>Phone app killed</td><td>zero. Watch shows <code>CONN</code> timeout after 20 s without HELLO/FOCUS.</td></tr><tr><td>HTTP in flight</td><td>skip this tick; reschedule. At most one XHR.</td></tr></tbody></table></div>
+<p>Clay slider range: work 3–8 s, idle 15–45 s. Refuse 1 Hz.</p>
+<p><strong>Wakeup API: deferred.</strong> <code>wakeup_schedule</code> could open the app on a timer, but without a reliable PKJS background fetch the watch would open to stale data and then poll — that is a Desk-face substitute the user declined. Revisit only if we later ship C or an Android companion that can push.</p>
+<p><strong>SSE while open:</strong> deferred. If PKJS EventSource proves stable on both iOS and Android in a spike, it can replace the 4 s jobs poll; the watch contract does not change.</p>
+<hr>
+<h2 id='sequence-diagrams'>Sequence diagrams</h2>
+<h3 id='open-app'>Open app</h3>
+<pre class="mermaid">sequenceDiagram
+  participant U as User
+  participant W as Watch
+  participant P as PKJS
+  participant D as Daemon
+  U-&gt;&gt;W: launch
+  W-&gt;&gt;W: window_stack Focus, CONN unknown
+  W-&gt;&gt;P: AppMessage CMD=HELLO_REQ
+  alt Clay empty
+    P--&gt;&gt;W: KIND=HELLO CONN=4
+    W-&gt;&gt;W: &quot;set URL&quot; empty state
+  else has URL+token
+    P-&gt;&gt;D: GET /api/ping
+    alt network fail
+      P--&gt;&gt;W: CONN=1 ERR=&quot;daemon&quot;
+    else HTTP 401 on later authed call
+      P--&gt;&gt;W: CONN=3
+    else ok
+      P-&gt;&gt;D: GET /api/focus
+      P-&gt;&gt;D: GET /api/jobs
+      P--&gt;&gt;W: HELLO CONN=2 HOST VER PROVS
+      P--&gt;&gt;W: FOCUS_ROW… FOCUS_END
+    end
+  end</pre>
+<h3 id='dictate-and-send-continue'>Dictate and send (continue)</h3>
+<pre class="mermaid">sequenceDiagram
+  participant U as User
+  participant W as Watch
+  participant Sys as Firmware STT
+  participant P as PKJS
+  participant D as Daemon
+  U-&gt;&gt;W: Select on session
+  W-&gt;&gt;Sys: dictation_session_start
+  Sys--&gt;&gt;W: transcription (system UI)
+  W-&gt;&gt;W: ConfirmWindow
+  U-&gt;&gt;W: Select
+  W-&gt;&gt;P: CMD=CONTINUE SID PROMPT
+  P--&gt;&gt;W: KIND=TX 0
+  P-&gt;&gt;D: POST /api/sessions/id/continue
+  D--&gt;&gt;P: 200 {&quot;job_id&quot;:&quot;…&quot;}
+  P--&gt;&gt;W: TX 1 + JOB JID STATUS=starting
+  W-&gt;&gt;W: pop confirm, phase &quot;working · 0:00&quot;
+  Note over P: 2 s poll burst 15 s (replaces interval)
+  P-&gt;&gt;D: GET /api/jobs/id?since=event_count
+  P--&gt;&gt;W: JOB PHASE, CHIME 0 Status</pre>
+<h3 id='permission-mcp-vs-2-9-0-pane-yes-no'>Permission (MCP) vs 2.9.0 pane Yes/No</h3>
+<pre class="mermaid">sequenceDiagram
+  participant D as Daemon TUI
+  participant P as PKJS
+  participant W as Watch
+  participant U as User
+  D-&gt;&gt;D: Claude pane Yes/No → pending_question header=Permission
+  P-&gt;&gt;D: GET /api/jobs (pending_question true)
+  P-&gt;&gt;D: GET /api/jobs/id?since=event_count
+  D--&gt;&gt;P: snapshot.pending_question
+  P-&gt;&gt;P: classify proceed dialog
+  P--&gt;&gt;W: KIND=QUEST QKIND=1 + CHIME 3
+  W-&gt;&gt;W: dictation_session_stop if any; push Perm chrome; orange held
+  U-&gt;&gt;W: Down (no_label)
+  W-&gt;&gt;P: CMD=QUESTION ANSWERS=No (esc)
+  P-&gt;&gt;D: POST /api/jobs/id/question {&quot;answers&quot;:[[&quot;No (esc)&quot;]]}
+  D--&gt;&gt;P: {&quot;ok&quot;: true}
+  P--&gt;&gt;W: KIND=JOB pending cleared
+  W-&gt;&gt;W: pop previous window; takeover_leave()</pre>
+<p>The <code>ANSWERS</code> value is the <strong>QOPT string</strong> for that button, e.g. <code>&quot;Yes&quot;</code>, <code>&quot;No (esc)&quot;</code>, <code>&quot;Yes, and don&#x27;t ask again for grep commands…&quot;</code>. Real MCP <code>pending_permission</code> uses <code>KIND=PERM</code> and <code>POST .../permission</code>. QKIND=1 must not emit <code>CMD=PERM</code>. Back = <code>no_label</code>.</p>
+<h3 id='askuserquestion'>AskUserQuestion</h3>
+<pre class="mermaid">sequenceDiagram
+  participant D as Daemon
+  participant P as PKJS
+  participant W as Watch
+  participant U as User
+  P-&gt;&gt;D: snapshot.pending_question (N questions)
+  P--&gt;&gt;W: QUEST for every option of every question (Q_QI, Q_I)
+  W-&gt;&gt;W: QuestionWindow q=0
+  U-&gt;&gt;W: pick, next question…
+  U-&gt;&gt;W: last pick
+  W-&gt;&gt;P: CMD=QUESTION ANSWERS=slot0 RS slot1 …
+  P-&gt;&gt;D: POST /api/jobs/id/question {&quot;answers&quot;:[[…],[…]]}</pre>
+<h3 id='new-session'>New session</h3>
+<pre class="mermaid">sequenceDiagram
+  participant U as User
+  participant W as Watch
+  participant P as PKJS
+  participant D as Daemon
+  U-&gt;&gt;W: Select &quot;New session&quot;
+  alt ping.multi
+    W-&gt;&gt;W: NewWindow from PROVS
+    U-&gt;&gt;W: Select provider
+  end
+  W-&gt;&gt;W: dictation + Confirm
+  U-&gt;&gt;W: Select
+  W-&gt;&gt;P: CMD=NEW PROV PROMPT
+  P-&gt;&gt;D: GET /api/projects (if that provider requires_cwd)
+  P-&gt;&gt;D: POST /api/sessions/new (permission_mode from that cap)
+  D--&gt;&gt;P: {&quot;job_id&quot;:&quot;…&quot;}
+  Note over D: enroll() on the job key
+  P--&gt;&gt;W: JOB SID=&quot;job:…&quot; 
+  W-&gt;&gt;W: push SessionWindow placeholder</pre>
+<h3 id='disconnect-error'>Disconnect / error</h3>
+<pre class="mermaid">sequenceDiagram
+  participant W as Watch
+  participant P as PKJS
+  participant D as Daemon
+  alt Bluetooth down
+    W-&gt;&gt;W: connection_service: CONN=0 &quot;phone&quot;
+  else XHR timeout / status 0
+    P--&gt;&gt;W: CONN=1 &quot;daemon&quot;
+    W-&gt;&gt;W: Error chime once per transition
+  else HTTP 401
+    P--&gt;&gt;W: CONN=3 &quot;token?&quot;
+  else dictation FailureDisabled / create NULL
+    W-&gt;&gt;W: &quot;voice off&quot; (Usage logs in Pebble app)
+  else dictation FailureConnectivityError
+    W-&gt;&gt;W: &quot;voice net&quot;
+  end</pre>
+<hr>
+<h2 id='pkjs-module-map'>PKJS module map</h2>
+<pre><code>pebble/
+  package.json              targetPlatforms: [&quot;emery&quot;], capabilities: [&quot;configurable&quot;]
+  wscript                   stock SDK
+  src/pkjs/
+    index.js                ready / appmessage / showConfiguration; outbox queue
+    clay.js                 Clay constructor + config.json
+    config.js               Clay JSON (URL, token, poll sliders)
+    http.js                 xhr(method, path, body, cb) — ES5 callbacks
+    reshape.js              ping/focus/jobs/messages → AppMessage fields
+    poll.js                 one timer, one XHR, doorbell cursor, chime diff; GET jobs on Focus working/needs_answer and on OPEN/HELLO
+    mdstrip.js              stripMarkdown</code></pre>
+<p>Tests (Node, no pebble-tool): <code>pebble/test/reshape_test.js</code> — <code>utf8clip</code> (BMP, CJK, surrogate emoji), <code>stripMarkdown</code>, Focus rank fallback, ANSWERS split, <code>capsFor</code> (multi details vs single root <code>caps</code>), proceed-dialog classifier (verbatim <code>&quot;No (esc)&quot;</code> / don’t-ask; <strong>edit “allow all” leftover → QKIND=0</strong>; never bare <code>&quot;No&quot;</code>). Outbox-size helper: omit empty <code>QNOTE</code>; cancel when dict &gt; 768.</p>
+<p>PKJS is callback-style ES5, matching <code>`pebble-map-demo/src/pkjs/index.js`</code>. Do not rely on <code>Promise</code> or <code>XHR.timeout</code> until PR1 spikes them on the official Pebble iOS/Android app; implement timeout with <code>setTimeout</code> + <code>abort()</code>. A 15-line Promise polyfill is allowed internally but <code>http.js</code>’s public API is <code>xhr(..., cb)</code>.</p>
+<p><code>index.js</code> responsibilities:</p>
+<pre><code class="lang-javascript">Pebble.addEventListener(&#x27;ready&#x27;, function () {
+  loadLocal();  // ar.base / ar.token / poll from localStorage
+  // CONN=4 if missing creds; otherwise leave CONN unknown until ping returns.
+  // Do not send CONN=2 here — that flashes Focus while the daemon is down.
+  if (!hasCreds()) {
+    queueMsg({KIND: 1, CONN: 4});
+    return;
+  }
+  queueMsg({KIND: 1, CONN: 1}); // &quot;daemon&quot; until ping lands
+  startPoll();
+});
+Pebble.addEventListener(&#x27;appmessage&#x27;, function (e) {
+  handleCmd(e.payload);
+});
+Pebble.addEventListener(&#x27;showConfiguration&#x27;, function () {
+  Pebble.openURL(clay.generateUrl());
+});
+Pebble.addEventListener(&#x27;webviewclosed&#x27;, function (e) {
+  // Parse JSON ourselves. Never clay.getSettings() → sendAppMessage.
+  // Write ar.base / ar.token / poll to localStorage only; then ping.
+});</code></pre>
+<p>Clay constructor <strong>must</strong> disable auto-send (token, URL, and poll sliders all stay off the watch):</p>
+<pre><code class="lang-javascript">var clay = new Clay(config, null, { autoAppMessage: false });</code></pre>
+<p><code>http.js</code> (callbacks, abort timeout, JSON content-type):</p>
+<pre><code class="lang-javascript">function xhr(method, path, jsonBody, cb) {
+  var x = new XMLHttpRequest();
+  var url = base.replace(/\/$/, &#x27;&#x27;) + path;
+  var t;
+  x.open(method, url, true);
+  x.setRequestHeader(&#x27;Accept&#x27;, &#x27;application/json&#x27;);
+  x.setRequestHeader(&#x27;Content-Type&#x27;, &#x27;application/json&#x27;);
+  if (token) {
+    x.setRequestHeader(&#x27;X-Auth-Token&#x27;, token);
+    x.setRequestHeader(&#x27;Authorization&#x27;, &#x27;Bearer &#x27; + token);
+  }
+  x.onreadystatechange = function () {
+    if (x.readyState !== 4) return;
+    clearTimeout(t);
+    if (x.status === 401) return cb({status: 401, error: &#x27;token&#x27;});
+    if (x.status &lt; 200 || x.status &gt;= 300) return cb({status: x.status, error: x.responseText});
+    try { cb(null, JSON.parse(x.responseText || &#x27;{}&#x27;)); }
+    catch (e) { cb({status: x.status, error: &#x27;bad json&#x27;}); }
+  };
+  x.onerror = function () { clearTimeout(t); cb({status: 0, error: &#x27;daemon&#x27;}); };
+  t = setTimeout(function () { try { x.abort(); } catch (e) {} cb({status: 0, error: &#x27;daemon&#x27;}); },
+                 path.indexOf(&#x27;/ping&#x27;) &gt;= 0 ? 8000 : 15000);
+  x.send(jsonBody ? JSON.stringify(jsonBody) : null);
+}</code></pre>
+<p>Clay <code>config.js</code> (fields only; styling is Clay default). <strong>Clay may only collect URL, token, poll seconds.</strong></p>
+<ul><li>heading <code>Agent Remote</code></li><li><code>input</code> <code>daemon_url</code> — label “Daemon URL (LAN IP of the host, not 127.0.0.1)”. <strong>Default empty.</strong> Placeholder <code>http://192.168.x.x:8473</code>. Saving the empty default keeps CONN=4 <code>setup</code>. <code>127.0.0.1</code> in PKJS is the <strong>phone</strong>, not the Mac running the daemon (Android uses 8473 only as <code>DEFAULT_PORT</code>, never a loopback URL).</li><li><code>input</code> <code>token</code> — label “Token” (from <code>~/.agentremoted/token</code>). <strong>No <code>messageKey</code>.</strong></li><li><code>slider</code> <code>poll_work</code> 3–8, default 4, label “Poll while working (s)” — <strong>no <code>messageKey</code></strong></li><li><code>slider</code> <code>poll_idle</code> 15–45, default 25, label “Poll while idle (s)” — <strong>no <code>messageKey</code></strong></li><li><code>text</code> “The watch never stores the token. One daemon in v1. Use the host’s LAN / Tailscale IP, not 127.0.0.1.”</li></ul>
+<p>Normalise URL like Android <code>DaemonClient.normalize</code>: trim, strip trailing <code>/</code>, prepend <code>http://</code> if no scheme. Port hint 8473, not a default host.</p>
+<hr>
+<h2 id='watch-module-map'>Watch module map</h2>
+<pre><code>pebble/
+  package.json
+  src/c/
+    main.c           init, window stack, connection_service, tick_timer
+    app.h            shared structs (FocusRow, SessSnap, Conn)
+    palette.h        GColor* mapping
+    msg.c / msg.h    inbox/outbox, utf8 copy into fixed buffers
+    poll_ui.c        apply FOCUS_ROW / JOB / PERM / QUEST; play CHIME
+    chime.c          vibes_enqueue_custom from CHIME; 30 s Attention reminder
+    light.c          Attention = orange+enable(true); Status = provider+enable_interaction(); leave = enable(false)+set_system_color()
+    dictation.c      session create/start/stop; 400-byte buffer
+    focus_win.c      list layer
+    sess_win.c       stripe, title, phase, bubbles, footer
+    confirm_win.c    ActionBarLayer
+    perm_win.c       MCP permission + proceed-dialog chrome
+    quest_win.c      AskUserQuestion, 4 visible options, multi-question collect
+    new_win.c
+    error_win.c      CONN / dictation / HTTP cards
+  resources/images/menuicon.png     25×25, menuIcon true
+  resources/images/ab_check.png     20×20 ActionBarLayer
+  resources/images/ab_cross.png     20×20
+  resources/images/ab_up.png        20×20
+  resources/images/ab_down.png      20×20
+  test/reshape_test.js              Node fixtures for clip/strip/rank/ANSWERS</code></pre>
+<p><code>package.json</code> (scaffold):</p>
+<pre><code class="lang-json">{
+  &quot;name&quot;: &quot;agent-remote&quot;,
+  &quot;author&quot;: &quot;Agent Remote&quot;,
+  &quot;version&quot;: &quot;0.1.0&quot;,
+  &quot;keywords&quot;: [&quot;pebble-app&quot;],
+  &quot;private&quot;: true,
+  &quot;dependencies&quot;: {
+    &quot;@rebble/clay&quot;: &quot;^1.0.4&quot;
+  },
+  &quot;pebble&quot;: {
+    &quot;displayName&quot;: &quot;Agent Remote&quot;,
+    &quot;uuid&quot;: &quot;a8473e12-7e2b-4b10-9e2e-c0de0000bb10&quot;,
+    &quot;sdkVersion&quot;: &quot;3&quot;,
+    &quot;enableMultiJS&quot;: true,
+    &quot;projectType&quot;: &quot;native&quot;,
+    &quot;capabilities&quot;: [&quot;configurable&quot;],
+    &quot;targetPlatforms&quot;: [&quot;emery&quot;],
+    &quot;watchapp&quot;: { &quot;watchface&quot;: false },
+    &quot;messageKeys&quot;: [
+      &quot;CMD&quot;,&quot;SID&quot;,&quot;JID&quot;,&quot;RID&quot;,&quot;PROMPT&quot;,&quot;PROV&quot;,&quot;ALLOW&quot;,&quot;CANCEL&quot;,&quot;ANSWERS&quot;,&quot;CHUNK&quot;,&quot;QNOTE&quot;,
+      &quot;KIND&quot;,&quot;CONN&quot;,&quot;HOST&quot;,&quot;VER&quot;,&quot;MULTI&quot;,&quot;PROVS&quot;,
+      &quot;FOCUS_N&quot;,&quot;FOCUS_I&quot;,&quot;FOCUS_GEN&quot;,&quot;TITLE&quot;,&quot;STATE&quot;,&quot;PHASE&quot;,&quot;ELAPSED&quot;,&quot;STARTED&quot;,&quot;LAST&quot;,&quot;UNREAD&quot;,&quot;STATUS&quot;,
+      &quot;MSG_I&quot;,&quot;MSG_N&quot;,&quot;MSG_ROLE&quot;,&quot;MSG_TEXT&quot;,&quot;MSG_MORE&quot;,
+      &quot;TOOL&quot;,&quot;DETAIL&quot;,&quot;QTEXT&quot;,&quot;QOPT&quot;,&quot;Q_I&quot;,&quot;Q_N&quot;,&quot;Q_QI&quot;,&quot;Q_QN&quot;,&quot;QMULTI&quot;,&quot;QNOTEFOR&quot;,&quot;QKIND&quot;,
+      &quot;ERR&quot;,&quot;CHIME&quot;,&quot;TX&quot;
+    ],
+    &quot;resources&quot;: {
+      &quot;media&quot;: [
+        { &quot;file&quot;: &quot;images/menuicon.png&quot;, &quot;menuIcon&quot;: true, &quot;name&quot;: &quot;IMAGE_MENU_ICON&quot;, &quot;type&quot;: &quot;bitmap&quot; },
+        { &quot;file&quot;: &quot;images/ab_check.png&quot;, &quot;name&quot;: &quot;IMAGE_AB_CHECK&quot;, &quot;type&quot;: &quot;bitmap&quot; },
+        { &quot;file&quot;: &quot;images/ab_cross.png&quot;, &quot;name&quot;: &quot;IMAGE_AB_CROSS&quot;, &quot;type&quot;: &quot;bitmap&quot; },
+        { &quot;file&quot;: &quot;images/ab_up.png&quot;, &quot;name&quot;: &quot;IMAGE_AB_UP&quot;, &quot;type&quot;: &quot;bitmap&quot; },
+        { &quot;file&quot;: &quot;images/ab_down.png&quot;, &quot;name&quot;: &quot;IMAGE_AB_DOWN&quot;, &quot;type&quot;: &quot;bitmap&quot; }
+      ]
+    }
+  }
+}</code></pre>
+<p>Generate a fresh UUID at PR1 if this one collides on the Rebble store; freeze it after first sideload.</p>
+<p>Menu icon: 25×25 PNG, Agent Remote mark (chevron + bar, same geometry as the web SVG in <code>`web/src/app.js`</code> ~1035) snapped to the cube: chevron <code>GColorOrange</code>, bar <code>GColorVividCerulean</code>, black background.</p>
+<p>Fonts: system <code>FONT_KEY_GOTHIC_14</code>, <code>_14_BOLD</code>, <code>_18_BOLD</code> only. No custom TTF in v1 (CJK subset would blow the pbw).</p>
+<p>Heap budget (emery 128 KB app RAM):</p>
+<div class="table-wrap"><table><thead><tr><th>Item</th><th>Budget</th></tr></thead><tbody><tr><td>AppMessage inbox+outbox</td><td>1.8 KB</td></tr><tr><td>Dictation buffer</td><td>0.4 KB</td></tr><tr><td>12 Focus rows × ~80 B</td><td>1 KB</td></tr><tr><td>8 message chunks × 180 B</td><td>1.5 KB</td></tr><tr><td>Windows / layers / action bar</td><td>~20 KB</td></tr><tr><td>Code + static</td><td>~40 KB</td></tr><tr><td>Slack</td><td>rest</td></tr></tbody></table></div>
+<hr>
+<h2 id='error-states'>Error states</h2>
+<div class="table-wrap"><table><thead><tr><th>Condition</th><th>Watch</th><th>Chime</th></tr></thead><tbody><tr><td>Bluetooth down</td><td>status right <code>&quot;phone&quot;</code>; list frozen</td><td>none on every redraw; Error once on edge</td></tr><tr><td>Clay missing URL/token</td><td>empty Focus, <code>&quot;set URL&quot;</code></td><td>none</td></tr><tr><td>Daemon unreachable</td><td><code>&quot;daemon&quot;</code></td><td>Error on edge</td></tr><tr><td>HTTP 401</td><td><code>&quot;token?&quot;</code></td><td>Error</td></tr><tr><td>HTTP 404 session (stale id)</td><td>pop to Focus, refresh</td><td>Error</td></tr><tr><td>HTTP 409 continue (<code>queue full</code> / <code>job not running</code>)</td><td><code>&quot;busy&quot;</code> on footer</td><td>Error</td></tr><tr><td>Empty Focus</td><td><code>&quot;No sessions&quot;</code> + New row</td><td>none</td></tr><tr><td><code>dictation_session_create</code> NULL / <code>FailureDisabled</code></td><td><code>ErrorWindow</code> <code>&quot;voice off&quot;</code> — Pebble app Usage logs</td><td>Error</td></tr><tr><td><code>FailureNoSpeechDetected</code></td><td>stay on session, firmware already retried</td><td>none</td></tr><tr><td><code>FailureConnectivityError</code></td><td><code>ErrorWindow</code> <code>&quot;voice net&quot;</code> (phone STT needs internet)</td><td>Error</td></tr><tr><td><code>FailureTranscriptionRejected</code></td><td>stay, no send</td><td>none</td></tr><tr><td>Ping <code>ok</code> but <code>focus: false</code> and sessions empty</td><td><code>&quot;No sessions&quot;</code></td><td>none</td></tr><tr><td>That provider’s <code>caps.stop === false</code></td><td>Long-Select no-ops</td><td>none</td></tr><tr><td>New session, <strong>that</strong> provider <code>requires_cwd</code>, no projects</td><td>Confirm still sends; PKJS returns ERR <code>&quot;no cwd&quot;</code></td><td>Error</td></tr><tr><td>Ask panel <code>questions.length &gt; 4</code> or watch→phone dict &gt; 768</td><td><code>ErrorWindow</code> <code>&quot;open on phone&quot;</code>; <code>{cancel: true}</code></td><td>none</td></tr></tbody></table></div>
+<hr>
+<h2 id='security-privacy-considerations'>Security &amp; Privacy Considerations</h2>
+<div class="table-wrap"><table><thead><tr><th>Threat</th><th>Mitigation</th></tr></thead><tbody><tr><td>Token on the watch (lost watch, AppMessage sniff)</td><td>Token never in AppMessage, never on screen, never in <code>persist_*</code>. Clay <code>localStorage</code> of the Pebble phone app only.</td></tr><tr><td>Token in PKJS logs</td><td><code>http.js</code> redacts; <code>console.log</code> categories log path + status, not headers.</td></tr><tr><td>Token in Clay outbound dict</td><td>No <code>messageKey</code> on token, URL, or poll. <code>new Clay(config, null, { autoAppMessage: false })</code>. Never <code>clay.getSettings()</code> → <code>sendAppMessage</code>.</td></tr><tr><td>Cleartext HTTP on LAN</td><td>Same as Android / BB10 / pager. Clay default URL is <strong>empty</strong> (CONN=4), copy says LAN IP not 127.0.0.1. HTTPS works if the phone trusts the cert; self-signed will fail in PKJS — document “use http on LAN or a public CA”.</td></tr><tr><td>Query-string <code>?token=</code></td><td>Forbidden in PKJS. Web SSE uses it because EventSource cannot set headers; we do not use SSE.</td></tr><tr><td>Dictation cloud STT</td><td>Firmware sends audio to Pebble’s recognizer (needs phone internet). Prompts then go to <strong>your</strong> daemon. No third AI. User already opted into Pebble Usage logs or dictation fails <code>FailureDisabled</code>.</td></tr><tr><td>Guest tokens</td><td>Work unchanged (<code>accounts.resolve_principal</code>). Watch cannot switch guests — one Clay token.</td></tr><tr><td>Prompt exfil via AppMessage</td><td>Prompts are user-spoken, 400 bytes, over BT to the phone that already has the token. Acceptable.</td></tr><tr><td>Multi-host mix-up</td><td>v1 = one URL.</td></tr></tbody></table></div>
+<hr>
+<h2 id='observability'>Observability</h2>
+<p>PKJS <code>console.log</code> prefixes (filterable in <code>pebble logs</code>):</p>
+<div class="table-wrap"><table><thead><tr><th>Prefix</th><th>What</th></tr></thead><tbody><tr><td><code>[ar]</code></td><td>lifecycle, Clay save (no token), poll interval changes</td></tr><tr><td><code>[http]</code></td><td><code>GET /api/focus 200 12 rows 80ms</code></td></tr><tr><td><code>[msg]</code></td><td><code>KIND=2 i=0/4</code>, NACK retry</td></tr><tr><td><code>[poll]</code></td><td><code>work 4s</code> / <code>idle 25s</code> / <code>burst</code></td></tr><tr><td><code>[diff]</code></td><td>chime reason <code>attn jid=…</code> / <code>done</code> / <code>err</code></td></tr></tbody></table></div>
+<p>Watch: <code>APP_LOG_LEVEL_INFO</code> for CONN transitions and dictation status codes. Status bar right glyph/label is the user-visible health:</p>
+<div class="table-wrap"><table><thead><tr><th>CONN</th><th>Label</th></tr></thead><tbody><tr><td>0</td><td><code>phone</code></td></tr><tr><td>1</td><td><code>daemon</code></td></tr><tr><td>2</td><td><code>Focus</code> / provider / <code>AR</code></td></tr><tr><td>3</td><td><code>token?</code></td></tr><tr><td>4</td><td><code>setup</code></td></tr></tbody></table></div>
+<p>No crash reporter. A watchdog-kill from heap exhaustion shows up as a relaunch; keep the budget.</p>
+<hr>
+<h2 id='battery'>Battery</h2>
+<p>Time 2 median is ~21–30 days; backlight and radio are the killers (<a href="https://developer.repebble.com/guides/tools-and-resources/hardware-information/">Rebble hardware notes</a>, conserving-battery guide).</p>
+<div class="table-wrap"><table><thead><tr><th>Rule</th><th>Why</th></tr></thead><tbody><tr><td>No 1 Hz AppMessage</td><td>Radio + CPU. Elapsed ticks locally.</td></tr><tr><td>Poll 4 s / 25 s, only foreground</td><td>Matches “about 30 days if we do not poll” in the preview.</td></tr><tr><td>Orange backlight <strong>held</strong> only while a takeover is on screen</td><td>Attention: <code>set_color(orange)+enable(true)</code>. Status: <code>set_color(provider)+enable_interaction()</code> — never <code>enable(true)</code>. Leave: <code>enable(false)+set_system_color()</code>.</td></tr><tr><td>No speaker chimes in v1</td><td>Amp current.</td></tr><tr><td>No Wakeup, no background worker</td><td>Would keep BT alive.</td></tr><tr><td>Dictation only on Select</td><td>Conserving-battery guide: dictation keeps the watch and BT awake.</td></tr></tbody></table></div>
+<p>Rough radio budget while working: one GET focus (~2–10 KB JSON) + one GET jobs + maybe one snapshot, every 4 s, only while the user is looking. That is a <strong>session</strong>, not all-day.</p>
+<hr>
+<h2 id='rollout-plan'>Rollout Plan</h2>
+<p>No daemon flag. No other-client change required except listing the platform in <code>`AGENTS.md`</code> (PR1).</p>
+<ol><li><strong>Sideload</strong> (v1): from <code>bb10-remote/pebble/</code></li></ol>
+<pre><code class="lang-bash">   pebble sdk install latest
+   pebble build
+   pebble install --emulator emery
+   pebble install --phone &lt;phone-ip&gt;
+   </code></pre>
+<p>Same toolchain as <code>`pebble-map-demo/README.md`</code>. Open Clay with <code>pebble emu-app-config</code> or the gear in the Pebble phone app. Point at <code>http://&lt;lan-ip&gt;:8473</code> + <code>~/.agentremoted/token</code> — <strong>not</strong> <code>127.0.0.1</code>.</p>
+<p><strong>Test matrix</strong></p>
+<div class="table-wrap"><table><thead><tr><th></th><th>Emulator (<code>pebble install --emulator emery</code>)</th><th>Time 2 hardware + phone</th></tr></thead><tbody><tr><td>Clay, empty URL → CONN=4</td><td>yes</td><td>yes</td></tr><tr><td>Ping, Focus list, fake JOB/PERM/QUEST via <code>pebble send-app-message</code></td><td>yes</td><td>yes</td></tr><tr><td>Chime vibes (Quiet Time)</td><td>weak</td><td><strong>required</strong></td></tr><tr><td>RGB held orange</td><td>QEMU backlight</td><td><strong>required</strong></td></tr><tr><td>BT watchdog CONN=0</td><td>unplug BT in QEMU</td><td><strong>required</strong></td></tr><tr><td>Dictation / deny note / <code>note_for</code></td><td><strong>no</strong> (firmware STT + phone internet + Usage logs)</td><td><strong>required</strong></td></tr><tr><td><code>autoAppMessage: false</code> (token absent on watch)</td><td><code>pebble logs</code></td><td>yes</td></tr></tbody></table></div>
+<ol><li><strong>Store</strong> (later): Rebble appstore (<code>apps.repebble.com</code>), UUID frozen, screenshots from emulator + hardware. Still Time 2 only.</li><li><strong>Rollback</strong>: delete the watchapp. Daemon and other clients unchanged.</li><li><strong>Staged code</strong>: the PR plan below; each PR is a sideloadable <code>.pbw</code>.</li></ol>
+<p>Feature flags: none on the daemon. Clay poll sliders are the only runtime knobs.</p>
+<hr>
+<h2 id='client-parity-agents-md'>Client parity (AGENTS.md)</h2>
+<p>Ship on the watch if the platform can reasonably support it; otherwise document the deferral.</p>
+<div class="table-wrap"><table><thead><tr><th>Capability</th><th>Watch v1</th></tr></thead><tbody><tr><td>Focus list + state tags</td><td><strong>Ship</strong> (<code>GET /api/focus</code>)</td></tr><tr><td>Permissions Allow/Deny</td><td><strong>Ship</strong></td></tr><tr><td>AskUserQuestion</td><td><strong>Ship</strong> (all questions, one POST; 4 visible options, scroll)</td></tr><tr><td>Stop</td><td><strong>Ship</strong> if <strong>that</strong> provider’s <code>caps.stop</code></td></tr><tr><td>Continue</td><td><strong>Ship</strong> (voice)</td></tr><tr><td>New session + provider</td><td><strong>Ship</strong> (<code>multi</code> → picker)</td></tr><tr><td>Live phase / elapsed</td><td><strong>Ship</strong> while app open</td></tr><tr><td>Chimes + need-you colour</td><td><strong>Ship</strong> (vibe + RGB)</td></tr><tr><td>Ping-driven providers</td><td><strong>Ship</strong></td></tr><tr><td>Interactive <code>permission_mode</code></td><td><strong>Ship</strong> when that provider’s <code>caps.interactive</code>; else headless</td></tr><tr><td>Live TUI</td><td>Defer (no 2–5 Hz pane, no keys)</td></tr><tr><td>Attachments / drop / share</td><td>Defer</td></tr><tr><td>Rewind / slash / usage</td><td>Defer</td></tr><tr><td>Queue UI</td><td>Defer (continue-while-running still <strong>queues</strong> server-side)</td></tr><tr><td>Multi-host profiles</td><td>Defer (one Clay URL)</td></tr><tr><td>Markdown / process view</td><td>Defer (phone strips)</td></tr><tr><td>Model / cwd / effort pickers</td><td>Defer (defaults)</td></tr><tr><td>Session rename / focus done</td><td>Defer</td></tr></tbody></table></div>
+<p>Update the platform table in <code>`AGENTS.md`</code>:</p>
+<div class="table-wrap"><table><thead><tr><th>Platform</th><th>Location</th></tr></thead><tbody><tr><td>Pebble Time 2</td><td><code>bb10-remote/pebble/</code> (C + PKJS, emery)</td></tr></tbody></table></div>
+<hr>
+<h2 id='alternatives-considered'>Alternatives Considered</h2>
+<h3 id='1-c-desk-watchface-product-c'>1. C Desk watchface (product C)</h3>
+<p>Always-on colour flag, minute ticks, phone wakes the face on job events.</p>
+<ul><li><strong>Pro:</strong> The thing only MIP can be; glance without opening an app; best battery if event-driven.</li><li><strong>Con:</strong> Cannot Allow, cannot talk, cannot start a session. Incomplete without A or B. User declined C. PKJS cannot hold SSE when the face is up and the watchapp is not — so “event-driven” really means Android PebbleKit or Wakeup+poll, both rejected.</li></ul>
+<h3 id='2-android-pebblekit-companion-inside-agent-remote'>2. Android PebbleKit companion inside Agent Remote</h3>
+<p>Reuse profiles, SSE (<code>/sse/status</code>), job watcher, existing token store.</p>
+<ul><li><strong>Pro:</strong> Best live status; one profile UI; doorbell for free.</li><li><strong>Con:</strong> iOS users get nothing (no <code>ios/</code> tree, and PebbleKit iOS would be a new app). v1 companion decision is PKJS so <strong>both</strong> phone OSes work the day the <code>.pbw</code> lands. Can be a v2 upgrade: if Android AR is installed it takes over the link; PKJS remains the fallback.</li></ul>
+<h3 id='3-pager-only-product-a-notifications'>3. Pager-only / product A notifications</h3>
+<p>Timeline pins, three-card app, no compose.</p>
+<ul><li><strong>Pro:</strong> Smallest pbw; almost all logic on the phone; lowest battery.</li><li><strong>Con:</strong> Cannot start a turn, cannot read a reply, cannot pick a provider. The Time 2 mic would sit unused. User locked D+B.</li></ul>
+<p><strong>Why D+B+PKJS+voice+Time2 wins for this user:</strong> it is the smallest product that actually <em>steers</em> agents (Focus, Allow/Deny, question, stop, speak, new session) on the hardware they own, on both phone OSes, without a daemon change and without a Duo port.</p>
+<hr>
+<h2 id='risks'>Risks</h2>
+<div class="table-wrap"><table><thead><tr><th>Risk</th><th>Sev</th><th>Mitigation</th></tr></thead><tbody><tr><td>AppMessage payload overflow (CJK titles, long <code>detail</code>)</td><td><strong>High</strong></td><td>Phone <code>utf8clip</code>; inbox 1024; one row per message; 404-safe if a send NACKs</td></tr><tr><td>PKJS killed while “open” (iOS suspending the Pebble app)</td><td><strong>High</strong></td><td>Watch 20 s watchdog → <code>&quot;phone&quot;</code>; next <code>ready</code> re-hellos. No illusion of background live.</td></tr><tr><td>Dictation requires phone internet + Pebble STT + Usage logs</td><td><strong>High</strong></td><td>Explicit error strings <code>voice off</code> / <code>voice net</code>. There is no fallback keyboard.</td></tr><tr><td>Heap fragmentation with 6 windows + dictation + inbox</td><td><strong>Med</strong></td><td>Destroy windows on pop; one dictation session for app lifetime; bounded arrays</td></tr><tr><td>Naive 1 Hz poll if a future change “feels laggy”</td><td><strong>Med</strong></td><td>Hard max: work interval ≥ 3 s in Clay validation; code comments</td></tr><tr><td><code>permission_mode</code> omitted → daemon <code>bypassPermissions</code></td><td><strong>High</strong></td><td>Always send <code>&quot;interactive&quot;</code> or <code>&quot;bypassPermissions&quot;</code> from <strong>that</strong> provider’s <code>caps.interactive</code>. Test against a stock <code>config.example.json</code>.</td></tr><tr><td>Root ping union used for Grok cwd on <strong>multi</strong></td><td><strong>High</strong></td><td><code>capsFor(prov)</code>: details on multi, root <code>caps</code> on single-harness (no <code>provider_details</code>).</td></tr><tr><td><code>&quot;Yes&quot;</code>/<code>&quot;No&quot;</code> POST against <code>&quot;No (esc)&quot;</code></td><td><strong>High</strong></td><td>QKIND=1 sends verbatim <code>QOPT</code>; <code>_answer_permission</code> requires <code>l in labels</code>.</td></tr><tr><td>Idle skip jobs misses Focus <code>needs_answer</code></td><td><strong>High</strong></td><td>4 s + GET jobs when any Focus row is <code>working</code>/<code>needs_answer</code>; always GET jobs on OPEN/HELLO.</td></tr><tr><td>Burst of 4 questions POSTs a short <code>answers</code></td><td><strong>High</strong></td><td><code>questions.length &gt; 4</code> or encoded <code>CMD</code>+ids+<code>ANSWERS</code>+<code>QNOTE</code> &gt; 768 → <code>{cancel: true}</code> + <code>&quot;open on phone&quot;</code>. Omit empty <code>QNOTE</code>.</td></tr><tr><td>QKIND=1 hides “allow all edits”</td><td><strong>Med</strong></td><td>Coverage gate: leftover options → <code>QKIND=0</code> QuestionWindow.</td></tr><tr><td>Claude new-session 400 without cwd</td><td><strong>Med</strong></td><td><code>GET /api/projects</code> only when <strong>that</strong> provider requires it; else <code>no cwd</code> error, do not guess <code>/Users/…</code></td></tr><tr><td>Job placeholder <code>job:&lt;id&gt;</code> 404 on continue</td><td><strong>Low</strong></td><td>Daemon 2.8.5 already resolves <code>GET/POST /api/sessions/job:&lt;id&gt;</code>. Talk is allowed on the placeholder; poll 2 s for the real id.</td></tr><tr><td>False Done chime on BT gap</td><td><strong>Med</strong></td><td>PKJS confirms <code>GET /api/jobs/&lt;id&gt;</code> status like <code>esp32</code> <code>runJobEndChecks</code> and is the only CHIME source</td></tr><tr><td>Orange backlight left on after resolve</td><td><strong>Med</strong></td><td><code>takeover_leave()</code> on Allow, Deny, Back, 404, and host-cleared pending</td></tr><tr><td><code>since=0</code> JSON.parse of a long event log</td><td><strong>High</strong></td><td>First snapshot <code>since=event_count</code>; later <code>since=cursor</code></td></tr><tr><td>12 FOCUS_ROW vs 4 s poll</td><td><strong>Med</strong></td><td>Diff by SID, FOCUS_GEN drop, one XHR, one outbox in flight</td></tr><tr><td>Focus cap false on old daemon</td><td><strong>Low</strong></td><td>Fallback <code>GET /api/sessions?limit=12</code> + local rank</td></tr><tr><td>Rebble store UUID clash</td><td><strong>Low</strong></td><td><code>uuidgen</code> at PR1</td></tr></tbody></table></div>
+<hr>
+<h2 id='open-questions'>Open Questions</h2>
+<p>None that reopen product, companion, voice, or hardware.</p>
+<p>PR1 includes an implementation spike (not a product question): whether the official Pebble iOS/Android JS engine has <code>Promise</code> / <code>XHR.timeout</code>. The spec already ships ES5 callbacks + <code>abort()</code> so a “no” does not block.</p>
+<ol><li><strong>Menu icon art</strong> — reuse the 25×25 chevron+bar vs a 1-bit mark. Either is fine; PR1 includes a PNG.</li><li><strong>Rebble store listing copy</strong> — only when we publish; sideload does not need it.</li></ol>
+<p>Wakeup, SSE-while-open, speaker chimes, Alloy rewrite, Android PebbleKit, Desk face: <strong>deferred</strong>, not open.</p>
+<hr>
+<h2 id='references'>References</h2>
+<ul><li><code>`AGENTS.md`</code> — client parity rules.</li><li><code>`daemon/README.md`</code> — API overview, Focus states, ping caps.</li><li><code>`daemon/agentremoted/server.py`</code> — routes, <code>_extract_token</code>, <code>_handle_focus_list</code>, <code>_handle_new_session</code>, <code>_handle_permission_answer</code>, <code>_handle_question_answer</code>.</li><li><code>`daemon/agentremoted/focus.py`</code> — <code>STATES</code>, <code>state_for</code>, <code>STATE_LABELS</code>.</li><li><code>`daemon/agentremoted/jobs.py`</code> — <code>brief</code>, <code>snapshot</code>, <code>pending_permission</code>, <code>pending_question</code>, <code>resolve_*</code>.</li><li><code>`daemon/agentremoted/providers/claude_interactive.py`</code> — <code>_permission_panel</code> publishes Yes/No as <code>pending_question</code> (<code>header: &quot;Permission&quot;</code>).</li><li><code>`daemon/agentremoted/providers/deepseek.py`</code> — <code>&quot;interactive&quot;: False</code>, <code>&quot;requires_cwd&quot;: True</code>.</li><li><code>`android/.../DaemonClient.kt`</code> — HTTP shapes, auth header, continue/new/permission/question.</li><li><code>`android/.../Models.kt`</code> — <code>PingDto</code>, <code>FocusDto</code>, <code>JobSnapshotDto</code>, <code>PendingPermissionDto</code>, <code>PendingQuestionDto</code>.</li><li><code>`android/.../Chime.kt`</code> — haptic timings.</li><li><code>`esp32/src/ui/ui.cpp`</code> — Focus weight, <code>diffFeed</code>, 30 s attention reminder.</li><li><code>`esp32/src/net/agentapi.cpp`</code> — <code>fetchFocus</code>, dual auth headers, <code>newSession</code> (note: pager sends <code>bypassPermissions</code>; we do not).</li><li><code>`web/src/app.js`</code> — provider accents, SSE <code>?token=</code> (we do not copy that).</li><li><a href="design-preview/index.html"><code>pebble/design-preview/index.html</code></a> — locked B/D screens.</li><li><code>`../pebble-map-demo/`</code> — emery + PKJS pattern.</li><li><a href="https://developer.repebble.com/guides/events-and-services/dictation/">Dictation API</a> — <code>dictation_session_*</code>.</li><li><a href="https://developer.repebble.com/guides/events-and-services/light/">RGB backlight</a> — <code>light_set_color</code>, <code>PBL_RGB_BACKLIGHT</code>.</li><li><a href="https://developer.repebble.com/guides/alloy/">Alloy (not used)</a> — emery JS alternative.</li><li><a href="https://developer.repebble.com/guides/user-interfaces/app-configuration/">Clay</a> — <code>@rebble/clay</code>.</li></ul>
+<hr>
+<h2 id='pr-plan'>PR Plan</h2>
+<p>Incremental, each PR a sideloadable <code>.pbw</code>. Do not mix daemon changes (there are none). Update <code>`AGENTS.md`</code> in PR1 so other-client work notices the new platform. Pain #1 is Allow/Deny without unlocking the phone — that lands in <strong>PR 3</strong>, before dictation.</p>
+<p><strong>Hardware column:</strong> PRs 1–3 + 7 can be signed off in the emery emulator with injected AppMessages. PRs 4–6 need a Time 2 (dictation). RGB held and Quiet Time vibes need hardware to <em>trust</em>, but QEMU can smoke them.</p>
+<h3 id='pr-1-scaffold-pbw-clay-ping'>PR 1 — Scaffold pbw + Clay ping</h3>
+<ul><li><strong>Title:</strong> <code>pebble: emery scaffold, Clay URL/token, ping hello</code></li><li><strong>Files:</strong> <code>pebble/package.json</code>, <code>pebble/wscript</code>, <code>pebble/src/c/main.c</code>, <code>pebble/src/c/app.h</code>, <code>pebble/src/c/msg.c</code>, <code>pebble/src/c/error_win.c</code>, <code>pebble/src/pkjs/index.js</code>, <code>pebble/src/pkjs/clay.js</code>, <code>pebble/src/pkjs/config.js</code>, <code>pebble/src/pkjs/http.js</code>, <code>pebble/resources/images/menuicon.png</code>, <code>pebble/test/reshape_test.js</code>, <code>AGENTS.md</code>, <code>pebble/README.md</code></li><li><strong>Deps:</strong> none</li><li><strong>Hardware:</strong> emulator sufficient. Spike: <code>XHR.timeout</code> / <code>Promise</code> on the official Pebble app — if either is missing, keep the callback+abort path in this spec.</li><li><strong>Description:</strong> Native emery watchapp, custom 20 px status bar, <code>ErrorWindow</code>, <code>CONN</code> labels (<code>setup</code> / <code>phone</code> / <code>daemon</code> / <code>token?</code>). Clay <code>{ autoAppMessage: false }</code>; empty default URL; persist URL+token+poll in <code>localStorage</code> only. HELLO <code>CONN=2</code> only after <code>GET /api/ping</code>. Token never on the wire to the watch. <code>utf8clip</code> tests. UUID frozen.</li></ul>
+<h3 id='pr-2-focus-list'>PR 2 — Focus list</h3>
+<ul><li><strong>Title:</strong> <code>pebble: Focus list from /api/focus</code></li><li><strong>Files:</strong> <code>pebble/src/c/focus_win.c</code>, <code>pebble/src/c/palette.h</code>, <code>pebble/src/pkjs/reshape.js</code>, <code>pebble/src/pkjs/poll.js</code>, <code>pebble/test/reshape_test.js</code></li><li><strong>Deps:</strong> PR 1</li><li><strong>Hardware:</strong> emulator</li><li><strong>Description:</strong> Poll <code>GET /api/focus</code> (fallback <code>GET /api/sessions?limit=12</code> + local rank). 12 rows, 42 px, provider ticks, D highlight, empty <code>&quot;No sessions&quot;</code>, New row stub. Diff by SID, <code>FOCUS_GEN</code>, one XHR. D mockup verbs (<code>needs you</code> / <code>finished</code>). Up/Down/Select. Optional touch pan.</li></ul>
+<h3 id='pr-3-jobs-doorbell-chimes-perm-quest-takeover'>PR 3 — Jobs doorbell + chimes + Perm/Quest takeover</h3>
+<ul><li><strong>Title:</strong> <code>pebble: job doorbell, chimes, permission and AskUserQuestion</code></li><li><strong>Files:</strong> <code>pebble/src/c/sess_win.c</code> (title/phase/last_text/footer; bubbles stub), <code>pebble/src/c/chime.c</code>, <code>pebble/src/c/light.c</code>, <code>pebble/src/c/poll_ui.c</code>, <code>pebble/src/c/perm_win.c</code>, <code>pebble/src/c/quest_win.c</code>, <code>pebble/src/pkjs/poll.js</code>, <code>pebble/src/pkjs/reshape.js</code>, <code>pebble/resources/images/ab_*.png</code></li><li><strong>Deps:</strong> PR 2</li><li><strong>Hardware:</strong> emulator for logic (<code>pebble send-app-message</code> PERM/QUEST); Time 2 to trust RGB held + Quiet Time vibes</li><li><strong>Description:</strong> Overlay <code>GET /api/jobs</code>. Snapshot <code>since=event_count</code> for pending objects; deltas <code>since=cursor</code> for phase. <strong>Never <code>since=0</code> after subscribe.</strong> GET jobs whenever Focus has <code>working</code>/<code>needs_answer</code>, and on OPEN/HELLO — do not idle-skip those ticks. PKJS <code>diffFeed</code>/<code>runJobEndChecks</code> → <code>CHIME</code>. Session window without dictation. Takeover: MCP <code>pending_permission</code> → PermWindow <code>CMD=PERM</code>; 2.9.0 Yes/No or Yes/No/don’t-ask → Perm chrome <code>QKIND=1</code> <code>CMD=QUESTION</code> with <strong>verbatim</strong> labels (<code>No (esc)</code>, not <code>&quot;No&quot;</code>). Any leftover option (edit “allow all”) → <code>QKIND=0</code> QuestionWindow. Collect all, one POST; <code>&gt; 4</code> questions or dict &gt; 768 → cancel + <code>&quot;open on phone&quot;</code>. Omit empty <code>QNOTE</code>. 4 visible options, all options sent. QKIND=1 Select = don’t-ask label or Yes. <code>takeover_leave()</code>. Action-bar 20×20 bitmaps. Allow/Deny does <strong>not</strong> need the mic. Long-Select stop if jobs overlay has <code>JID</code>. Poll 4 s / 25 s, one timer.</li></ul>
+<h3 id='pr-4-dictation-continue'>PR 4 — Dictation continue</h3>
+<ul><li><strong>Title:</strong> <code>pebble: dictation confirm → POST continue</code></li><li><strong>Files:</strong> <code>pebble/src/c/dictation.c</code>, <code>pebble/src/c/confirm_win.c</code>, <code>pebble/src/pkjs/index.js</code></li><li><strong>Deps:</strong> PR 3</li><li><strong>Hardware:</strong> <strong>Time 2 required</strong> (emulator STT is not useful)</li><li><strong>Description:</strong> Select starts <code>dictation_session_*</code> (system confirmation off). Confirm Select sends <code>CMD=CONTINUE</code>; PKJS POST with <code>permission_mode</code> from <strong>that</strong> provider’s <code>interactive</code> cap. TX states, 2 s burst <strong>replaces</strong> interval. <code>dictation_session_stop</code> if a takeover arrives. Error paths: <code>voice off</code> / <code>voice net</code> / reject. <code>job:&lt;id&gt;</code> continue allowed (daemon 2.8.5 maps it).</li></ul>
+<h3 id='pr-5-deny-note-and-note-for-dictation'>PR 5 — Deny-note and <code>note_for</code> dictation</h3>
+<ul><li><strong>Title:</strong> <code>pebble: dictation notes on deny and note_for</code></li><li><strong>Files:</strong> <code>pebble/src/c/perm_win.c</code>, <code>pebble/src/c/quest_win.c</code>, <code>pebble/src/c/dictation.c</code></li><li><strong>Deps:</strong> PR 4</li><li><strong>Hardware:</strong> <strong>Time 2 required</strong></li><li><strong>Description:</strong> Long-Select on PermWindow → dictation → <code>{allow:false, message}</code>. Chosen <code>note_for</code> option → dictation → <code>notes[i]</code> on the final question POST.</li></ul>
+<h3 id='pr-6-new-session'>PR 6 — New session</h3>
+<ul><li><strong>Title:</strong> <code>pebble: new session provider picker + first prompt</code></li><li><strong>Files:</strong> <code>pebble/src/c/new_win.c</code>, <code>pebble/src/pkjs/index.js</code>, <code>pebble/src/pkjs/http.js</code></li><li><strong>Deps:</strong> PR 4</li><li><strong>Hardware:</strong> <strong>Time 2 required</strong> (first prompt is voice)</li><li><strong>Description:</strong> Last Focus row Select → provider list from ping <code>providers</code> (skip if not <code>multi</code>). Dictate first prompt. <code>cwd</code> / <code>permission_mode</code> from <strong>that</strong> provider’s caps. <code>&quot;no cwd&quot;</code> only when that harness requires a project and none exist.</li></ul>
+<h3 id='pr-7-transcript-pair-paging'>PR 7 — Transcript pair paging</h3>
+<ul><li><strong>Title:</strong> <code>pebble: last two messages and Down paging</code></li><li><strong>Files:</strong> <code>pebble/src/c/sess_win.c</code>, <code>pebble/src/pkjs/mdstrip.js</code>, <code>pebble/src/pkjs/reshape.js</code>, <code>pebble/test/reshape_test.js</code></li><li><strong>Deps:</strong> PR 3</li><li><strong>Hardware:</strong> emulator</li><li><strong>Description:</strong> On OPEN, <code>GET /api/sessions/&lt;id&gt;/messages?limit=8</code>, strip markdown/status roles. <code>CHUNK=k</code> returns the pair <code>messages[n-2-k]</code>, <code>messages[n-1-k]</code>. Footer <code>{n} msgs</code> / <code>{n-k}/{n}</code>. 180-byte UTF-8 clips. Refresh tail when job <code>done</code>. No steps, no markdown on watch.</li></ul>
+<p>PRs 6 and 7 can land in either order after 4/3. PR 5 is optional relative to v1 Allow/Ask (PR 3 already unblocks the wrist). After PR 7 the v1 product is complete; store listing is a follow-up, not a functional PR.</p>
+</div>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "dark",
+    themeVariables: {
+      darkMode: true,
+      background: "#1a1814",
+      primaryColor: "#2c2924",
+      primaryTextColor: "#f2ead8",
+      primaryBorderColor: "#6a6458",
+      lineColor: "#9a8f78",
+      secondaryColor: "#1c1a16",
+      tertiaryColor: "#14120e",
+      fontFamily: "Helvetica Neue, Helvetica, Arial, sans-serif"
+    }
+  });
+</script>
+<script>
+(function () {
+  const ids = ['overview', 'background-motivation', 'goals-non-goals', 'key-decisions', 'runtime-c-not-alloy', 'proposed-design', 'api-interface-changes', 'data-model-changes', 'appmessage-dictionary', 'poll-strategy-honest', 'sequence-diagrams', 'pkjs-module-map', 'watch-module-map', 'error-states', 'security-privacy-considerations', 'observability', 'battery', 'rollout-plan', 'client-parity-agents-md', 'alternatives-considered', 'risks', 'open-questions', 'references', 'pr-plan'];
+  const links = Array.prototype.slice.call(document.querySelectorAll(".rail a[href^='#']"));
+  function mark() {
+    const y = window.scrollY + 80;
+    let cur = ids[0];
+    ids.forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el && el.offsetTop <= y) cur = id;
+    });
+    links.forEach(function (a) {
+      a.classList.toggle("on", a.getAttribute("href") === "#" + cur);
+    });
+  }
+  mark();
+  window.addEventListener("scroll", mark, { passive: true });
+})();
+</script>
+</body>
+</html>

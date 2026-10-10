@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Remote on Pebble Time 2</title>
+<style>
+  :root {
+    --page: #14120e;
+    --panel: #1c1914;
+    --ink: #f2ead8;
+    --mute: #9a8f78;
+    --rule: #3a3428;
+    --orange: #FF5500;
+    --cerulean: #00AAFF;
+    --jaeger: #00AA55;
+    --yellow: #FFAA00;
+    --bluemoon: #0055FF;
+    --tan: #AA5500;
+    --sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Times New Roman", serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  html, body { margin: 0; background: var(--page); color: var(--ink); }
+  body { font-family: var(--serif); }
+
+  /* rail like the four Pebble buttons */
+  .rail {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: 72px;
+    background: #1c1a16;
+    border-right: 1px solid var(--rule);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+    padding: 16px 10px;
+    z-index: 20;
+  }
+  .rail a {
+    display: block;
+    text-align: center;
+    text-decoration: none;
+    color: var(--mute);
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 36px;
+    height: 36px;
+    border: 1px solid #5a554c;
+    background: #2c2924;
+    border-radius: 2px 8px 8px 2px;
+  }
+  .rail a:hover, .rail a:focus-visible { color: var(--ink); border-color: var(--ink); outline: none; }
+  .rail a.on { background: var(--orange); color: #000; border-color: var(--orange); }
+  .rail a.sm { font-size: 10px; font-weight: 500; height: 28px; line-height: 28px; }
+
+  .wrap { margin-left: 72px; padding: 40px 48px 96px; }
+  .mnav { display: none; }
+  .table-wrap { overflow-x: auto; }
+
+  .hero {
+    display: grid;
+    grid-template-columns: 268px minmax(0, 1fr);
+    gap: 48px;
+    align-items: center;
+    max-width: 1040px;
+    min-height: calc(100vh - 80px);
+    padding-bottom: 40px;
+  }
+  .hero h1 {
+    font-size: clamp(32px, 4.4vw, 52px);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+    margin: 0 0 16px;
+  }
+  .hero p {
+    color: var(--mute);
+    font-size: 18px;
+    line-height: 1.45;
+    margin: 0 0 14px;
+    max-width: 38em;
+  }
+  .hero .keys {
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--mute);
+    margin-top: 20px;
+  }
+  kbd {
+    font-family: var(--sans);
+    font-size: 12px;
+    border: 1px solid var(--rule);
+    padding: 1px 6px;
+    background: var(--panel);
+  }
+
+  .sec {
+    max-width: 1040px;
+    margin: 0 auto 64px;
+    padding-top: 28px;
+    border-top: 1px solid var(--rule);
+  }
+  .sec h2 {
+    font-size: 28px;
+    letter-spacing: -0.02em;
+    margin: 0 0 6px;
+  }
+  .tag {
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--yellow);
+    margin: 0 0 12px;
+  }
+  .blurb {
+    color: var(--mute);
+    font-size: 17px;
+    line-height: 1.45;
+    max-width: 40em;
+    margin: 0 0 22px;
+  }
+
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 20px;
+    margin: 0 0 28px;
+    max-width: 1040px;
+  }
+  .facts dt {
+    font-family: var(--sans);
+    font-size: 12px;
+    color: var(--yellow);
+    margin: 0 0 6px;
+  }
+  .facts dd {
+    margin: 0;
+    color: var(--ink);
+    font-size: 16px;
+    line-height: 1.4;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--sans);
+    font-size: 14px;
+    margin: 8px 0 0;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  th { color: var(--mute); font-weight: 500; }
+  td.y { color: var(--jaeger); }
+  td.n { color: var(--mute); }
+  .swatch {
+    display: inline-block;
+    width: 12px; height: 12px;
+    margin-right: 8px;
+    vertical-align: -1px;
+  }
+
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 36px 40px;
+    align-items: flex-start;
+  }
+  figure { margin: 0; }
+  figcaption {
+    font-family: var(--sans);
+    font-size: 12px;
+    color: var(--mute);
+    text-align: center;
+    margin-top: 22px;
+    max-width: 268px;
+    line-height: 1.4;
+  }
+
+  .watch {
+    width: 268px;
+    padding: 34px 34px 28px;
+    background: linear-gradient(160deg, #4a453c, #1c1a16 55%, #0e0d0b);
+    border-radius: 36px;
+    box-shadow:
+      0 0 0 2px #6a6458,
+      0 24px 50px rgba(0,0,0,.55),
+      inset 0 1px 0 rgba(255,255,255,.12);
+    position: relative;
+  }
+  .watch.glow-orange {
+    box-shadow:
+      0 0 0 2px #6a6458,
+      0 0 28px 6px rgba(255, 85, 0, 0.55),
+      0 24px 50px rgba(0,0,0,.55);
+  }
+  .watch.glow-cyan {
+    box-shadow:
+      0 0 0 2px #6a6458,
+      0 0 22px 4px rgba(0, 170, 255, 0.4),
+      0 24px 50px rgba(0,0,0,.55);
+  }
+  .watch::before, .watch::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    width: 78px;
+    height: 18px;
+    margin-left: -39px;
+    background: #2c2924;
+    border: 2px solid #5a554c;
+  }
+  .watch::before { top: -16px; border-radius: 8px 8px 2px 2px; }
+  .watch::after { bottom: -16px; border-radius: 2px 2px 8px 8px; }
+  .btn {
+    position: absolute;
+    right: -10px;
+    width: 10px;
+    background: #8a8376;
+    border-radius: 0 4px 4px 0;
+  }
+  .btn.up { top: 70px; height: 36px; }
+  .btn.select { top: 122px; height: 44px; }
+  .btn.down { top: 182px; height: 36px; }
+  .btn.back {
+    left: -10px; right: auto;
+    top: 122px; height: 44px;
+    border-radius: 4px 0 0 4px;
+  }
+  .screen {
+    width: 200px;
+    height: 228px;
+    overflow: hidden;
+    position: relative;
+    background: #000;
+    color: #fff;
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 16px;
+    font-weight: 400;
+    -webkit-font-smoothing: none;
+    image-rendering: pixelated;
+  }
+  .leco {
+    font-family: "DIN Alternate", "DIN Condensed", "Arial Narrow", sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .sb {
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 6px;
+    font-size: 12px;
+    line-height: 12px;
+    background: #000;
+    color: #fff;
+  }
+  .has-ab .sb { padding-right: 36px; }
+  .has-ab .b-foot { padding-right: 36px; }
+  .sb .sep {
+    position: absolute;
+    top: 20px; left: 0; right: 0; height: 1px;
+    background: repeating-linear-gradient(90deg, #555 0 2px, transparent 2px 4px);
+  }
+  .ab {
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: 30px;
+    background: #000;
+    border-left: 1px solid #555;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
+    align-items: center;
+    padding: 18px 0;
+  }
+  .ab i {
+    width: 18px; height: 18px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-style: normal; font-weight: 700;
+    color: #fff;
+  }
+  .stripe { position: absolute; top: 20px; bottom: 0; left: 0; width: 6px; }
+
+  .a-band { height: 36px; background: #FF5500; color: #000; padding: 4px 8px 0; font-weight: 700; font-size: 14px; }
+  .a-band .sub { font-weight: 400; font-size: 12px; color: #000; opacity: .75; }
+  .a-body { padding: 8px; width: 170px; color: #fff; font-size: 14px; line-height: 18px; }
+  .a-body .meta { color: #AAAAAA; font-size: 12px; margin-top: 8px; }
+  .a-done-band { background: #00AA55; }
+  .a-cards { padding: 8px 8px 0; }
+  .a-card { border: 1px solid #555; padding: 6px 8px; margin-bottom: 6px; min-height: 48px; }
+  .a-card .k { font-size: 12px; color: #AAAAAA; }
+  .a-card .t { font-size: 14px; font-weight: 700; margin-top: 2px; }
+  .a-card.need { border-color: #FF5500; }
+  .a-card.work { border-color: #00AAFF; }
+  .a-card.idle { border-color: #555; }
+
+  .b-title { font-size: 18px; line-height: 22px; font-weight: 700; padding: 8px 8px 0 14px; }
+  .b-phase { color: #FFAA00; font-size: 14px; padding: 4px 8px 0 14px; }
+  .b-last { color: #AAAAAA; font-size: 14px; line-height: 18px; padding: 10px 8px 0 14px; }
+  .b-foot {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    height: 28px; background: #000;
+    border-top: 1px solid #555;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 8px 0 14px;
+    font-size: 12px; color: #AAAAAA;
+  }
+  .b-foot b { color: #fff; font-weight: 700; }
+  .b-row { display: flex; height: 44px; align-items: stretch; border-bottom: 1px solid #555; }
+  .b-row .tick { width: 6px; }
+  .b-row .body { padding: 4px 8px; flex: 1; min-width: 0; }
+  .b-row .name { font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; }
+  .b-row .st { font-size: 12px; color: #AAAAAA; }
+  .b-row.sel { background: #00AAFF; color: #000; }
+  .b-row.sel .st { color: #000; }
+  .b-confirm { padding: 8px; }
+  .b-confirm .said {
+    font-size: 14px; line-height: 18px; color: #fff;
+    border: 1px solid #555; padding: 8px; min-height: 88px; width: 154px;
+  }
+  .b-perm .tool { font-size: 18px; font-weight: 700; padding: 8px 8px 0; }
+  .b-perm .detail { font-size: 14px; line-height: 18px; color: #AAAAAA; padding: 6px 8px; width: 162px; }
+  .b-q .q { font-size: 14px; line-height: 18px; padding: 6px 8px 8px; }
+  .b-q .opt { margin: 0 8px 4px; padding: 6px 8px; border: 1px solid #555; font-size: 14px; }
+  .b-q .opt.sel { background: #FFAA55; color: #000; border-color: #FFAA55; font-weight: 700; }
+
+  .c-face { background: #FFFFFF; color: #000; }
+  .c-flag { height: 28px; display: flex; align-items: center; padding: 0 8px; font-weight: 700; font-size: 14px; }
+  .c-time { font-size: 54px; line-height: 54px; padding: 10px 6px 0; letter-spacing: -0.02em; }
+  .c-date { font-size: 14px; color: #555; padding: 0 8px; }
+  .c-sess { font-size: 18px; line-height: 22px; font-weight: 700; padding: 12px 8px 0; }
+  .c-phase { font-size: 14px; padding: 4px 8px 0; }
+  .c-idle .c-flag { background: #AAAAAA; color: #000; }
+  .c-need .c-flag { background: #FF5500; color: #000; }
+  .c-work .c-flag { background: #00AAFF; color: #000; }
+  .c-qv {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 58px;
+    background: #000; color: #fff; padding: 6px 8px;
+    border-top: 2px solid #FF5500;
+  }
+  .c-qv .k { font-size: 12px; color: #FFAA55; }
+  .c-qv .t { font-size: 14px; font-weight: 700; }
+
+  .d-list .rowx { display: flex; height: 42px; border-bottom: 1px solid #555; align-items: center; }
+  .d-list .rowx .tick { width: 6px; height: 42px; }
+  .d-list .rowx .txt { padding: 0 8px; flex: 1; }
+  .d-list .rowx .name { font-size: 14px; font-weight: 700; }
+  .d-list .rowx .st { font-size: 12px; color: #AAAAAA; }
+  .d-list .rowx.on { background: #AA5500; color: #fff; }
+  .d-list .rowx.on .st { color: #FFAAAA; }
+  .d-tr { padding: 4px 8px; }
+  .d-bub { margin: 6px 0; padding: 6px 8px; font-size: 14px; line-height: 17px; }
+  .d-bub.you { background: #555; color: #fff; }
+  .d-bub.ag { background: #000; color: #fff; border: 1px solid #00AAFF; }
+  .d-bub .who { font-size: 12px; color: #AAAAAA; margin-bottom: 2px; }
+  .d-prov .cell {
+    height: 48px; border-bottom: 1px solid #555;
+    display: flex; align-items: center; padding: 0 10px; font-size: 18px; font-weight: 700;
+  }
+  .d-prov .cell .sw { width: 12px; height: 12px; margin-right: 10px; }
+  .d-prov .cell.on { background: #555; }
+
+  .paths { display: grid; grid-template-columns: 1fr 1fr; gap: 24px 40px; }
+  .paths h3 { font-size: 18px; margin: 0 0 6px; }
+  .paths p { margin: 0; color: var(--mute); font-size: 16px; line-height: 1.45; }
+
+  .pick {
+    border: 1px solid var(--orange);
+    padding: 20px 22px;
+    max-width: 40em;
+  }
+  .pick p { margin: 0 0 10px; }
+  .pick p:last-child { margin: 0; color: var(--mute); }
+
+  @media (max-width: 860px) {
+    .rail { display: none; }
+    .mnav {
+      display: flex;
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: #1c1a16;
+      border-bottom: 1px solid var(--rule);
+      padding: 8px 12px;
+      gap: 6px;
+      overflow-x: auto;
+    }
+    .mnav a {
+      flex: 0 0 auto;
+      text-decoration: none;
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 32px;
+      padding: 0 10px;
+      border: 1px solid #5a554c;
+      background: #2c2924;
+    }
+    .wrap { margin-left: 0; padding: 20px 20px 72px; }
+    .hero { grid-template-columns: 1fr; min-height: 0; gap: 20px; }
+    .hero .watch { margin-inline: auto; }
+    .facts, .paths { grid-template-columns: 1fr; }
+    .row { justify-content: center; }
+    table { font-size: 13px; }
+    .sec { scroll-margin-top: 52px; }
+  }
+</style>
+</head>
+<body>
+<nav class="mnav" aria-label="Jump">
+  <a href="#a">A Pager</a>
+  <a href="#b">B Talk</a>
+  <a href="#c">C Desk</a>
+  <a href="#d">D Pocket</a>
+  <a href="#compare">Grid</a>
+  <a href="#pick">Pick</a>
+</nav>
+<nav class="rail" aria-label="Sections">
+  <a class="sm" href="spec.html">Spec</a>
+  <a class="sm" href="#top">Top</a>
+  <a class="sm" href="#constraints">Why</a>
+  <a href="#a">A</a>
+  <a href="#b">B</a>
+  <a href="#c">C</a>
+  <a href="#d">D</a>
+  <a class="sm" href="#compare">Grid</a>
+  <a class="sm" href="#path">Path</a>
+  <a class="sm" href="#pick">Pick</a>
+</nav>
+
+<div class="wrap" id="top">
+  <header class="hero">
+    <div class="watch glow-orange" aria-hidden="true">
+      <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+      <div class="screen c-face c-need">
+        <div class="c-flag">NEEDS YOU</div>
+        <div class="c-time leco js-time">9:41</div>
+        <div class="c-date js-date">Wed 9 Sep</div>
+        <div class="c-sess">fix oauth on BB10</div>
+        <div class="c-phase">Allow Bash?</div>
+      </div>
+    </div>
+    <div>
+      <h1>Agent Remote on a Pebble Time 2</h1>
+      <p>Four ways the watch can steer your agents. Screens are the real 200×228 pixels, painted with the 64-color cube. The watch has no Wi‑Fi; the phone carries HTTP.</p>
+      <p>Useful jobs on a wrist: notice that an agent needs you, decide, and speak a prompt while walking. Not a clone of Android or the LILYGO pager.</p>
+      <p class="keys">Right: Up, Select, Down. Left: Back. Orange or cyan glow is the RGB backlight. Keys <kbd>A</kbd> <kbd>B</kbd> <kbd>C</kbd> <kbd>D</kbd> jump to an option. Locked choice: <a href="spec.html" style="color:#00AAFF">D+B spec</a>.</p>
+    </div>
+  </header>
+
+  <section class="sec" id="constraints">
+    <h2>The hardware decides the product</h2>
+    <p class="blurb">Time 2 (emery): 1.5″ MIP, 200×228, 64 colors, four buttons plus touch, mic, speaker, RGB backlight, 128&nbsp;KB app RAM, about 30 days if we do not poll. Bluetooth only. Dictation runs on the phone.</p>
+    <dl class="facts">
+      <div>
+        <dt>On the watch</dt>
+        <dd>Focus list or the current Focus row. Phase and elapsed. Permission Allow/Deny. AskUserQuestion. Stop. Vibe chimes. Orange backlight when blocked.</dd>
+      </div>
+      <div>
+        <dt>Off the watch</dt>
+        <dd>Live TUI, attachments, drop, share, rewind, usage, markdown transcript, model/cwd/effort pickers, a profiles UI.</dd>
+      </div>
+      <div>
+        <dt>Provider cube</dt>
+        <dd>
+          <span class="swatch" style="background:#FF5500"></span>Claude<br>
+          <span class="swatch" style="background:#00AAFF"></span>Grok<br>
+          <span class="swatch" style="background:#00AA55"></span>Codex<br>
+          <span class="swatch" style="background:#0055FF"></span>DeepSeek
+        </dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="sec" id="a">
+    <h2>A · Pager</h2>
+    <div class="tag">Notifications first. No typing. Smallest app.</div>
+    <p class="blurb">The watch is a wrist beeper. The phone stays the real Agent Remote client. A pin lands when a turn blocks or finishes; you Allow, Deny, or Stop from the action bar.</p>
+    <dl class="facts">
+      <div><dt>Does</dt><dd>Timeline pins, three-card app (needs you / working / idle), backlight until you act.</dd></div>
+      <div><dt>Does not</dt><dd>Compose, transcript, watchface.</dd></div>
+      <div><dt>Ship</dt><dd>Smallest. Almost all logic lives on the phone. You cannot start a turn from the wrist.</dd></div>
+    </dl>
+    <div class="row">
+      <figure>
+        <div class="watch glow-orange">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen a-notify">
+            <div class="a-band">Needs you<span class="sub" style="display:block">Claude · Mac</span></div>
+            <div class="a-body">Allow <b>Bash</b>?<br>git push origin main<div class="meta">fix oauth on BB10</div></div>
+            <div class="ab"><i>✓</i><i style="font-size:18px">·</i><i>×</i></div>
+          </div>
+        </div>
+        <figcaption>Permission pin. Up Allow, Down Deny. Backlight stays orange until you act.</figcaption>
+      </figure>
+      <figure>
+        <div class="watch">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen a-notify">
+            <div class="a-band a-done-band">Done<span class="sub" style="display:block">Grok · VPS</span></div>
+            <div class="a-body">Turn finished.<br>pebble map demo<div class="meta">Open on phone to read.</div></div>
+            <div class="ab"><i></i><i>→</i><i>■</i></div>
+          </div>
+        </div>
+        <figcaption>Finished pin. Select opens the phone session. Down stops a still-running job.</figcaption>
+      </figure>
+      <figure>
+        <div class="watch">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen">
+            <div class="sb"><span class="js-time">9:41</span><span>AR</span></div>
+            <div class="sb sep"></div>
+            <div class="a-cards">
+              <div class="a-card need"><div class="k">Needs you</div><div class="t">Bash · git push</div></div>
+              <div class="a-card work"><div class="k">Working · 1:42</div><div class="t">pebble map demo</div></div>
+              <div class="a-card idle"><div class="k">Idle</div><div class="t">2 hosts · 0 queue</div></div>
+            </div>
+          </div>
+        </div>
+        <figcaption>The app itself: three cards, no list. Select the top card to act.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="sec" id="b">
+    <h2>B · Talk</h2>
+    <div class="tag">Voice remote. One session at a time. Closest to the pager client.</div>
+    <p class="blurb">Hold Select, speak, send. The current Focus session stays on screen: phase, elapsed, last line of the reply. Permissions and questions take over the display. This is compose without a keyboard.</p>
+    <dl class="facts">
+      <div><dt>Does</dt><dd>Dictation to continue. Focus walk with Up/Down. Allow/Deny. AskUserQuestion. Long-Select stops.</dd></div>
+      <div><dt>Does not</dt><dd>Scrollable history, new-session cwd, watchface.</dd></div>
+      <div><dt>Ship</dt><dd>Medium. Watch in C (or Alloy on emery). Phone JS chunks focus, jobs, continue, permission.</dd></div>
+    </dl>
+    <div class="row">
+      <figure>
+        <div class="watch glow-cyan">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen b-home">
+            <div class="sb"><span class="js-time">9:41</span><span>Grok</span></div>
+            <div class="stripe" style="background:#00AAFF"></div>
+            <div class="b-title">pebble map demo</div>
+            <div class="b-phase">writing · 1:42</div>
+            <div class="b-last">Packed downtown into 2.8&nbsp;KB. Next I’ll wire live tiles…</div>
+            <div class="b-foot"><span>FOCUS 2/4</span><b>SELECT talk</b></div>
+          </div>
+        </div>
+        <figcaption>Home. Provider stripe is the accent. Select starts dictation. Up/Down changes session.</figcaption>
+      </figure>
+      <figure>
+        <div class="watch">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen">
+            <div class="sb"><span class="js-time">9:41</span><span>Focus</span></div>
+            <div class="b-row sel"><div class="tick" style="background:#000"></div><div class="body"><div class="name">pebble map demo</div><div class="st">writing · 1:42</div></div></div>
+            <div class="b-row"><div class="tick" style="background:#FF5500"></div><div class="body"><div class="name">fix oauth on BB10</div><div class="st">needs you</div></div></div>
+            <div class="b-row"><div class="tick" style="background:#00AA55"></div><div class="body"><div class="name">rewrite zsh-setup</div><div class="st">turn finished</div></div></div>
+            <div class="b-row"><div class="tick" style="background:#5500FF"></div><div class="body"><div class="name">dsh web smoke</div><div class="st">idle</div></div></div>
+          </div>
+        </div>
+        <figcaption>Focus list, same urgency ranking as the daemon. Highlight is the current session.</figcaption>
+      </figure>
+      <figure>
+        <div class="watch">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen has-ab">
+            <div class="sb"><span class="js-time">9:41</span><span>Talk</span></div>
+            <div class="stripe" style="background:#00AAFF"></div>
+            <div class="b-confirm">
+              <div style="font-size:12px;color:#AAAAAA;margin:4px 0 6px 6px">To pebble map demo</div>
+              <div class="said">Zoom the map in when I say go, and drop a pin on the ferry building.</div>
+            </div>
+            <div class="ab"><i></i><i>✓</i><i>×</i></div>
+          </div>
+        </div>
+        <figcaption>Dictation confirm. Select sends, Down discards, Back speaks again.</figcaption>
+      </figure>
+      <figure>
+        <div class="watch glow-orange">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen b-perm has-ab">
+            <div class="sb"><span class="js-time">9:41</span><span>Claude</span></div>
+            <div class="stripe" style="background:#FF5500"></div>
+            <div class="tool">Allow Bash?</div>
+            <div class="detail">git push origin main<br><br>fix oauth on BB10</div>
+            <div class="ab"><i>✓</i><i></i><i>×</i></div>
+          </div>
+        </div>
+        <figcaption>Permission takeover. Same Allow/Deny as every other client.</figcaption>
+      </figure>
+      <figure>
+        <div class="watch glow-orange">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen b-q has-ab">
+            <div class="sb"><span class="js-time">9:41</span><span>Ask</span></div>
+            <div class="stripe" style="background:#FFAA55"></div>
+            <div class="q">Which map source?</div>
+            <div class="opt sel">TomTom Orbis</div>
+            <div class="opt">OpenStreetMap</div>
+            <div class="opt">Offline pack</div>
+            <div class="ab"><i>▲</i><i>✓</i><i>▼</i></div>
+          </div>
+        </div>
+        <figcaption>AskUserQuestion. Up/Down moves, Select answers.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="sec" id="c">
+    <h2>C · Desk</h2>
+    <div class="tag">Always-on watchface. Glance, don’t open. Unique to MIP.</div>
+    <p class="blurb">A color flag is the whole status language: grey idle, provider color working, orange blocked. Time stays huge. Select opens A or B. Minute ticks only; the phone wakes the face on job events.</p>
+    <dl class="facts">
+      <div><dt>Does</dt><dd>All-day glance. Timeline Quick View keeps the flag. Event-driven, not 1&nbsp;Hz polling.</dd></div>
+      <div><dt>Does not</dt><dd>Act by itself. Allow and talk need an app or the phone.</dd></div>
+      <div><dt>Ship</dt><dd>Medium, battery-sensitive. The strongest Pebble idea, incomplete without A or B.</dd></div>
+    </dl>
+    <div class="row">
+      <figure>
+        <div class="watch">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen c-face c-idle">
+            <div class="c-flag">idle · 0 jobs</div>
+            <div class="c-time leco js-time">9:41</div>
+            <div class="c-date js-date">Wed 9 Sep</div>
+            <div class="c-sess">2 hosts up</div>
+            <div class="c-phase" style="color:#555">Mac · VPS</div>
+          </div>
+        </div>
+        <figcaption>Idle face. No Bluetooth chatter until a job starts.</figcaption>
+      </figure>
+      <figure>
+        <div class="watch glow-cyan">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen c-face c-work">
+            <div class="c-flag">GROK · 1:42</div>
+            <div class="c-time leco js-time">9:41</div>
+            <div class="c-date js-date">Wed 9 Sep</div>
+            <div class="c-sess">pebble map demo</div>
+            <div class="c-phase">writing</div>
+          </div>
+        </div>
+        <figcaption>Working. Elapsed lives in the flag so the clock never shrinks.</figcaption>
+      </figure>
+      <figure>
+        <div class="watch glow-orange">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen c-face c-need">
+            <div class="c-flag">NEEDS YOU</div>
+            <div class="c-time leco js-time">9:41</div>
+            <div class="c-date js-date">Wed 9 Sep</div>
+            <div class="c-sess">fix oauth on BB10</div>
+            <div class="c-phase">Allow Bash?</div>
+          </div>
+        </div>
+        <figcaption>Blocked. Orange flag and backlight. Select opens the app on the permission card.</figcaption>
+      </figure>
+      <figure>
+        <div class="watch glow-orange">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen c-face c-need">
+            <div class="c-flag">NEEDS YOU</div>
+            <div class="c-time leco js-time">9:41</div>
+            <div class="c-date js-date">Wed 9 Sep</div>
+            <div class="c-qv"><div class="k">now</div><div class="t">Allow Bash? git push</div></div>
+          </div>
+        </div>
+        <figcaption>Timeline Quick View. The flag stays; the title yields.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="sec" id="d">
+    <h2>D · Pocket agent</h2>
+    <div class="tag">Fuller Alloy app. Touch-scroll. Last messages. New session.</div>
+    <p class="blurb">Closest to a real client on the wrist. Focus list, two plain-text bubbles, provider picker, then dictate. Touch pans; buttons still do the work. Live TUI, markdown, and attachments stay off.</p>
+    <dl class="facts">
+      <div><dt>Does</dt><dd>Everything in Talk, plus last two messages and new session (provider from /api/ping, cwd = daemon default).</dd></div>
+      <div><dt>Does not</dt><dd>Live TUI, markdown, attachments.</dd></div>
+      <div><dt>Ship</dt><dd>Highest. AppMessage chunking, more radio. Alloy makes it feasible; a C port to Duo is painful.</dd></div>
+    </dl>
+    <div class="row">
+      <figure>
+        <div class="watch">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen d-list">
+            <div class="sb"><span class="js-time">9:41</span><span>Focus</span></div>
+            <div class="sb sep"></div>
+            <div class="rowx on"><div class="tick" style="background:#FF5500"></div><div class="txt"><div class="name">fix oauth on BB10</div><div class="st">needs you · Claude</div></div></div>
+            <div class="rowx"><div class="tick" style="background:#00AAFF"></div><div class="txt"><div class="name">pebble map demo</div><div class="st">writing · Grok</div></div></div>
+            <div class="rowx"><div class="tick" style="background:#00AA55"></div><div class="txt"><div class="name">rewrite zsh-setup</div><div class="st">finished · Codex</div></div></div>
+            <div class="rowx"><div class="tick" style="background:#0055FF"></div><div class="txt"><div class="name">dsh web smoke</div><div class="st">idle · DeepSeek</div></div></div>
+            <div class="rowx"><div class="tick" style="background:#AA00FF"></div><div class="txt"><div class="name">multi · new</div><div class="st">Mac host</div></div></div>
+          </div>
+        </div>
+        <figcaption>MenuLayer list. Select opens the session, long-Select talks.</figcaption>
+      </figure>
+      <figure>
+        <div class="watch">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen">
+            <div class="sb"><span class="js-time">9:41</span><span>Grok</span></div>
+            <div class="stripe" style="background:#00AAFF"></div>
+            <div class="d-tr">
+              <div class="d-bub you"><div class="who">You</div>Wire live TomTom tiles next.</div>
+              <div class="d-bub ag"><div class="who">Grok</div>Packed downtown into 2.8 KB. PKJS will fetch MVT, simplify, and send packed polylines.</div>
+            </div>
+            <div class="b-foot" style="padding-left:14px"><span>2 msgs</span><b>SELECT talk</b></div>
+          </div>
+        </div>
+        <figcaption>Last two messages, plain text. Down pages older chunks from the phone.</figcaption>
+      </figure>
+      <figure>
+        <div class="watch">
+          <div class="btn back"></div><div class="btn up"></div><div class="btn select"></div><div class="btn down"></div>
+          <div class="screen d-prov">
+            <div class="sb"><span class="js-time">9:41</span><span>New</span></div>
+            <div class="sb sep"></div>
+            <div class="cell"><span class="sw" style="background:#FF5500"></span>Claude</div>
+            <div class="cell on"><span class="sw" style="background:#00AAFF"></span>Grok</div>
+            <div class="cell"><span class="sw" style="background:#00AA55"></span>Codex</div>
+            <div class="cell"><span class="sw" style="background:#0055FF"></span>DeepSeek</div>
+          </div>
+        </div>
+        <figcaption>New session: pick provider, then dictate the first prompt.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="sec" id="compare">
+    <h2>Side by side</h2>
+    <p class="blurb">These are not mutually exclusive. The interesting pair is Desk as the face and Talk as the app behind Select.</p>
+    <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>A Pager</th>
+          <th>B Talk</th>
+          <th>C Desk</th>
+          <th>D Pocket</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Always-on status</td><td class="n">no</td><td class="n">while app open</td><td class="y">yes</td><td class="n">while app open</td></tr>
+        <tr><td>Allow / Deny</td><td class="y">yes</td><td class="y">yes</td><td class="n">opens app</td><td class="y">yes</td></tr>
+        <tr><td>Speak a prompt</td><td class="n">no</td><td class="y">yes</td><td class="n">opens app</td><td class="y">yes</td></tr>
+        <tr><td>Read a reply</td><td class="n">on phone</td><td class="y">last line</td><td class="n">title only</td><td class="y">two messages</td></tr>
+        <tr><td>New session</td><td class="n">no</td><td class="n">no</td><td class="n">no</td><td class="y">provider + dictate</td></tr>
+        <tr><td>Battery risk</td><td class="y">low</td><td class="y">low</td><td class="y">low if event-driven</td><td class="n">higher</td></tr>
+        <tr><td>Duo later</td><td class="y">easy</td><td class="y">B/W Talk</td><td class="n">color flag is Time 2</td><td class="n">painful</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="table-wrap">
+    <table style="margin-top:28px">
+      <thead><tr><th>Combo</th><th>What you get</th></tr></thead>
+      <tbody>
+        <tr><td>B + C</td><td>Face for glance, Talk behind Select. The Time 2 product.</td></tr>
+        <tr><td>A then B+C</td><td>Ship pins first, add voice and the face once the phone link is proven.</td></tr>
+        <tr><td>C + A</td><td>Face plus Allow/Deny, still no compose.</td></tr>
+        <tr><td>D + C</td><td>Fullest. Heaviest.</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section class="sec" id="path">
+    <h2>How the watch reaches the daemon</h2>
+    <p class="blurb">The watch never calls agentremoted itself. Config never stores provider identity; /api/ping stays the source of truth.</p>
+    <div class="paths">
+      <div>
+        <h3>PKJS in the official Pebble app</h3>
+        <p>Clay page for URL and token. Works on iOS and Android with no Agent Remote app changes. Polling, one or two daemons. Best v1.</p>
+      </div>
+      <div>
+        <h3>Android Agent Remote as companion</h3>
+        <p>PebbleKit inside the existing app. Reuses profiles, SSE, job watcher. Best live status. iOS waits — there is no ios/ tree in this repo.</p>
+      </div>
+      <div>
+        <h3>Both</h3>
+        <p>PKJS for everyone; if Android AR is installed it takes over the link.</p>
+      </div>
+      <div>
+        <h3>Hardware cut</h3>
+        <p>Time 2 first. Pebble 2 Duo (144×168, black and white, no touch) can get a reduced Talk app later. The color flag face stays Time 2-only.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="pick">
+    <h2>Recommendation</h2>
+    <div class="pick">
+      <p><strong>B + C</strong>, Time 2 first, PKJS companion.</p>
+      <p>The face is what only Pebble can be. Voice is the only honest composer. Permissions and questions are the high-value “needs you” path and match every other client.</p>
+      <p>Tell me in chat: product (A / B / C / D / B+C / A-then-B+C), companion (PKJS / Android AR / both), hardware (Time 2 only / Time 2 then Duo / both day one). Then I’ll write the spec.</p>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function pad(n) { return n < 10 ? "0" + n : "" + n; }
+  function tick() {
+    const d = new Date();
+    const t = d.getHours() + ":" + pad(d.getMinutes());
+    const date = days[d.getDay()] + " " + d.getDate() + " " + months[d.getMonth()];
+    document.querySelectorAll(".js-time").forEach(function (el) { el.textContent = t; });
+    document.querySelectorAll(".js-date").forEach(function (el) { el.textContent = date; });
+  }
+  tick();
+  setInterval(tick, 1000);
+
+  const ids = ["top", "constraints", "a", "b", "c", "d", "compare", "path", "pick"];
+  const links = Array.prototype.slice.call(document.querySelectorAll(".rail a"));
+  function mark() {
+    const y = window.scrollY + 80;
+    let cur = ids[0];
+    ids.forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el && el.offsetTop <= y) cur = id;
+    });
+    links.forEach(function (a) {
+      const href = a.getAttribute("href").slice(1);
+      a.classList.toggle("on", href === cur);
+    });
+  }
+  mark();
+  window.addEventListener("scroll", mark, { passive: true });
+
+  window.addEventListener("keydown", function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const map = { a: "#a", b: "#b", c: "#c", d: "#d" };
+    const k = e.key.toLowerCase();
+    if (map[k]) {
+      const t = document.querySelector(map[k]);
+      if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  });
+})();
+</script>
+</body>
+</html>

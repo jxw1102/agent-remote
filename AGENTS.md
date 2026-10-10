@@ -20,7 +20,8 @@ Whenever you change a **client-side** feature, behaviour, or API contract, consi
 
 Harnesses the daemon can front: Claude Code, Grok, Codex, DeepSeek
 Harness (`dsh web` on localhost — no TUI; the daemon is a client of `/api`
-and starts `dsh web` if it is not already running), and Cursor Agent
+and starts `dsh web` if it is not already running), GitHub Copilot
+(`copilot -p`, sessions in `~/.copilot/session-state/`), and Cursor Agent
 (`cursor-agent --print`).
 
 Examples of work that almost always spans clients:
