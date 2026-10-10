@@ -1,6 +1,5 @@
 #include "statussse.hpp"
 #include "socksproxy.hpp"
-#include "trace.hpp"
 
 #include <QNetworkRequest>
 #include <QUrl>
@@ -66,7 +65,6 @@ void StatusSse::openRequest()
     req.setAttribute(QNetworkRequest::HttpPipeliningAllowedAttribute, false);
 
     m_reply = m_nam.get(req);
-    traceMark("sse open %s", qPrintable(url.host()));
     connect(m_reply, SIGNAL(readyRead()), this, SLOT(onReadyRead()));
     connect(m_reply, SIGNAL(finished()), this, SLOT(onFinished()));
 }
@@ -128,8 +126,6 @@ void StatusSse::onFinished()
 {
     if (!m_reply)
         return;
-    traceMark("sse finished err=%d %s", int(m_reply->error()),
-              qPrintable(m_reply->errorString().left(80)));
     m_reply->deleteLater();
     m_reply = 0;
     setUp(false);

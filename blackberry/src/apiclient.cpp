@@ -34,7 +34,6 @@
 #include "chime.hpp"
 #include "richpaint.hpp"
 #include "socksproxy.hpp"
-#include "trace.hpp"
 
 namespace {
 const int POLL_INTERVAL_MS = 1500;
@@ -68,6 +67,9 @@ const int UPLOAD_CHUNK_BYTES = 512 * 1024;
 // this long without a single byte aborts, and a resumable file then retries.
 const int DOWNLOAD_IDLE_MS = 60 * 1000;
 const int DOWNLOAD_MAX_RETRIES = 8;
+// QNetworkAccessManager opens at most 6 connections per host; leave room
+// for the status stream and the ordinary API calls beside the downloads.
+const int MAX_PARALLEL_DOWNLOADS = 4;
 // Fallback cap when a daemon's ping predates max_upload_mb.
 const int DEFAULT_MAX_UPLOAD_MB = 16;
 const int PAGE_SIZE = 50;
@@ -385,12 +387,9 @@ ApiClient::ApiClient(QObject *parent)
     , m_stepsLiveAtMs(0)
     , m_stepsLivePending(false)
     , m_dropProgressAtMs(0)
-    , m_dlFile(0)
-    , m_dlGot(0)
-    , m_dlTotal(0)
-    , m_dlResumable(false)
-    , m_dlHeadSeen(false)
-    , m_dlAttempt(0)
+    , m_dropNextId(0)
+    , m_dropDoneCount(0)
+    , m_dropDoneBytes(0)
 {
     s_modelApi = this;
     // Classic/Q20 = 720; Passport = 1440. Same insets as the proven Classic
@@ -1747,7 +1746,6 @@ QNetworkReply *ApiClient::get(const QString &pathAndQuery, const QString &kind)
 {
     QNetworkReply *reply = m_nam.get(makeRequest(pathAndQuery));
     reply->setProperty("kind", kind);
-    traceMark("req GET %s %s", qPrintable(kind), qPrintable(reply->url().host()));
     const int timeoutMs = (kind == QLatin1String("search")) ? SEARCH_TIMEOUT_MS
             : (kind == QLatin1String("usage")) ? USAGE_TIMEOUT_MS
             : REQUEST_TIMEOUT_MS;
@@ -1767,7 +1765,6 @@ QNetworkReply *ApiClient::post(const QString &path, const QVariantMap &body,
 
     QNetworkReply *reply = m_nam.post(request, payload);
     reply->setProperty("kind", kind);
-    traceMark("req POST %s %s", qPrintable(kind), qPrintable(reply->url().host()));
     QTimer::singleShot(REQUEST_TIMEOUT_MS, reply, SLOT(abort()));
     return reply;
 }
@@ -2191,7 +2188,6 @@ QNetworkReply *ApiClient::getFrom(const QString &baseUrl, const QString &token,
     request.setRawHeader("X-Auth-Token", token.toUtf8());
     QNetworkReply *reply = m_nam.get(request);
     reply->setProperty("kind", kind);
-    traceMark("req GET %s %s", qPrintable(kind), qPrintable(url.host()));
     // Usage gets the TUI-scrape budget; everything else the generous
     // fan-out one (a cross-file search on a slow VPS takes a while). Inbox
     // downloads do not come through here: they run on an idle timer.
@@ -2214,7 +2210,6 @@ QNetworkReply *ApiClient::postTo(const QString &baseUrl, const QString &token,
     jda.saveToBuffer(body, &payload);
     QNetworkReply *reply = m_nam.post(request, payload);
     reply->setProperty("kind", kind);
-    traceMark("req POST %s %s", qPrintable(kind), qPrintable(url.host()));
     QTimer::singleShot(REQUEST_TIMEOUT_MS, reply, SLOT(abort()));
     return reply;
 }
@@ -3117,38 +3112,6 @@ void ApiClient::uploadAttachment(const QString &fileUrl)
     QTimer::singleShot(UPLOAD_TIMEOUT_MS, reply, SLOT(abort()));
 }
 
-void ApiClient::sendTraceOnce()
-{
-    static bool s_sent = false;
-    if (s_sent)
-        return;
-    s_sent = true;
-    QByteArray payload;
-    QFile trace(QLatin1String(
-            "/accounts/1000/shared/misc/CyberBerry/AgentRemote-trace.txt"));
-    if (trace.open(QIODevice::ReadOnly)) {
-        payload = trace.readAll();
-        trace.close();
-    } else {
-        payload = "(no trace file at shared/misc/CyberBerry/"
-                  "AgentRemote-trace.txt: " + trace.errorString().toUtf8() + ")\n";
-    }
-    QFile crash(QDir::homePath() + QLatin1String(BRAND_CRASH_FILE));
-    if (crash.open(QIODevice::ReadOnly)) {
-        payload += "\n==== crash log " + crash.fileName().toUtf8() + " ====\n";
-        payload += crash.readAll();
-        crash.close();
-    }
-    const QString name = QString("AgentRemote-trace-%1.txt")
-            .arg(QDateTime::currentMSecsSinceEpoch() / 1000);
-    QNetworkRequest request = makeRequest(QLatin1String("/api/attachments?name=") + name);
-    request.setHeader(QNetworkRequest::ContentTypeHeader,
-                      "application/octet-stream");
-    QNetworkReply *reply = m_nam.post(request, payload);
-    reply->setProperty("kind", QString("tracesend"));
-    QTimer::singleShot(UPLOAD_TIMEOUT_MS, reply, SLOT(abort()));
-}
-
 // ------------------------------------------------------------- host->phone drop
 
 void ApiClient::fetchDropFiles()
@@ -3225,97 +3188,155 @@ void ApiClient::downloadDropFrom(int profileIndex, const QString &name)
         emit dropChanged();
         return;
     }
-    if (m_dlFile) {
-        m_dropStatus = tr("Already downloading %1").arg(m_dlName);
-        m_dropRev++;
-        emit dropChanged();
-        return;
+    // A second tap on a file already on its way is not a second download.
+    // Same local name from another daemon would share the .part file, so
+    // that waits too.
+    const QString localName = safeLocalFileName(clean);
+    for (int i = 0; i < m_dls.size(); ++i) {
+        const DropTransfer *t = m_dls.at(i);
+        if ((t->name == clean && t->base == base)
+                || safeLocalFileName(t->name) == localName) {
+            bb::system::SystemToast *toast = new bb::system::SystemToast(this);
+            toast->setBody(tr("Already downloading %1").arg(clean));
+            QObject::connect(toast,
+                             SIGNAL(finished(bb::system::SystemUiResult::Type)),
+                             toast, SLOT(deleteLater()));
+            toast->show();
+            return;
+        }
     }
     m_dropLocalDir = dropDownloadDir();
     QDir().mkpath(m_dropLocalDir);
     // Bytes land in "<name>.part" as they arrive and are renamed once the
     // whole file is in, so a half download never poses as the real thing.
-    m_dlFile = new QFile(QDir(m_dropLocalDir).absoluteFilePath(
-            safeLocalFileName(clean) + QLatin1String(".part")), this);
-    if (!m_dlFile->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        m_dropStatus = tr("Could not write %1").arg(m_dlFile->fileName());
-        delete m_dlFile;
-        m_dlFile = 0;
+    QFile *part = new QFile(QDir(m_dropLocalDir).absoluteFilePath(
+            localName + QLatin1String(".part")), this);
+    if (!part->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        m_dropStatus = tr("Could not write %1").arg(part->fileName());
+        delete part;
         m_dropRev++;
         emit dropChanged();
         return;
     }
-    m_dlName = clean;
-    m_dlBase = base;
-    m_dlToken = token;
-    m_dlServed.clear();
-    m_dlEtag.clear();
-    m_dlGot = 0;
-    m_dlTotal = 0;
-    m_dlResumable = false;
-    m_dlAttempt = 0;
+    if (m_dls.isEmpty()) {
+        // A new batch: "Saved N files" counts from here.
+        m_dropDoneCount = 0;
+        m_dropDoneBytes = 0;
+    }
+    DropTransfer *t = new DropTransfer;
+    t->id = ++m_dropNextId;
+    t->name = clean;
+    t->base = base;
+    t->token = token;
+    t->file = part;
+    t->got = 0;
+    t->total = 0;
+    t->started = false;
+    t->resumable = false;
+    t->headSeen = false;
+    t->resuming = false;
+    t->attempt = 0;
+    t->idle = new QTimer(this);
+    t->idle->setSingleShot(true);
+    t->idle->setProperty("dlId", t->id);
+    QObject::connect(t->idle, SIGNAL(timeout()), this, SLOT(onDropIdle()));
+    t->retry = new QTimer(this);
+    t->retry->setSingleShot(true);
+    t->retry->setProperty("dlId", t->id);
+    QObject::connect(t->retry, SIGNAL(timeout()), this, SLOT(onDropRetry()));
+    m_dls.append(t);
     m_dropProgressAtMs = 0;
-    m_dropStatus = tr("Downloading %1...").arg(clean);
-    m_dropRev++;
-    emit dropChanged();
-    startDropRequest();
+    pumpDropDownloads();
+    updateDropProgress(true);
 }
 
-void ApiClient::startDropRequest()
+DropTransfer *ApiClient::dropTransferFor(QObject *tagged) const
 {
-    if (!m_dlFile)
-        return;
-    QNetworkRequest request(urlFromEncoded(
-            m_dlBase, QString("/api/drop/%1").arg(QString::fromUtf8(
-                    QUrl::toPercentEncoding(m_dlName)))));
-    request.setRawHeader("X-Auth-Token", m_dlToken.toUtf8());
-    if (m_dlGot > 0) {
-        request.setRawHeader("Range",
-                             QByteArray("bytes=") + QByteArray::number(m_dlGot) + "-");
-        if (!m_dlEtag.isEmpty())
-            request.setRawHeader("If-Range", m_dlEtag.toLatin1());
+    if (!tagged)
+        return 0;
+    const int id = tagged->property("dlId").toInt();
+    for (int i = 0; i < m_dls.size(); ++i)
+        if (m_dls.at(i)->id == id)
+            return m_dls.at(i);
+    return 0;
+}
+
+// Start waiting transfers while there is room for them.
+void ApiClient::pumpDropDownloads()
+{
+    int active = 0;
+    for (int i = 0; i < m_dls.size(); ++i)
+        if (m_dls.at(i)->started)
+            active++;
+    for (int i = 0; i < m_dls.size() && active < MAX_PARALLEL_DOWNLOADS; ++i) {
+        DropTransfer *t = m_dls.at(i);
+        if (t->started)
+            continue;
+        t->started = true;
+        active++;
+        startDropRequest(t);
     }
-    m_dlHeadSeen = false;
+}
+
+void ApiClient::startDropRequest(DropTransfer *t)
+{
+    QNetworkRequest request(urlFromEncoded(
+            t->base, QString("/api/drop/%1").arg(QString::fromUtf8(
+                    QUrl::toPercentEncoding(t->name)))));
+    request.setRawHeader("X-Auth-Token", t->token.toUtf8());
+    if (t->got > 0) {
+        request.setRawHeader("Range",
+                             QByteArray("bytes=") + QByteArray::number(t->got) + "-");
+        if (!t->etag.isEmpty())
+            request.setRawHeader("If-Range", t->etag.toLatin1());
+    }
+    t->headSeen = false;
+    t->resuming = false;
     QNetworkReply *reply = m_nam.get(request);
     // onFinished skips this kind: the body belongs to onDropReadyRead.
     reply->setProperty("kind", "drop_dl");
-    m_dlReply = reply;
-    traceMark("req GET drop_dl %s from %lld", qPrintable(reply->url().host()),
-              m_dlGot);
+    reply->setProperty("dlId", t->id);
+    t->reply = reply;
     QObject::connect(reply, SIGNAL(readyRead()), this, SLOT(onDropReadyRead()));
     QObject::connect(reply, SIGNAL(finished()), this, SLOT(onDropReplyFinished()));
-    QObject::connect(&m_dlIdle, SIGNAL(timeout()), this, SLOT(onDropIdle()),
-                     Qt::UniqueConnection);
-    m_dlIdle.setSingleShot(true);
-    m_dlIdle.start(DOWNLOAD_IDLE_MS);
+    t->idle->start(DOWNLOAD_IDLE_MS);
 }
 
 void ApiClient::onDropIdle()
 {
     // No byte for a whole minute: drop the link; finished() decides whether
     // the file can resume.
-    if (m_dlReply)
-        m_dlReply->abort();
+    DropTransfer *t = dropTransferFor(sender());
+    if (t && t->reply)
+        t->reply->abort();
+}
+
+void ApiClient::onDropRetry()
+{
+    DropTransfer *t = dropTransferFor(sender());
+    if (t && !t->reply)
+        startDropRequest(t);
 }
 
 void ApiClient::onDropReadyRead()
 {
     QNetworkReply *reply = qobject_cast<QNetworkReply *>(sender());
-    if (!reply || reply != m_dlReply || !m_dlFile)
+    DropTransfer *t = dropTransferFor(reply);
+    if (!t || t->reply != reply)
         return;
     const int status =
             reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     // An error body (JSON) stays in the reply for onDropReplyFinished.
     if (status < 200 || status >= 300)
         return;
-    m_dlIdle.start(DOWNLOAD_IDLE_MS);
-    if (!m_dlHeadSeen) {
-        m_dlHeadSeen = true;
-        if (m_dlGot > 0 && status != 206) {
+    t->idle->start(DOWNLOAD_IDLE_MS);
+    if (!t->headSeen) {
+        t->headSeen = true;
+        if (t->got > 0 && status != 206) {
             // The host's copy changed (or a zip was rebuilt): start over.
-            m_dlFile->resize(0);
-            m_dlFile->seek(0);
-            m_dlGot = 0;
+            t->file->resize(0);
+            t->file->seek(0);
+            t->got = 0;
         }
         // The daemon names what it actually served in X-Drop-Name — a
         // folder arrives zipped as "<name>.zip". Non-ASCII names are
@@ -3324,43 +3345,84 @@ void ApiClient::onDropReadyRead()
                 QByteArray::fromPercentEncoding(
                         reply->rawHeader("X-Drop-Name")))).fileName().trimmed();
         if (!served.isEmpty())
-            m_dlServed = served;
+            t->served = served;
         const qint64 total = reply->rawHeader("X-Drop-Size").toLongLong();
         if (total > 0)
-            m_dlTotal = total;
+            t->total = total;
         const QByteArray etag = reply->rawHeader("ETag");
         if (!etag.isEmpty())
-            m_dlEtag = QString::fromLatin1(etag);
-        m_dlResumable = reply->rawHeader("Accept-Ranges") == "bytes";
+            t->etag = QString::fromLatin1(etag);
+        t->resumable = reply->rawHeader("Accept-Ranges") == "bytes";
     }
     const QByteArray chunk = reply->readAll();
     if (chunk.isEmpty())
         return;
-    if (m_dlFile->write(chunk) != chunk.size()) {
+    if (t->file->write(chunk) != chunk.size()) {
+        t->resumable = false;   // a full disk will not cure itself
         reply->abort();
-        m_dlResumable = false;   // a full disk will not cure itself
         return;
     }
-    m_dlGot += chunk.size();
+    t->got += chunk.size();
     updateDropProgress(false);
 }
 
 void ApiClient::updateDropProgress(bool force)
 {
+    if (m_dls.isEmpty())
+        return;   // the caller writes the final line
     // Repainting the sheet on every network chunk is wasted work; a few
     // updates per second read as live.
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (!force && now - m_dropProgressAtMs < 300)
         return;
     m_dropProgressAtMs = now;
-    if (m_dlTotal > 0) {
-        const int pct = (int) (m_dlGot * 100 / m_dlTotal);
-        m_dropStatus = tr("Downloading %1... %2 of %3 (%4%)")
-                .arg(m_dlName, formatBytes(m_dlGot), formatBytes(m_dlTotal))
-                .arg(pct);
+    // The sheet's spinner keys on the "Downloading" prefix (DropSheet.qml).
+    if (m_dls.size() == 1) {
+        const DropTransfer *t = m_dls.first();
+        if (t->resuming) {
+            m_dropStatus = tr("Downloading %1... connection lost at %2, resuming")
+                    .arg(t->name, formatBytes(t->got));
+        } else if (t->total > 0) {
+            const int pct = (int) (t->got * 100 / t->total);
+            m_dropStatus = tr("Downloading %1... %2 of %3 (%4%)")
+                    .arg(t->name, formatBytes(t->got), formatBytes(t->total))
+                    .arg(pct);
+        } else {
+            m_dropStatus = tr("Downloading %1... %2")
+                    .arg(t->name, formatBytes(t->got));
+        }
     } else {
-        m_dropStatus = tr("Downloading %1... %2")
-                .arg(m_dlName, formatBytes(m_dlGot));
+        // Several at once: one summed line, then each file on the next
+        // (the label shows two lines and elides the rest).
+        qint64 got = 0, total = 0;
+        bool allKnown = true;
+        QStringList each;
+        for (int i = 0; i < m_dls.size(); ++i) {
+            const DropTransfer *t = m_dls.at(i);
+            got += t->got;
+            if (t->total > 0)
+                total += t->total;
+            else
+                allKnown = false;
+            QString line = t->name;
+            if (!t->started)
+                line += tr(" (waiting)");
+            else if (t->resuming)
+                line += tr(" (resuming)");
+            else if (t->total > 0)
+                line += QString(" %1%").arg((int) (t->got * 100 / t->total));
+            else
+                line += QLatin1String(" ") + formatBytes(t->got);
+            each << line;
+        }
+        QString head = tr("Downloading %n files", 0, m_dls.size());
+        if (allKnown && total > 0)
+            head += tr("... %1 of %2 (%3%)")
+                    .arg(formatBytes(got), formatBytes(total))
+                    .arg((int) (got * 100 / total));
+        else
+            head += tr("... %1").arg(formatBytes(got));
+        m_dropStatus = head + QLatin1String("\n") + each.join(QLatin1String(", "));
     }
     m_dropRev++;
     emit dropChanged();
@@ -3369,25 +3431,24 @@ void ApiClient::updateDropProgress(bool force)
 void ApiClient::onDropReplyFinished()
 {
     QNetworkReply *reply = qobject_cast<QNetworkReply *>(sender());
-    if (!reply || reply != m_dlReply || !m_dlFile)
+    DropTransfer *t = dropTransferFor(reply);
+    if (!t || t->reply != reply)
         return;
-    m_dlIdle.stop();
-    m_dlReply = 0;
+    t->idle->stop();
+    t->reply = 0;
     const int status =
             reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     if (status >= 200 && status < 300) {
         // Whatever readyRead has not drained yet.
         const QByteArray rest = reply->readAll();
         if (!rest.isEmpty()) {
-            if (m_dlFile->write(rest) == rest.size())
-                m_dlGot += rest.size();
+            if (t->file->write(rest) == rest.size())
+                t->got += rest.size();
             else
-                m_dlResumable = false;
+                t->resumable = false;
         }
     }
     const bool netError = reply->error() != QNetworkReply::NoError;
-    traceMark("done drop_dl http=%d err=%d got=%lld of %lld", status,
-              int(reply->error()), m_dlGot, m_dlTotal);
     if (status > 0 && (status < 200 || status >= 300)) {
         // Error body is usually JSON {"error": "..."}.
         bool parseOk = false;
@@ -3395,77 +3456,116 @@ void ApiClient::onDropReplyFinished()
         QString err = parseOk ? data.toMap().value("error").toString() : QString();
         if (err.isEmpty())
             err = tr("HTTP %1").arg(status);
-        failDropDownload(err);
+        failDropDownload(t, err);
         return;
     }
-    const bool shortBody = m_dlTotal > 0 && m_dlGot < m_dlTotal;
+    const bool shortBody = t->total > 0 && t->got < t->total;
     if (!netError && !shortBody) {
-        finishDropDownload();
+        finishDropDownload(t);
         return;
     }
     // Only a resumable, part-received file is worth another go.
-    if (m_dlResumable && m_dlGot > 0 && m_dlAttempt < DOWNLOAD_MAX_RETRIES) {
-        const int waitMs = qMin(15000, 1000 << m_dlAttempt);
-        m_dlAttempt++;
-        m_dropStatus = tr("Connection lost at %1 - resuming...")
-                .arg(formatBytes(m_dlGot));
-        m_dropRev++;
-        emit dropChanged();
-        QTimer::singleShot(waitMs, this, SLOT(startDropRequest()));
+    if (t->resumable && t->got > 0 && t->attempt < DOWNLOAD_MAX_RETRIES) {
+        const int waitMs = qMin(15000, 1000 << t->attempt);
+        t->attempt++;
+        t->resuming = true;
+        t->retry->start(waitMs);
+        updateDropProgress(true);
         return;
     }
-    failDropDownload(netError ? reply->errorString() : tr("connection closed early"));
+    failDropDownload(t, netError ? reply->errorString()
+                                 : tr("connection closed early"));
 }
 
-void ApiClient::failDropDownload(const QString &why)
+// Forget a transfer: off the list, timers and file objects released. The
+// reply, if one is still open, is torn down too.
+void ApiClient::dropTransferDone(DropTransfer *t)
 {
-    if (m_dlFile) {
-        m_dlFile->close();
-        m_dlFile->remove();
-        m_dlFile->deleteLater();
-        m_dlFile = 0;
+    m_dls.removeAll(t);
+    t->idle->stop();
+    t->idle->deleteLater();
+    t->retry->stop();
+    t->retry->deleteLater();
+    if (t->reply) {
+        t->reply->disconnect(this);
+        t->reply->abort();
+        t->reply->deleteLater();
     }
-    m_dropStatus = tr("Download failed: %1").arg(why);
-    m_dropRev++;
-    emit dropChanged();
+    t->file->deleteLater();
+    delete t;
+    pumpDropDownloads();
 }
 
-void ApiClient::finishDropDownload()
+void ApiClient::failDropDownload(DropTransfer *t, const QString &why)
 {
-    QFile *part = m_dlFile;
-    m_dlFile = 0;
-    part->close();
-    part->deleteLater();
-    const QString localName = safeLocalFileName(
-            m_dlServed.isEmpty() ? m_dlName : m_dlServed);
-    const QString dest = QDir(m_dropLocalDir).absoluteFilePath(localName);
-    // Same name again replaces the previous download (no -1/-2 suffixes).
-    if (QFile::exists(dest) && !QFile::remove(dest)) {
-        part->remove();
-        m_dropStatus = tr("Could not replace %1").arg(localName);
+    const QString name = t->name;
+    t->file->close();
+    t->file->remove();
+    dropTransferDone(t);
+    if (m_dls.isEmpty()) {
+        m_dropStatus = tr("Download failed: %1").arg(why);
         m_dropRev++;
         emit dropChanged();
         return;
     }
-    if (!part->rename(dest)) {
-        part->remove();
-        m_dropStatus = tr("Could not write %1").arg(dest);
-        m_dropRev++;
-        emit dropChanged();
-        return;
-    }
-    m_dropStatus = tr("Saved %1 (%2)").arg(localName, formatBytes(m_dlGot));
-    m_dropRev++;
-    emit dropChanged();
-    // Heap toast: show() is async; a stack object would die first.
+    // Others are still running and own the status line: say it as a toast.
     bb::system::SystemToast *toast = new bb::system::SystemToast(this);
-    toast->setBody(m_autoOpenDownloads ? tr("Opening %1").arg(localName)
-                                       : tr("Saved to Downloads/Inbox"));
+    toast->setBody(tr("%1 failed: %2").arg(name, why));
     QObject::connect(toast,
                      SIGNAL(finished(bb::system::SystemUiResult::Type)),
                      toast, SLOT(deleteLater()));
     toast->show();
-    if (m_autoOpenDownloads)
+    updateDropProgress(true);
+}
+
+void ApiClient::finishDropDownload(DropTransfer *t)
+{
+    QFile *part = t->file;
+    part->close();
+    const QString localName = safeLocalFileName(
+            t->served.isEmpty() ? t->name : t->served);
+    const QString dest = QDir(m_dropLocalDir).absoluteFilePath(localName);
+    const qint64 bytes = t->got;
+    // Same name again replaces the previous download (no -1/-2 suffixes).
+    QString err;
+    if (QFile::exists(dest) && !QFile::remove(dest))
+        err = tr("Could not replace %1").arg(localName);
+    else if (!part->rename(dest))
+        err = tr("Could not write %1").arg(dest);
+    if (!err.isEmpty()) {
+        part->remove();
+        dropTransferDone(t);
+        m_dropStatus = err;
+        m_dropRev++;
+        emit dropChanged();
+        return;
+    }
+    dropTransferDone(t);
+    m_dropDoneCount++;
+    m_dropDoneBytes += bytes;
+    const bool last = m_dls.isEmpty();
+    // Opening every file of a batch would stack viewer apps; only the one
+    // that completes the batch opens.
+    const bool openIt = m_autoOpenDownloads && last;
+    if (last) {
+        m_dropStatus = m_dropDoneCount > 1
+                ? tr("Saved %n files (%1)", 0, m_dropDoneCount)
+                        .arg(formatBytes(m_dropDoneBytes))
+                : tr("Saved %1 (%2)").arg(localName, formatBytes(bytes));
+        m_dropRev++;
+        emit dropChanged();
+    } else {
+        updateDropProgress(true);
+    }
+    // Heap toast: show() is async; a stack object would die first.
+    bb::system::SystemToast *toast = new bb::system::SystemToast(this);
+    toast->setBody(openIt ? tr("Opening %1").arg(localName)
+                          : tr("Saved %1 to Downloads/Inbox").arg(localName));
+    QObject::connect(toast,
+                     SIGNAL(finished(bb::system::SystemUiResult::Type)),
+                     toast, SLOT(deleteLater()));
+    toast->show();
+    if (openIt)
         openDownloadedFile(dest);
 }
 
@@ -4078,9 +4178,6 @@ void ApiClient::onFinished(QNetworkReply *reply)
     const QByteArray body = reply->readAll();
     const QString networkError =
             reply->error() != QNetworkReply::NoError ? reply->errorString() : QString();
-    traceMark("done %s %s http=%d err=%d %s", qPrintable(kind),
-              qPrintable(reply->url().host()), httpStatus, int(reply->error()),
-              qPrintable(networkError.left(80)));
 
     bool parseOk = false;
     QVariant data = parseBody(body, &parseOk);
@@ -4095,14 +4192,8 @@ void ApiClient::onFinished(QNetworkReply *reply)
         return;
     }
 
-    if (kind == "tracesend") {
-        traceMark("trace upload http=%d", httpStatus);
-        return;
-    }
-
     if (kind == "ping") {
         if (ok) {
-            sendTraceOnce();
             QVariantMap map = data.toMap();
             updateCaps(map["caps"].toMap());
             // Focus support is a top-level ping flag, not one of the per-

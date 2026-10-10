@@ -108,6 +108,7 @@ STAGE=/tmp/stage
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 cp -a "$BIN" "$STAGE/__TARGET__"
 cp -a variant/__VARIANT__/bar-descriptor.xml "$STAGE/"
+cp -a variant/__VARIANT__/splash-*.png "$STAGE/"
 cp -a assets "$STAGE/assets"
 cp -a variant/__VARIANT__/icon.png "$STAGE/icon.png"
 cd "$STAGE"
@@ -116,6 +117,10 @@ blackberry-nativepackager -package /tmp/__TARGET__.bar \
     bar-descriptor.xml \
     -e __TARGET__ app \
     -e icon.png icon.png \
+    -e splash-768x1280.png splash-768x1280.png \
+    -e splash-720x1280.png splash-720x1280.png \
+    -e splash-720x720.png splash-720x720.png \
+    -e splash-1440x1440.png splash-1440x1440.png \
     -C . assets
 cp -a /tmp/__TARGET__.bar /out/__TARGET__.bar \
   || { log "FATAL: cannot write /out/__TARGET__.bar"; ls -la /out || true; exit 5; }

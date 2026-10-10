@@ -7,13 +7,21 @@
     <author>xiaowen.ji</author>
     <name>Agent Remote</name>
     <description>Control your AI sessions from anywhere with seamless support for Claude, Grok, and Codex.</description>
-    <versionNumber>3.2.11</versionNumber>
-    <buildId>34</buildId>
+    <versionNumber>3.2.15</versionNumber>
+    <buildId>38</buildId>
     <platformVersion>10.3.1.0</platformVersion>
 
     <icon>
         <image>icon.png</image>
     </icon>
+    <!-- Mark on the icon colour. One image per screen size;
+         the navigator cannot follow dark mode. -->
+    <splashScreens>
+        <image>splash-768x1280.png</image>
+        <image>splash-720x1280.png</image>
+        <image>splash-720x720.png</image>
+        <image>splash-1440x1440.png</image>
+    </splashScreens>
 
     <initialWindow>
         <systemChrome>none</systemChrome>
@@ -39,8 +47,24 @@
          cyan / codex green). -->
     <env var="CASCADES_THEME" value="dark?primaryColor=0x00A8DF"/>
 
+    <!-- Voice-command deep link (bb10-assistant/DEEPLINKS.md):
+         agentremote://session?name=<session> opens that session (loose match)
+         or the sessions list. A link never sends input to a session. -->
+    <invoke-target id="com.bb10d.agentremote.link">
+        <invoke-target-type>application</invoke-target-type>
+        <filter>
+            <action>bb.action.OPEN</action>
+            <mime-type>*</mime-type>
+            <property var="uris" value="agentremote://"/>
+        </filter>
+    </invoke-target>
+
     <asset path="AgentRemote" entry="true" type="Qnx/Elf">app</asset>
     <asset path="assets">assets</asset>
+    <asset path="splash-768x1280.png">splash-768x1280.png</asset>
+    <asset path="splash-720x1280.png">splash-720x1280.png</asset>
+    <asset path="splash-720x720.png">splash-720x720.png</asset>
+    <asset path="splash-1440x1440.png">splash-1440x1440.png</asset>
 
     <action system="true">run_native</action>
 </qnx>

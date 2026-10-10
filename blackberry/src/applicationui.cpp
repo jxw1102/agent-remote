@@ -7,6 +7,8 @@
 #include <bb/cascades/QmlDocument>
 #include "qmlres.hpp"
 #include <bb/cascades/ScrollView>
+#include <bb/system/InvokeManager>
+#include <bb/system/InvokeRequest>
 
 #include <QDebug>
 
@@ -15,9 +17,9 @@
 
 #include "apiclient.hpp"
 #include "brand.hpp"
-#include "trace.hpp"
 
 #include <QTimer>
+#include <QUrl>
 
 using namespace bb::cascades;
 
@@ -55,14 +57,8 @@ static void *quitWatchdog(void *)
     return 0;
 }
 
-void ApplicationUI::heartbeat() { traceHeartbeat(); }
-void ApplicationUI::onFullscreen() { traceMark("app: fullscreen"); }
-void ApplicationUI::onThumbnail() { traceMark("app: thumbnail"); }
-void ApplicationUI::onInvisible() { traceMark("app: invisible"); }
-
 void ApplicationUI::armQuitWatchdog()
 {
-    traceMark("app: aboutToQuit (close requested); arming 2 s exit watchdog");
     pthread_t t;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -72,27 +68,90 @@ void ApplicationUI::armQuitWatchdog()
     pthread_attr_destroy(&attr);
 }
 
+// ---- agentremote:// voice-command links (bb10-assistant/DEEPLINKS.md) ----
+// Any app or web page can open these, so a link only navigates: it opens a
+// session's transcript or the sessions list. It never sends input.
+
+// Value of one query parameter: UTF-8 percent-decoded, '+' read as space.
+static QString linkQueryValue(const QUrl &url, const QString &key)
+{
+    const QList<QByteArray> pairs = url.encodedQuery().split('&');
+    for (int i = 0; i < pairs.size(); ++i) {
+        const QByteArray &pair = pairs.at(i);
+        const int eq = pair.indexOf('=');
+        QByteArray k = eq < 0 ? pair : pair.left(eq);
+        k.replace('+', ' ');
+        if (QUrl::fromPercentEncoding(k).compare(key, Qt::CaseInsensitive) != 0)
+            continue;
+        QByteArray v = eq < 0 ? QByteArray() : pair.mid(eq + 1);
+        v.replace('+', ' ');
+        return QUrl::fromPercentEncoding(v).trimmed();
+    }
+    return QString();
+}
+
+void ApplicationUI::onInvoked(const bb::system::InvokeRequest &request)
+{
+    if (request.action() != QLatin1String("bb.action.OPEN"))
+        return;
+    handleLink(request.uri());
+}
+
+void ApplicationUI::handleLink(const QUrl &uri)
+{
+    if (uri.scheme().compare(QLatin1String("agentremote"), Qt::CaseInsensitive) != 0)
+        return;
+    QString verb = uri.host();
+    if (verb.isEmpty()) {
+        verb = uri.path();
+        while (verb.startsWith(QLatin1Char('/')))
+            verb.remove(0, 1);
+    }
+    verb = verb.section(QLatin1Char('/'), 0, 0).trimmed().toLower();
+
+    // session without a name, or an unknown link: the sessions list.
+    m_pendingSession = (verb == QLatin1String("session"))
+            ? linkQueryValue(uri, QLatin1String("name")) : QString();
+    qDebug() << "link: verb=" << verb << "name=" << m_pendingSession;
+    ++m_linkRev;
+    // The sessions list fans out over every profile and can take a while on
+    // a cold start; give up matching after that rather than yank the user
+    // into a session much later.
+    if (!m_pendingSession.isEmpty())
+        m_linkExpiry->start();
+    emit linkChanged();
+}
+
+void ApplicationUI::clearPendingSession()
+{
+    m_linkExpiry->stop();
+    if (m_pendingSession.isEmpty())
+        return;
+    m_pendingSession.clear();
+    emit linkChanged();
+}
+
 ApplicationUI::ApplicationUI()
     : QObject(Application::instance())
     , m_api(new ApiClient(this))
+    , m_invoke(new bb::system::InvokeManager(this))
+    , m_linkExpiry(new QTimer(this))
+    , m_linkRev(0)
 {
+    // Connect before the event loop runs: a launch-by-link delivers invoked()
+    // as soon as it spins.
+    connect(m_invoke, SIGNAL(invoked(const bb::system::InvokeRequest&)),
+            this, SLOT(onInvoked(const bb::system::InvokeRequest&)));
+    m_linkExpiry->setSingleShot(true);
+    m_linkExpiry->setInterval(15000);
+    connect(m_linkExpiry, SIGNAL(timeout()), this, SLOT(clearPendingSession()));
+
     // Refresh the sessions list whenever the app returns to the foreground
     // - the daemon keeps working while the app is thumbnailed.
     connect(Application::instance(), SIGNAL(fullscreen()),
             m_api, SLOT(refreshSessions()));
     connect(Application::instance(), SIGNAL(aboutToQuit()),
             this, SLOT(armQuitWatchdog()));
-    connect(Application::instance(), SIGNAL(fullscreen()),
-            this, SLOT(onFullscreen()));
-    connect(Application::instance(), SIGNAL(thumbnail()),
-            this, SLOT(onThumbnail()));
-    connect(Application::instance(), SIGNAL(invisible()),
-            this, SLOT(onInvisible()));
-    QTimer *beat = new QTimer(this);
-    beat->setInterval(500);
-    connect(beat, SIGNAL(timeout()), this, SLOT(heartbeat()));
-    beat->start();
-    traceMark("ApplicationUI: signals + heartbeat wired");
 
     s_prevHandler = qInstallMsgHandler(captureMessage);
 
@@ -114,6 +173,7 @@ ApplicationUI::ApplicationUI()
             continue;
         qml->setParent(this);
         qml->setContextProperty("_api", m_api);
+        qml->setContextProperty("_link", this);
         if (!qml->hasErrors()) {
             root = qml->createRootObject<AbstractPane>();
             if (root)

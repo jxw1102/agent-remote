@@ -3,8 +3,10 @@
 
 #include <QFile>
 #include <QHash>
+#include <QList>
 #include <QMap>
 #include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include <QObject>
 #include <QPointer>
 #include <QSet>
@@ -67,6 +69,22 @@ namespace bb { namespace system { class SystemPrompt; } }
  * the paint pipeline GrokRemote proved on device; any block that fails to
  * paint falls back to a Cascades Html Label row.
  */
+// One Inbox download. The reply and both timers carry its id in a dynamic
+// property ("dlId") so ApiClient's shared slots know which transfer spoke.
+struct DropTransfer {
+    int id;
+    QString name, base, token;
+    QString served;           // X-Drop-Name: a folder arrives as <name>.zip
+    QString etag;
+    QFile *file;              // "<name>.part", renamed when complete
+    QPointer<QNetworkReply> reply;
+    QTimer *idle;             // no byte for DOWNLOAD_IDLE_MS -> abort
+    QTimer *retry;            // back-off before a Range resume
+    qint64 got, total;
+    bool started, resumable, headSeen, resuming;
+    int attempt;
+};
+
 class ApiClient : public QObject
 {
     Q_OBJECT
@@ -609,10 +627,10 @@ private Q_SLOTS:
     // Inbox download: the body is written to a .part file as it arrives
     // (never held in RAM), an idle timer aborts a stalled link, and a lost
     // link resumes with Range (daemon 2.14.2+) instead of starting over.
-    void startDropRequest();
     void onDropReadyRead();
     void onDropReplyFinished();
     void onDropIdle();
+    void onDropRetry();
     void pollJob();
     void pollTui();
     void onStatusFrame(const QByteArray &payload);
@@ -955,23 +973,23 @@ private:
     qint64 m_stepsLiveAtMs;
     bool m_stepsLivePending;
     qint64 m_dropProgressAtMs;
-    // The one inbox download in flight (the sheet has one status line).
-    QPointer<QNetworkReply> m_dlReply;
-    QFile *m_dlFile;
-    QTimer m_dlIdle;
-    QString m_dlName, m_dlBase, m_dlToken, m_dlServed, m_dlEtag;
-    qint64 m_dlGot, m_dlTotal;
-    bool m_dlResumable, m_dlHeadSeen;
-    int m_dlAttempt;
+    // Inbox downloads in flight, each with its own file, reply and timers;
+    // up to MAX_PARALLEL_DOWNLOADS transfer at once, the rest start as
+    // soon as one finishes. The sheet has one status line, so progress is
+    // summed across them.
+    QList<DropTransfer *> m_dls;
+    int m_dropNextId;
+    int m_dropDoneCount;      // finished in this batch (for "Saved N files")
+    qint64 m_dropDoneBytes;
+    DropTransfer *dropTransferFor(QObject *tagged) const;
+    void startDropRequest(DropTransfer *t);
+    void pumpDropDownloads();
     void updateDropProgress(bool force);
-    void failDropDownload(const QString &why);
-    void finishDropDownload();
+    void failDropDownload(DropTransfer *t, const QString &why);
+    void finishDropDownload(DropTransfer *t);
+    void dropTransferDone(DropTransfer *t);
     void publishStepEdit(const QString &action, int index,
                          const QVariantMap &item);
-    // Diagnostic build: ship the previous run's trace (trace.hpp) and any
-    // crash log to the daemon once per launch, so the grey-icon hang can be
-    // read on the host without digging through the phone's File Manager.
-    void sendTraceOnce();
     int m_prependRev;
     QVariantList m_prependItems;
     int m_stepEditRev;

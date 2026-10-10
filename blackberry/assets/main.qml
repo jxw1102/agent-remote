@@ -9,6 +9,8 @@ NavigationPane {
     // ReferenceError. Everything below reaches the client via nav.api.
     // (Pattern proven on-device by GrokRemote.)
     property variant api
+    // ApplicationUI: agentremote:// links (pendingSessionName / linkRev).
+    property variant link
 
     backButtonsVisible: false
 
@@ -103,6 +105,9 @@ NavigationPane {
 
     onPopTransitionEnded: {
         page.destroy();
+        // A link popped back to the list to open its session.
+        if (nav.top == sessionsPage)
+            sessionsPage.tryOpenLinkedSession();
     }
 
     Page {
@@ -118,6 +123,116 @@ NavigationPane {
                 return;
             sessionsModel.clear();
             sessionsModel.append(nav.api.sessions);
+            tryOpenLinkedSession();
+        }
+
+        // ---- agentremote://session?name= (voice command) ----
+        // Only navigates: opens the matching session's transcript, or leaves
+        // the sessions list showing. Nothing is ever sent from a link.
+        property int linkRev: nav.link ? nav.link.linkRev : 0
+        onLinkRevChanged: {
+            if (! ready || ! nav.api)
+                return;
+            var mustPop = (nav.top != sessionsPage);
+            if (mustPop)
+                nav.navigateTo(sessionsPage);
+            if (! nav.link || nav.link.pendingSessionName == "")
+                return; // unknown link / no name: the sessions list
+            // Look in the whole list, not a search or one project.
+            if (searchField.text != "") {
+                searchField.text = "";
+                nav.api.scheduleSearchSessions("");
+            }
+            if (nav.api.projectFilter != "")
+                nav.api.setProjectFilter("", "");
+            if (! mustPop)
+                tryOpenLinkedSession();
+            // Not in the current list: match again on a fresh one.
+            if (nav.link.pendingSessionName != "")
+                nav.api.refreshSessions();
+        }
+
+        function normName(t) {
+            return ("" + t).toLowerCase().replace(/[^a-z0-9\u0080-\uffff]+/g, " ")
+                           .replace(/^\s+|\s+$/g, "");
+        }
+
+        // Best loose match: exact > prefix > contains > all words present.
+        // The list is newest first, so ties go to the most recent session.
+        function findSessionByName(name) {
+            var q = normName(name);
+            if (q == "")
+                return null;
+            var words = q.split(" ");
+            var best = null;
+            var bestScore = 0;
+            for (var i = 0; i < sessionsModel.size(); ++i) {
+                var s = sessionsModel.data([ i ]);
+                if (! s || ! s.id)
+                    continue;
+                var t = normName(s.title || "");
+                var score = 0;
+                if (t == q)
+                    score = 4;
+                else if (t.indexOf(q) == 0)
+                    score = 3;
+                else if (t.indexOf(q) >= 0)
+                    score = 2;
+                else if (normName(s.id) == q)
+                    score = 4;
+                else if (t != "") {
+                    var all = true;
+                    for (var w = 0; w < words.length; ++w) {
+                        if (t.indexOf(words[w]) < 0) {
+                            all = false;
+                            break;
+                        }
+                    }
+                    if (all)
+                        score = 1;
+                }
+                if (score > bestScore) {
+                    best = s;
+                    bestScore = score;
+                }
+            }
+            return best;
+        }
+
+        function tryOpenLinkedSession() {
+            if (! ready || ! nav.api || ! nav.link)
+                return;
+            var name = "" + nav.link.pendingSessionName;
+            if (name == "" || nav.top != sessionsPage)
+                return;
+            var session = findSessionByName(name);
+            if (! session)
+                return; // wait for the next list (C++ gives up after a while)
+            nav.link.clearPendingSession();
+            openSession(session);
+        }
+
+        // Shared by a tap on a row and by agentremote:// links.
+        function openSession(session) {
+            var api = nav.api;
+            if (! api || ! session || ! session.id)
+                return;
+            // Unified rows carry the daemon they live on; -1 =
+            // plain open on the active profile (claude/grok
+            // builds, and rows from before a merge).
+            var pidx = (session.profileIndex === undefined
+                        || session.profileIndex === null)
+                       ? -1 : session.profileIndex;
+            api.openSessionRow(pidx, "" + session.id);
+            // Opening it stops flagging the finished turn.
+            api.markSessionSeen(pidx, "" + session.id);
+            var page = api.createTranscriptPage();
+            if (! page)
+                return; // factory reported the load error
+            page.api = api;
+            page.nav = nav;
+            page.sessionTitle = "" + (session.title || "");
+            nav.push(page);
         }
 
         // ProjectsPage requests "new session here" through C++ so the
@@ -227,6 +342,7 @@ NavigationPane {
         onCreationCompleted: {
             // Root context is reliable exactly once - here. Pin it.
             nav.api = _api;
+            nav.link = _link;
             ready = true;
             if (_api.configured) {
                 _api.refreshSessions();
@@ -607,22 +723,7 @@ NavigationPane {
                             api.reportUiError("No session at row " + row);
                             return;
                         }
-                        // Unified rows carry the daemon they live on; -1 =
-                        // plain open on the active profile (claude/grok
-                        // builds, and rows from before a merge).
-                        var pidx = (session.profileIndex === undefined
-                                    || session.profileIndex === null)
-                                   ? -1 : session.profileIndex;
-                        api.openSessionRow(pidx, "" + session.id);
-                        // Opening it stops flagging the finished turn.
-                        api.markSessionSeen(pidx, "" + session.id);
-                        var page = api.createTranscriptPage();
-                        if (! page)
-                            return; // factory reported the load error
-                        page.api = api;
-                        page.nav = nav;
-                        page.sessionTitle = "" + (session.title || "");
-                        nav.push(page);
+                        sessionsPage.openSession(session);
                     } catch (e) {
                         try { api.reportUiError("open session: " + e); } catch (e2) {}
                     }

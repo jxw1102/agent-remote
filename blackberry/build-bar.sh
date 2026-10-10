@@ -84,6 +84,7 @@ STAGE=$(mktemp -d "/tmp/${TARGET}-stage.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 cp -a "$BIN" "$STAGE/$TARGET"
 cp -a "variant/$VARIANT/bar-descriptor.xml" "$STAGE/"
+cp -a variant/$VARIANT/splash-*.png "$STAGE/"
 cp -a assets "$STAGE/assets"
 cp -a "variant/$VARIANT/icon.png" "$STAGE/icon.png"
 
@@ -94,6 +95,10 @@ blackberry-nativepackager -package "$OUTDIR/$TARGET.bar" \
   bar-descriptor.xml \
   -e "$TARGET" app \
   -e icon.png icon.png \
+  -e splash-768x1280.png splash-768x1280.png \
+  -e splash-720x1280.png splash-720x1280.png \
+  -e splash-720x720.png splash-720x720.png \
+  -e splash-1440x1440.png splash-1440x1440.png \
   -C . assets
 
 echo "OK: $OUTDIR/$TARGET.bar"

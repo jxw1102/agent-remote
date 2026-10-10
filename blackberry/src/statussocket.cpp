@@ -1,6 +1,5 @@
 #include "statussocket.hpp"
 #include "socksproxy.hpp"
-#include "trace.hpp"
 
 #include <QDateTime>
 #include <QNetworkProxy>
@@ -73,14 +72,11 @@ void StatusSocket::openSocket()
     m_buffer.clear();
     m_upgraded = false;
     m_socket.setProxy(socks10808ProxyForHost(m_host));
-    traceMark("ws connect %s:%d proxy=%s", qPrintable(m_host), m_port,
-              m_socket.proxy().type() == QNetworkProxy::NoProxy ? "direct" : "socks");
     m_socket.connectToHost(m_host, quint16(m_port));
 }
 
 void StatusSocket::onConnected()
 {
-    traceMark("ws connected %s", qPrintable(m_host));
     QByteArray key = randomBytes(16).toBase64();
     QByteArray request =
             "GET /ws/status HTTP/1.1\r\n"
@@ -196,8 +192,6 @@ void StatusSocket::sendFrame(quint8 opcode, const QByteArray &payload)
 
 void StatusSocket::onClosed()
 {
-    traceMark("ws closed %s: %s", qPrintable(m_host),
-              qPrintable(m_socket.errorString().left(80)));
     setUp(false);
     m_buffer.clear();
     scheduleReconnect();

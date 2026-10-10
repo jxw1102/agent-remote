@@ -1,9 +1,6 @@
 #include "socksproxy.hpp"
 
 #include "socks10808.h"
-#include "trace.hpp"
-
-#include <time.h>
 
 #include <QList>
 #include <QNetworkAccessManager>
@@ -23,29 +20,13 @@ QNetworkProxy makeSocks()
     return p;
 }
 
-long long monoMs()
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
 bool hostGoesDirect(const QString &host)
 {
     if (host.isEmpty())
         return true;
     if (socks10808_host_is_direct(host.toUtf8().constData()) != 0)
         return true;
-    const long long t0 = monoMs();
     const int up = socks10808_is_up();
-    const long long ms = monoMs() - t0;
-    // Trace the probe only when it cost something or the answer flipped.
-    static int s_lastUp = -2;
-    if (ms > 50 || up != s_lastUp) {
-        traceMark("proxy %s: v2ray %s (probe %lld ms)", qPrintable(host),
-                  up ? "UP -> socks" : "down -> direct", ms);
-        s_lastUp = up;
-    }
     return up == 0;
 }
 
@@ -78,7 +59,6 @@ public:
 void installSocks10808ApplicationProxy()
 {
 #ifdef AR_NO_SOCKS
-    traceMark("A/B build: SOCKS proxy compiled OUT, all traffic direct");
     return;
 #endif
     QNetworkProxyFactory::setApplicationProxyFactory(new Socks10808Factory);

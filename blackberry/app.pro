@@ -34,8 +34,7 @@ SOURCES += $${PWD}/src/main.cpp \
            $${PWD}/src/crashguard.cpp \
            $${PWD}/src/chime.cpp \
            $${PWD}/src/richpaint.cpp \
-           $${PWD}/src/socksproxy.cpp \
-           $${PWD}/src/trace.cpp
+           $${PWD}/src/socksproxy.cpp
 
 HEADERS += $${PWD}/src/applicationui.hpp \
            $${PWD}/src/apiclient.hpp \
@@ -45,8 +44,7 @@ HEADERS += $${PWD}/src/applicationui.hpp \
            $${PWD}/src/chime.hpp \
            $${PWD}/src/richpaint.hpp \
            $${PWD}/src/brand.hpp \
-           $${PWD}/src/socksproxy.hpp \
-           $${PWD}/src/trace.hpp
+           $${PWD}/src/socksproxy.hpp
 
 # A/B build switch: `touch blackberry/NO_SOCKS` builds with the V2Ray SOCKS
 # proxy compiled OUT (everything else identical), to prove whether the
