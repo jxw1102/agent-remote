@@ -8,9 +8,13 @@ import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
 import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.longOrNull
 import java.time.Instant
@@ -76,8 +80,39 @@ data class AuthHealthDto(
     val detail: String = "",
 )
 
+/**
+ * `caps` is a map of flags, but the daemon also parks a small version number
+ * in it (`tui_keys: 2`, since agentremoted 2.13.0). A plain Map<String, Boolean>
+ * refused the whole /api/ping over that one entry, which is how the app
+ * stopped connecting to every current daemon. Booleans pass through, numbers
+ * read as "non-zero is on", anything else is skipped rather than fatal.
+ */
+object LenientBoolMapSerializer : KSerializer<Map<String, Boolean>> {
+    private val delegate = MapSerializer(String.serializer(), Boolean.serializer())
+    override val descriptor: SerialDescriptor = delegate.descriptor
+
+    override fun serialize(encoder: Encoder, value: Map<String, Boolean>) =
+        delegate.serialize(encoder, value)
+
+    override fun deserialize(decoder: Decoder): Map<String, Boolean> {
+        val input = decoder as? JsonDecoder ?: return delegate.deserialize(decoder)
+        val obj = input.decodeJsonElement() as? JsonObject ?: return emptyMap()
+        val out = LinkedHashMap<String, Boolean>()
+        for ((key, raw) in obj) {
+            val p = raw as? JsonPrimitive ?: continue
+            val flag = p.booleanOrNull
+                ?: p.longOrNull?.let { it != 0L }
+                ?: p.doubleOrNull?.let { it != 0.0 }
+                ?: continue
+            out[key] = flag
+        }
+        return out
+    }
+}
+
 @Serializable
 data class ProviderDetailDto(
+    @Serializable(with = LenientBoolMapSerializer::class)
     val caps: Map<String, Boolean> = emptyMap(),
     @SerialName("slash_commands") val slashCommands: List<String> = emptyList(),
     val models: List<String> = emptyList(),
@@ -92,6 +127,7 @@ data class PingDto(
     val version: String = "",
     val host: String = "",
     val provider: String = "",
+    @Serializable(with = LenientBoolMapSerializer::class)
     val caps: Map<String, Boolean> = emptyMap(),
     @SerialName("slash_commands") val slashCommands: List<String> = emptyList(),
     val models: List<String> = emptyList(),
