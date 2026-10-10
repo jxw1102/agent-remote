@@ -781,22 +781,6 @@ class DaemonClient(
         raw(request(url("api/drop/$name/delete")).post(jsonBody(buildJsonObject {})).build())
     }
 
-    /** Fire-and-forget diagnostics; never surfaced to the user. */
-    suspend fun clientLog(line: String) {
-        runCatching {
-            raw(
-                request(url("api/clientlog")).post(
-                    jsonBody(
-                        buildJsonObject {
-                            put("app", "android")
-                            put("line", line)
-                        },
-                    ),
-                ).build(),
-            )
-        }
-    }
-
     /** The URL the SSE status stream lives on, for [StatusStream]. */
     fun statusUrl(): HttpUrl = url("sse/status")
 
