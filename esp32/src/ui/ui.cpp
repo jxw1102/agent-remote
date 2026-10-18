@@ -1821,6 +1821,17 @@ lv_obj_t *buildDaemonEdit() {
           : "Token (~/.agentremoted/token)");
   lv_obj_set_width(daemonTokenTa, LV_PCT(100));
 
+  // A daemon entry is useless without a daemon; say what one is and where
+  // to get it, in the two lines the screen has to spare.
+  lv_obj_t *hint = lv_label_create(body);
+  lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(hint, LV_PCT(100));
+  lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(hint, lv_color_hex(0x9aa4b2), 0);
+  lv_label_set_text(hint,
+                    "Address + token of agentremoted, the daemon on your agent "
+                    "host. Docs: github.com/jxw1102/agent-remote");
+
   if (!isNew) {
     lv_obj_t *en = lv_obj_create(body);
     lv_obj_remove_style_all(en);

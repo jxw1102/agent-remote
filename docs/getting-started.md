@@ -93,10 +93,23 @@ Copy the `https://….trycloudflare.com` URL cloudflared prints.
 | Client | How |
 |--------|-----|
 | **Web** | Open [hosted web client](https://nice-dune-0415af003.7.azurestaticapps.net/) → **Add a daemon** |
-| **Android** | Profiles → + → Base URL + token → Test connection |
+| **Android** | Profiles → + → **Scan QR**, or Base URL + token → Test connection |
 | **iOS** | Same profile fields (community client) |
-| **BlackBerry 10** | Install BAR from releases; Settings → daemon URL + token |
+| **BlackBerry 10** | Install BAR from releases; Settings → **Scan QR**, or daemon URL + token |
 | **LILYGO T-LoRa Pager** | See [esp32/README.md](../esp32/README.md) |
+
+### Pairing a phone with its camera
+
+Typing a 40-character token on a phone keyboard is the worst part of this, so
+the web client hands it over by sight. Open the web client on a computer, edit
+the daemon, and a QR code appears under the token field. On the phone, start a
+new profile and tap **Scan QR** (Android) or **Scan QR from the web client**
+(BlackBerry): the address, the token and the name arrive filled in, and you
+confirm with Save / Done.
+
+The code is `agentremote://profile?url=…&token=…&name=…` — a daemon's full
+credentials in a picture. Treat it like the token: do not photograph it onto a
+shared screen, and do not post it.
 
 Test connection should show host name, version, harness list, and (daemon ≥ 2.5.3) auth summary.
 
