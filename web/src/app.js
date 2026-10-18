@@ -9,6 +9,7 @@
 // is the token header, kept in localStorage — never a cookie.
 
 import { renderMarkdown, inlineInto, paintCode } from "./md.js";
+import { qrSvg } from "./qr.js";
 
 const PROVIDERS = {
   claude: { label: "Claude", accent: "#d97757", heading: "#e08a5c", inline: "#e0a183" },
@@ -1102,6 +1103,7 @@ function setEffortFor(profile, harness, effort) {
 const DAEMON_INSTALL_CMD =
   "curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.sh | bash";
 const OTHER_CLIENTS_URL = "https://github.com/jxw1102/agent-remote#clients";
+const DAEMON_REPO_URL = "https://github.com/jxw1102/agent-remote";
 
 /** Shared empty-state mark (chevron + underscore on a disc). */
 function appendEmptyLogo(parent) {
@@ -3828,12 +3830,38 @@ function paintProfilesModal() {
   });
 }
 
+/**
+ * The pairing payload the phones scan: one daemon, spelled out.
+ *
+ * Same scheme the BlackBerry app already answers to for voice links, so a
+ * profile QR is just another agentremote:// address — nothing proprietary,
+ * and anyone can read what they are about to scan.
+ */
+function pairingUri({ name, baseUrl, token }) {
+  const url = normalizeBaseUrl(baseUrl);
+  const tok = String(token || "").trim();
+  if (!url || !tok) return "";
+  const q = ["url=" + encodeURIComponent(url), "token=" + encodeURIComponent(tok)];
+  const label = String(name || "").trim();
+  if (label) q.push("name=" + encodeURIComponent(label));
+  return "agentremote://profile?" + q.join("&");
+}
+
 function editProfile(index) {
   const existing = index >= 0 ? state.profiles[index] : null;
   let testLine;
   modal({
     title: existing ? "Edit daemon" : "Add daemon",
     build(body) {
+      // A profile is useless without a daemon; say what one is and where
+      // to get it before asking for its address.
+      const intro = el("div", "help");
+      intro.innerHTML = "This page is a remote control for <strong>agentremoted</strong>, "
+        + "a small daemon that runs on the computer where your coding agents live. "
+        + "Enter that daemon's address and its token. "
+        + '<a href="' + DAEMON_REPO_URL + '" target="_blank" rel="noopener noreferrer">'
+        + "Get the daemon and read the docs</a>.";
+      body.appendChild(intro);
       const mk = (label, value, help, type = "text") => {
         const f = el("div", "field");
         f.appendChild(el("label", null, label));
@@ -3856,6 +3884,34 @@ function editProfile(index) {
         "The contents of ~/.agentremoted/token on that host", "password");
       testLine = el("div", "help");
       body.appendChild(testLine);
+
+      // Pairing code: typing a 40-character token on a phone keyboard is the
+      // worst part of setting one up, so let its camera do it. Redrawn as
+      // the fields change — the code always matches what is on screen, even
+      // for a daemon that has not been saved yet.
+      const qr = el("div", "qrpair");
+      const paintQr = () => {
+        qr.textContent = "";
+        const uri = pairingUri({
+          name: name.value, baseUrl: url.value, token: token.value,
+        });
+        if (!uri) {
+          qr.appendChild(el("div", "help",
+            "Fill in the address and the token and a pairing code appears here."));
+          return;
+        }
+        const art = el("div", "qrart");
+        art.innerHTML = qrSvg(uri, { ec: "M" });
+        qr.appendChild(art);
+        qr.appendChild(el("div", "help",
+          "Scan this from Agent Remote on Android or BlackBerry (Add profile → "
+          + "Scan QR) to copy this daemon across. It carries the token, so treat "
+          + "the picture as the token itself."));
+      };
+      [name, url, token].forEach((f) => f.addEventListener("input", paintQr));
+      paintQr();
+      body.appendChild(qr);
+
       body._fields = { name, url, token };
     },
     actions: [
@@ -3938,11 +3994,15 @@ function editProfile(index) {
   });
 }
 
-function normalizeProfile(p) {
-  let url = String(p.baseUrl || "").trim().replace(/\/+$/, "");
+function normalizeBaseUrl(raw) {
+  let url = String(raw || "").trim().replace(/\/+$/, "");
   if (url && !/^https?:\/\//i.test(url)) url = "http://" + url;
   // Strip accidental /claude|/grok|/codex suffixes — multi lives at the root.
-  url = url.replace(/\/(claude|grok|codex|deepseek|dsh|cursor|cursor-agent|copilot)$/i, "");
+  return url.replace(/\/(claude|grok|codex|deepseek|dsh|cursor|cursor-agent|copilot)$/i, "");
+}
+
+function normalizeProfile(p) {
+  const url = normalizeBaseUrl(p.baseUrl);
   return {
     id: p.id || uuid(),
     name: p.name || url.replace(/^https?:\/\//, ""),

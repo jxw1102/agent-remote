@@ -34,40 +34,57 @@ def read(name: str) -> str:
     return (SRC / name).read_text(encoding="utf-8")
 
 
-def flatten_modules(md_js: str, app_js: str, app_name: str = "app.js") -> str:
-    """md.js + a page script as one classic script, each keeping its own scope.
+# Shared modules a page script may import. A page gets only the ones it
+# actually imports, so share.html does not carry the QR encoder.
+LIBS = ("md.js", "qr.js")
 
-    Concatenating the two bodies into a single scope looks simpler and is
-    wrong: both modules privately declare helpers with the same names (`el`),
-    which is legal in separate modules and a duplicate-declaration
-    SyntaxError once merged — and a script that fails to parse does nothing at
-    all. So each module gets its own IIFE and only its declared exports cross
-    the boundary, exactly like the real module graph.
+
+def flatten_modules(libs: dict, page_js: str, page_name: str) -> str:
+    """Shared modules + a page script as one classic script, scopes intact.
+
+    Concatenating the bodies into a single scope looks simpler and is wrong:
+    the modules privately declare helpers with the same names (`el`), which is
+    legal in separate modules and a duplicate-declaration SyntaxError once
+    merged — and a script that fails to parse does nothing at all. So each
+    module gets its own IIFE and only its declared exports cross the
+    boundary, exactly like the real module graph.
     """
-    exported = re.findall(r"^export\s+(?:function|const|let|class)\s+(\w+)",
-                          md_js, flags=re.M)
-    if not exported:
-        raise SystemExit("error: md.js exports nothing — check the export syntax")
+    out = []
+    used = []
+    for name, source in libs.items():
+        exported = re.findall(r"^export\s+(?:function|const|let|class)\s+(\w+)",
+                              source, flags=re.M)
+        if not exported:
+            raise SystemExit(f"error: {name} exports nothing — check the export syntax")
+        pattern = r'^import\s*\{([^}]*)\}\s*from\s*"\./%s";\s*$' % re.escape(name)
+        imported = re.search(pattern, page_js, flags=re.M)
+        if not imported:
+            continue            # this page does not use that module
+        names = [n.strip() for n in imported.group(1).split(",") if n.strip()]
+        missing = [n for n in names if n not in exported]
+        if missing:
+            raise SystemExit(f"error: {page_name} imports {missing} "
+                             f"which {name} does not export")
+        var = "__" + re.sub(r"\W", "_", name)
+        body = re.sub(r"^export\s+", "", source, flags=re.M)
+        out.append(
+            f"// ---- {name} (module scope) ----\n"
+            f"const {var} = (function () {{\n{body}\nreturn {{ {', '.join(exported)} }};\n}})();\n"
+            f"const {{ {', '.join(names)} }} = {var};\n"
+        )
+        page_js = page_js.replace(imported.group(0), "")
+        used.append(name)
 
-    imported = re.search(r'^import\s*\{([^}]*)\}\s*from\s*"\./md\.js";\s*$',
-                         app_js, flags=re.M)
-    if not imported:
-        raise SystemExit(f"error: {app_name} has no import from ./md.js — update the build")
-    names = [n.strip() for n in imported.group(1).split(",") if n.strip()]
-    missing = [n for n in names if n not in exported]
-    if missing:
-        raise SystemExit(f"error: {app_name} imports {missing} which md.js does not export")
+    if "md.js" not in used:
+        raise SystemExit(f"error: {page_name} has no import from ./md.js — update the build")
+    leftover = re.search(r'^import\s.*from\s*"([^"]+)";\s*$', page_js, flags=re.M)
+    if leftover:
+        raise SystemExit(f"error: {page_name} imports {leftover.group(1)}, "
+                         "which the build does not know how to inline")
 
-    md_body = re.sub(r"^export\s+", "", md_js, flags=re.M)
-    app_body = app_js.replace(imported.group(0), "")
-    returns = ", ".join(exported)
-    return (
-        "// ---- md.js (module scope) ----\n"
-        f"const __md = (function () {{\n{md_body}\nreturn {{ {returns} }};\n}})();\n"
-        f"const {{ {', '.join(names)} }} = __md;\n"
-        f"// ---- {app_name} (module scope) ----\n"
-        f"(function () {{\n{app_body}\n}})();\n"
-    )
+    out.append(f"// ---- {page_name} (module scope) ----\n"
+               f"(function () {{\n{page_js}\n}})();\n")
+    return "".join(out)
 
 
 def syntax_ok(script: str) -> bool:
@@ -98,8 +115,8 @@ def main() -> int:
 
     html = read("index.html")
     css = read("app.css")
-    md_js = read("md.js")
-    script = flatten_modules(md_js, read("app.js"), "app.js")
+    libs = {name: read(name) for name in LIBS}
+    script = flatten_modules(libs, read("app.js"), "app.js")
 
     # Inline the stylesheet and the module script.
     html = html.replace(
@@ -117,7 +134,7 @@ def main() -> int:
         f"<title>Agent Remote</title>\n<!-- built {stamp} from web/src -->",
     )
 
-    for leftover in ('href="app.css"', 'src="app.js"', 'from "./md.js"'):
+    for leftover in ['href="app.css"', 'src="app.js"'] + [f'from "./{n}"' for n in LIBS]:
         if leftover in html:
             print(f"error: {leftover} still referenced — not self-contained",
                   file=sys.stderr)
@@ -134,7 +151,7 @@ def main() -> int:
     size = OUT.stat().st_size
     print(f"OK: {OUT} ({size // 1024} KB, self-contained)")
 
-    share_script = flatten_modules(md_js, read("share.js"), "share.js")
+    share_script = flatten_modules(libs, read("share.js"), "share.js")
     if not syntax_ok(share_script):
         return 4
     share_html = read("share.html")
@@ -150,7 +167,7 @@ def main() -> int:
         "<title>Shared session · Agent Remote</title>",
         f"<title>Shared session · Agent Remote</title>\n<!-- built {stamp} from web/src -->",
     )
-    for leftover in ('href="app.css"', 'src="share.js"', 'from "./md.js"'):
+    for leftover in ['href="app.css"', 'src="share.js"'] + [f'from "./{n}"' for n in LIBS]:
         if leftover in share_html:
             print(f"error: share.html still references {leftover}",
                   file=sys.stderr)
