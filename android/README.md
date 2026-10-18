@@ -62,9 +62,11 @@ self-signed sideload key, not a Play upload key.
 
 1. On each host, note the daemon base URL and the token file
    (`~/.agentremoted/token`, or `/root/.agentremoted/token` on a typical VPS).
-2. In the app: **⋮ → Profiles → +**, fill in name / address / token, then
-   **Test connection**. It pings *and* makes one authenticated call, so a
-   wrong token fails here rather than showing an empty list later.
+2. In the app: **⋮ → Profiles → +**, then either tap **Scan QR** and point
+   the camera at the pairing code the web client draws under its token field,
+   or fill in name / address / token by hand. Either way, **Test connection**
+   pings *and* makes one authenticated call, so a wrong token fails here
+   rather than showing an empty list later.
 3. Save. The provider badge, model list and feature toggles come from that
    daemon's `/api/ping` — nothing is hard-coded per provider.
 

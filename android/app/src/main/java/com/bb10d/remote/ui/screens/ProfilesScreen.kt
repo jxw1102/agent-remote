@@ -1,5 +1,6 @@
 package com.bb10d.remote.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +27,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -51,6 +53,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -59,6 +62,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bb10d.remote.data.Pairing
 import com.bb10d.remote.data.Profile
 import com.bb10d.remote.ui.components.EmptyState
 import com.bb10d.remote.ui.components.ErrorBanner
@@ -67,6 +71,8 @@ import com.bb10d.remote.ui.components.MetaPill
 import com.bb10d.remote.ui.components.ProviderChip
 import com.bb10d.remote.ui.theme.Accent
 import com.bb10d.remote.ui.theme.palette
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -202,6 +208,9 @@ private fun ProfileRow(
     }
 }
 
+/** Where the daemon lives: the profile page sends newcomers here. */
+private const val DAEMON_REPO_URL = "https://github.com/jxw1102/agent-remote"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileEditorScreen(
@@ -217,9 +226,32 @@ fun ProfileEditorScreen(
     var token by remember(existing) { mutableStateOf(existing?.token.orEmpty()) }
     var showToken by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var scanNote by remember { mutableStateOf("") }
+    var scanFailed by remember { mutableStateOf(false) }
+
+    // The web client puts this profile's address and token on screen as a QR
+    // code (daemon form, bottom). Reading it beats typing a 40-character
+    // token on a phone keyboard.
+    val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val raw = result.contents ?: return@rememberLauncherForActivityResult
+        val paired = Pairing.parse(raw)
+        if (paired == null) {
+            scanFailed = true
+            scanNote = "That is not an Agent Remote pairing code. " +
+                "Open the web client, edit the daemon, and scan the code at the bottom."
+            return@rememberLauncherForActivityResult
+        }
+        scanFailed = false
+        url = paired.baseUrl
+        token = paired.token
+        // Only fill a name the user has not written themselves.
+        if (paired.name.isNotBlank() && name.isBlank()) name = paired.name
+        scanNote = "Scanned ${paired.baseUrl.removePrefix("https://").removePrefix("http://")}"
+    }
 
     val test by vm.testResult.collectAsStateWithLifecycle()
     val pal = palette
+    val uriHandler = LocalUriHandler.current
 
     Scaffold(
         topBar = {
@@ -261,6 +293,51 @@ fun ProfileEditorScreen(
                 .padding(horizontal = 16.dp),
         ) {
             Spacer(Modifier.height(8.dp))
+            // A profile is useless without a daemon; say what one is and
+            // where to get it before asking for its address.
+            Text(
+                text = "This app is a remote control for agentremoted, a small daemon that " +
+                    "runs on the computer where your coding agents live. Enter that " +
+                    "daemon's address and its token here.",
+                style = MaterialTheme.typography.bodySmall,
+                color = pal.dim,
+            )
+            TextButton(
+                onClick = { uriHandler.openUri(DAEMON_REPO_URL) },
+                contentPadding = PaddingValues(0.dp),
+            ) {
+                Text("Get the daemon and read the docs: github.com/jxw1102/agent-remote")
+            }
+            Spacer(Modifier.height(4.dp))
+            OutlinedButton(
+                onClick = {
+                    scanNote = ""
+                    scanner.launch(
+                        ScanOptions()
+                            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                            .setPrompt("Point at the pairing code on the Agent Remote web page")
+                            .setBeepEnabled(false)
+                            .setOrientationLocked(false),
+                    )
+                },
+            ) {
+                Icon(
+                    Icons.Outlined.QrCodeScanner,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Scan QR")
+            }
+            if (scanNote.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = scanNote,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (scanFailed) pal.danger else pal.ok,
+                )
+            }
+            Spacer(Modifier.height(4.dp))
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
@@ -291,7 +368,7 @@ fun ProfileEditorScreen(
                 value = token,
                 onValueChange = { token = it },
                 label = { Text("Token") },
-                supportingText = { Text("The contents of ~/.agentremoted/token on that host") },
+                supportingText = { Text("The contents of ~/.agentremoted/token on the daemon's host") },
                 singleLine = true,
                 visualTransformation = if (showToken) VisualTransformation.None
                 else PasswordVisualTransformation(),

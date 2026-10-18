@@ -13,8 +13,8 @@ android {
         applicationId = "com.bb10d.remote"
         minSdk = 26
         targetSdk = 36
-        versionCode = 12
-        versionName = "1.5.3"
+        versionCode = 14
+        versionName = "1.6.0"
         resourceConfigurations += listOf("en")
     }
 
@@ -115,6 +115,11 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended:1.7.8")
+
+    // QR pairing: the camera reads a daemon's address and token straight off
+    // the web client's profile page. Self-contained (its own decoder, no Play
+    // Services), which is what a sideloaded APK needs.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
