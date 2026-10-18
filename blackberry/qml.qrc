@@ -16,6 +16,7 @@
     <file alias="NewSessionSheet.qml">assets/NewSessionSheet.qml</file>
     <file alias="ProjectsPage.qml">assets/ProjectsPage.qml</file>
     <file alias="QuestionSheet.qml">assets/QuestionSheet.qml</file>
+    <file alias="ScanSheet.qml">assets/ScanSheet.qml</file>
     <file alias="QueueSheet.qml">assets/QueueSheet.qml</file>
     <file alias="SessionSheet.qml">assets/SessionSheet.qml</file>
     <file alias="SettingsSheet.qml">assets/SettingsSheet.qml</file>

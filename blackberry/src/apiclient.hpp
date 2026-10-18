@@ -272,6 +272,8 @@ class ApiClient : public QObject
     Q_PROPERTY(int tuiRev READ tuiRev NOTIFY tuiChanged)
     Q_PROPERTY(QString tuiText READ tuiText NOTIFY tuiChanged)
     Q_PROPERTY(QString tuiStatus READ tuiStatus NOTIFY tuiChanged)
+    // The soft Ctrl key's latch: BB10 keyboards have no Ctrl of their own.
+    Q_PROPERTY(bool tuiCtrlLatch READ tuiCtrlLatch NOTIFY tuiChanged)
     Q_PROPERTY(bool tuiAttached READ tuiAttached NOTIFY tuiChanged)
     Q_PROPERTY(bool tuiLive READ tuiLive NOTIFY tuiChanged)
     // [{id, prompt}] - the QueueSheet lists these with a cancel button each.
@@ -415,6 +417,7 @@ public:
     int tuiRev() const { return m_tuiRev; }
     QString tuiText() const { return m_tuiText; }
     QString tuiStatus() const { return m_tuiStatus; }
+    bool tuiCtrlLatch() const { return m_tuiCtrlLatch; }
     bool tuiAttached() const { return m_tuiAttached; }
     bool tuiLive() const { return m_tuiLive; }
 
@@ -509,6 +512,17 @@ public:
     Q_INVOKABLE void fetchUsage();
     // Open BRAND_USAGE_URL in the system browser (GrokRemote Usage menu).
     Q_INVOKABLE void openUsageInBrowser();
+    // Open an http(s) page in the system browser (the GitHub link on the
+    // profile form).
+    Q_INVOKABLE void openUrl(const QString &url);
+    // Pairing QR: the web client draws agentremote://profile?url=…&token=…
+    // &name=… on its daemon form, and the phone's camera reads it instead of
+    // the owner typing a 40-character token. Returns
+    // { ok, name, baseUrl, token }; ok=false for any other QR code.
+    Q_INVOKABLE QVariantMap parsePairingUri(const QString &text) const;
+    // Which profile already points at this address (-1 for none), so a scan
+    // updates that daemon's token instead of adding a twin.
+    Q_INVOKABLE int profileIndexForUrl(const QString &baseUrl) const;
     Q_INVOKABLE void fetchProjects();
     Q_INVOKABLE void setProjectFilter(const QString &projectId, const QString &name);
     // Full-text search over titles + message bodies. Empty query clears and
@@ -540,6 +554,12 @@ public:
     Q_INVOKABLE void stopLiveTui();
     Q_INVOKABLE void sendTuiKey(const QString &key);
     Q_INVOKABLE void sendTuiLine(const QString &text);
+    // The physical keyboard. QML hands over the raw Cascades KeyEvent fields
+    // and C++ decides what the key was - see the keycap rule in the .cpp.
+    Q_INVOKABLE void sendTuiKeyEvent(const QString &unicode, int keycap,
+                                     int key, bool ctrlPressed);
+    // Arm Ctrl for exactly one keystroke (the soft Ctrl button).
+    Q_INVOKABLE void toggleTuiCtrl();
     // Host->phone drop: list / download / delete files the agent staged.
     Q_INVOKABLE void fetchDropFiles();
     Q_INVOKABLE void downloadDropFile(const QString &name);
@@ -631,6 +651,9 @@ private Q_SLOTS:
     void onDropReplyFinished();
     void onDropIdle();
     void onDropRetry();
+    // Typed characters are coalesced for a few ms so a fast line is one POST
+    // instead of one per letter.
+    void flushTuiText();
     void pollJob();
     void pollTui();
     void onStatusFrame(const QByteArray &payload);
@@ -760,6 +783,10 @@ private:
     int m_tuiRev;
     QString m_tuiText;
     QString m_tuiStatus;
+    bool m_tuiCtrlLatch;
+    QString m_tuiTypeBuf;
+    bool m_tuiTypePending;
+    void typeTuiChar(const QString &ch);
     bool m_tuiAttached;
     bool m_tuiLive;
     // Coalesce session-search keystrokes (50ms after last change).

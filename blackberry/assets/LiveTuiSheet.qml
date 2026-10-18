@@ -26,6 +26,8 @@ Sheet {
         open();
     }
 
+    onOpened: keySink.requestFocus()
+
     onClosed: {
         showing = false;
         if (liveTuiSheet.api)
@@ -35,6 +37,35 @@ Sheet {
     function sendKey(name) {
         if (liveTuiSheet.api)
             liveTuiSheet.api.sendTuiKey(name);
+    }
+
+    // A soft key must not cost the keyboard: a Cascades Button takes focus
+    // when it is tapped, and the sink is the only node physical keys reach.
+    function softKey(name) {
+        liveTuiSheet.sendKey(name);
+        keySink.requestFocus();
+    }
+
+    function toggleCtrl() {
+        if (liveTuiSheet.api)
+            liveTuiSheet.api.toggleTuiCtrl();
+        keySink.requestFocus();
+    }
+
+    // THE PHYSICAL KEYBOARD. Everything Cascades knows goes to C++, which
+    // decides what the key was: `event.key` alone is not a character (a
+    // modifier arrives through it as a keycode with the top byte gone, which
+    // is how shift types an accented a), so only `keycap` tells them apart.
+    function onKey(ev) {
+        if (! liveTuiSheet.showing || ! liveTuiSheet.api)
+            return;
+        // The line box owns the keyboard whenever it has focus - that is
+        // where an input method composes, and none of it may leak into the
+        // terminal.
+        if (lineField.focused)
+            return;
+        liveTuiSheet.api.sendTuiKeyEvent(ev.unicode, ev.keycap, ev.key,
+                                         ev.ctrlPressed);
     }
 
     function sendLine() {
@@ -49,6 +80,16 @@ Sheet {
     }
 
     Page {
+        // On the PAGE, not on the focused node: key events propagate from the
+        // focused node up to the root, and are redirected to the root when
+        // nothing has focus at all. One listener catches both, so nothing
+        // double-fires.
+        keyListeners: [
+            KeyListener {
+                onKeyPressed: liveTuiSheet.onKey(event)
+            }
+        ]
+
         titleBar: TitleBar {
             // ASCII separators only — BB10 title bars mojibake UTF-8 middle dots.
             title: {
@@ -84,6 +125,21 @@ Sheet {
                     orientation: LayoutOrientation.LeftToRight
                 }
 
+                // BB10 keyboards have no Ctrl key of their own, so this one
+                // latches: tap it, then press a letter. Brackets rather than a
+                // tint say it is armed - plain ASCII, and no theme to fight.
+                Button {
+                    text: (liveTuiSheet.api && liveTuiSheet.api.tuiCtrlLatch)
+                          ? "[Ctrl]" : "Ctrl"
+                    layoutProperties: StackLayoutProperties { spaceQuota: 1 }
+                    preferredHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    minHeight: liveTuiSheet.api
+                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
+                    maxHeight: liveTuiSheet.api
+                              ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
+                    onClicked: liveTuiSheet.toggleCtrl()
+                }
                 Button {
                     text: "Esc"
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
@@ -93,7 +149,7 @@ Sheet {
                               ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
                     maxHeight: liveTuiSheet.api
                               ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
-                    onClicked: liveTuiSheet.sendKey("Escape")
+                    onClicked: liveTuiSheet.softKey("Escape")
                 }
                 Button {
                     text: "\u21E5"   // ⇥ Tab
@@ -104,7 +160,7 @@ Sheet {
                               ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
                     maxHeight: liveTuiSheet.api
                               ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
-                    onClicked: liveTuiSheet.sendKey("Tab")
+                    onClicked: liveTuiSheet.softKey("Tab")
                 }
                 Button {
                     text: "\u2191"   // ↑
@@ -115,7 +171,7 @@ Sheet {
                               ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
                     maxHeight: liveTuiSheet.api
                               ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
-                    onClicked: liveTuiSheet.sendKey("Up")
+                    onClicked: liveTuiSheet.softKey("Up")
                 }
                 Button {
                     text: "\u2193"   // ↓
@@ -126,7 +182,7 @@ Sheet {
                               ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
                     maxHeight: liveTuiSheet.api
                               ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
-                    onClicked: liveTuiSheet.sendKey("Down")
+                    onClicked: liveTuiSheet.softKey("Down")
                 }
                 Button {
                     text: "\u2190"   // ←
@@ -137,7 +193,7 @@ Sheet {
                               ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
                     maxHeight: liveTuiSheet.api
                               ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
-                    onClicked: liveTuiSheet.sendKey("Left")
+                    onClicked: liveTuiSheet.softKey("Left")
                 }
                 Button {
                     text: "\u2192"   // →
@@ -148,7 +204,7 @@ Sheet {
                               ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
                     maxHeight: liveTuiSheet.api
                               ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
-                    onClicked: liveTuiSheet.sendKey("Right")
+                    onClicked: liveTuiSheet.softKey("Right")
                 }
                 Button {
                     text: "^C"
@@ -159,7 +215,7 @@ Sheet {
                               ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
                     maxHeight: liveTuiSheet.api
                               ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
-                    onClicked: liveTuiSheet.sendKey("Ctrl+C")
+                    onClicked: liveTuiSheet.softKey("Ctrl+C")
                 }
                 Button {
                     text: "\u21B5"   // ↵ Enter
@@ -170,7 +226,7 @@ Sheet {
                               ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
                     maxHeight: liveTuiSheet.api
                               ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
-                    onClicked: liveTuiSheet.sendKey("Enter")
+                    onClicked: liveTuiSheet.softKey("Enter")
                 }
             }
 
@@ -196,6 +252,13 @@ Sheet {
                     rightPadding: 8
                     topPadding: 4
                     bottomPadding: 4
+
+                    // Tap the pane to take the keyboard back from the line box.
+                    gestureHandlers: [
+                        TapHandler {
+                            onTapped: keySink.requestFocus()
+                        }
+                    ]
 
                     Label {
                         text: liveTuiSheet.api
@@ -232,10 +295,30 @@ Sheet {
                     onTextChanging: {
                         liveTuiSheet.lineText = text;
                     }
+                    // Leaving the line box puts the physical keyboard back on
+                    // the terminal rather than nowhere.
+                    onFocusedChanged: {
+                        if (! focused && liveTuiSheet.showing)
+                            keySink.requestFocus();
+                    }
                     input {
                         submitKey: SubmitKey.Send
                         onSubmitted: liveTuiSheet.sendLine()
                     }
+                }
+                // THE FOCUS SINK, and the node physical keys are delivered
+                // to. Deliberately TINY: Cascades paints a focus highlight on
+                // whatever holds focus, and only text controls can turn it off
+                // - a big focused container paints the whole screen blue.
+                Container {
+                    id: keySink
+                    preferredWidth: 4
+                    preferredHeight: 4
+                    verticalAlignment: VerticalAlignment.Bottom
+                    // Not 0: a fully transparent control can be treated as
+                    // not-visible and skipped.
+                    opacity: 0.01
+                    focusPolicy: FocusPolicy.KeyAndTouch
                 }
                 Button {
                     text: qsTr("Send")
@@ -247,7 +330,10 @@ Sheet {
                     maxHeight: liveTuiSheet.api
                               ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
                     leftMargin: 6
-                    onClicked: liveTuiSheet.sendLine()
+                    onClicked: {
+                        liveTuiSheet.sendLine();
+                        keySink.requestFocus();
+                    }
                 }
             }
         }

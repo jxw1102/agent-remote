@@ -22,9 +22,11 @@ CONFIG += qt warn_on debug_and_release cascades
 # -lbacktrace: CrashGuard (QNX libbacktrace); -lm: stb_truetype (RichPaint);
 # -lbbcascadespickers: FilePicker for the attachment "+" button;
 # -lbbmultimedia -laudio_manager -lbbdevice: Chime (beeps on media volume,
-# LED flashes)
+# LED flashes); -lbbcascadesmultimedia: Camera + BarcodeDetector, the
+# profile-pairing QR scanner
 LIBS += -lbbdata -lbbsystem -lbb -lbbcascades -lbbcascadespickers \
-        -lbbmultimedia -laudio_manager -lbbdevice -lbacktrace -lm
+        -lbbcascadesmultimedia -lbbmultimedia -laudio_manager -lbbdevice \
+        -lbacktrace -lm
 
 SOURCES += $${PWD}/src/main.cpp \
            $${PWD}/src/applicationui.cpp \

@@ -119,6 +119,8 @@ Sheet {
 
     function fillForm(index) {
         editIndex = index;
+        // The scan note belongs to the form it filled, not to the next one.
+        scanLabel.visible = false;
         if (index < 0 || ! settingsSheet.api
                 || index >= settingsSheet.api.profiles.length) {
             nameField.text = "";
@@ -132,6 +134,35 @@ Sheet {
         tokenField.text = "" + (p.token || "");
         // Absent flag = enabled (profiles saved before the switch existed).
         enabledToggle.checked = (p.enabled === undefined) ? true : p.enabled;
+    }
+
+    // A pairing code was read: load it into the form. A code for a daemon
+    // that is already here edits THAT profile (same address twice means two
+    // chips and two of every poll); anything else becomes a new one. Nothing
+    // is saved until Done - the scan fills the form, the user confirms it.
+    function applyPairing(data) {
+        if (! data || data.ok !== true)
+            return;
+        var url = "" + (data.baseUrl || "");
+        var known = settingsSheet.api
+                    ? settingsSheet.api.profileIndexForUrl(url) : -1;
+        settingsSheet.editIndex = known;
+        urlField.text = url;
+        tokenField.text = "" + (data.token || "");
+        var scannedName = "" + (data.name || "");
+        if (known >= 0) {
+            var p = settingsSheet.api.profiles[known];
+            nameField.text = "" + ((p ? p.name : "") || scannedName);
+            enabledToggle.checked = (p && p.enabled !== undefined)
+                                    ? p.enabled : true;
+            scanLabel.text = qsTr("Scanned %1 - it is already here, so Done updates it.")
+                                 .arg(url);
+        }
+        else {
+            nameField.text = scannedName;
+            scanLabel.text = qsTr("Scanned %1 - tap Done to add it.").arg(url);
+        }
+        scanLabel.visible = true;
     }
 
     // Prefill the form from the active profile, then open the sheet.
@@ -277,6 +308,24 @@ Sheet {
                     }
                 }
 
+                // Typing a 40-character token on this keyboard is the worst
+                // part of adding a daemon, so let the camera do it: the web
+                // client puts the same address and token on screen as a QR.
+                Button {
+                    text: qsTr("Scan QR from the web client")
+                    topMargin: 8
+                    horizontalAlignment: HorizontalAlignment.Fill
+                    onClicked: scanSheet.show()
+                }
+                Label {
+                    id: scanLabel
+                    visible: false
+                    multiline: true
+                    topMargin: 4
+                    textStyle.fontSize: FontSize.XSmall
+                    textStyle.color: Color.create("#44cc66")
+                }
+
                 // ---- The selected (or new) profile's connection. ----
                 Label {
                     text: settingsSheet.editIndex < 0
@@ -286,6 +335,30 @@ Sheet {
                     textStyle.fontSize: FontSize.XSmall
                     textStyle.color: Color.create("#888888")
                 }
+                // A profile is useless without a daemon; say what one is and
+                // where to get it before asking for its address.
+                Label {
+                    text: qsTr("Agent Remote is a remote control for agentremoted, a small daemon that runs on the computer where your coding agents live. Enter that daemon's address and its token.")
+                    multiline: true
+                    topMargin: 8
+                    textStyle.fontSize: FontSize.XSmall
+                    textStyle.color: Color.create("#aaaaaa")
+                }
+                Label {
+                    text: qsTr("Get the daemon and read the docs: github.com/jxw1102/agent-remote")
+                    multiline: true
+                    topMargin: 4
+                    textStyle.fontSize: FontSize.XSmall
+                    textStyle.color: Color.create("#5aa9ff")
+                    gestureHandlers: [
+                        TapHandler {
+                            onTapped: {
+                                if (settingsSheet.api)
+                                    settingsSheet.api.openUrl("https://github.com/jxw1102/agent-remote");
+                            }
+                        }
+                    ]
+                }
                 TextField {
                     id: nameField
                     hintText: qsTr("Name (e.g. Mac, VPS)")
@@ -293,13 +366,13 @@ Sheet {
                 TextField {
                     id: urlField
                     topMargin: 8
-                    hintText: qsTr("http://host:port (agentremoted)")
+                    hintText: qsTr("Daemon address, e.g. http://host:8473")
                     inputMode: TextFieldInputMode.Url
                 }
                 TextField {
                     id: tokenField
                     topMargin: 8
-                    hintText: qsTr("token - python3 -m agentremoted --print-token")
+                    hintText: qsTr("Token (~/.agentremoted/token on that host)")
                 }
 
                 // Switch a daemon off without deleting it: Agent Remote polls
@@ -432,6 +505,13 @@ Sheet {
     attachedObjects: [
         ArrayDataModel {
             id: profilesModel
+        },
+        ScanSheet {
+            id: scanSheet
+            api: settingsSheet.api
+            onPaired: {
+                settingsSheet.applyPairing(data);
+            }
         },
         SystemDialog {
             id: deleteConfirm

@@ -65,6 +65,9 @@ const int UPLOAD_TIMEOUT_MS = 90 * 1000;
 const int UPLOAD_CHUNK_BYTES = 512 * 1024;
 // Inbox downloads have no total limit (a 1 GB file on EDGE is fine); only
 // this long without a single byte aborts, and a resumable file then retries.
+// Typed TUI characters wait this long for company: one POST per keystroke
+// is a round trip per letter on a phone link.
+const int TUI_TYPE_COALESCE_MS = 60;
 const int DOWNLOAD_IDLE_MS = 60 * 1000;
 const int DOWNLOAD_MAX_RETRIES = 8;
 // QNetworkAccessManager opens at most 6 connections per host; leave room
@@ -387,6 +390,8 @@ ApiClient::ApiClient(QObject *parent)
     , m_stepsLiveAtMs(0)
     , m_stepsLivePending(false)
     , m_dropProgressAtMs(0)
+    , m_tuiCtrlLatch(false)
+    , m_tuiTypePending(false)
     , m_dropNextId(0)
     , m_dropDoneCount(0)
     , m_dropDoneBytes(0)
@@ -2063,16 +2068,74 @@ void ApiClient::fetchUsage()
 
 void ApiClient::openUsageInBrowser()
 {
-    const QString url = QLatin1String(BRAND_USAGE_URL);
-    if (url.isEmpty())
+    openUrl(QLatin1String(BRAND_USAGE_URL));
+}
+
+void ApiClient::openUrl(const QString &url)
+{
+    const QString clean = url.trimmed();
+    if (!clean.startsWith(QLatin1String("http://"))
+            && !clean.startsWith(QLatin1String("https://")))
         return;
     // No explicit target: the invocation framework routes bb.action.OPEN
     // for https:// to the system browser (same pattern as mdreader / Flipper).
     static bb::system::InvokeManager manager;
     bb::system::InvokeRequest request;
     request.setAction("bb.action.OPEN");
-    request.setUri(QUrl(url));
+    request.setUri(QUrl(clean));
     manager.invoke(request);
+}
+
+QVariantMap ApiClient::parsePairingUri(const QString &text) const
+{
+    QVariantMap out;
+    out["ok"] = false;
+    const QString raw = text.trimmed();
+    const QString prefix = QLatin1String("agentremote://profile?");
+    if (!raw.startsWith(prefix, Qt::CaseInsensitive))
+        return out;
+
+    QString name, url, token;
+    const QStringList pairs = raw.mid(prefix.length()).split(QLatin1Char('&'),
+                                                             QString::SkipEmptyParts);
+    for (int i = 0; i < pairs.size(); ++i) {
+        const int eq = pairs.at(i).indexOf(QLatin1Char('='));
+        if (eq <= 0)
+            continue;
+        const QString key = pairs.at(i).left(eq).toLower();
+        // fromPercentEncoding leaves a literal '+' alone, which a token may
+        // legitimately contain; QUrl's query parsing would eat it as a space.
+        const QString value = QUrl::fromPercentEncoding(
+                    pairs.at(i).mid(eq + 1).toUtf8());
+        if (key == QLatin1String("name"))
+            name = value;
+        else if (key == QLatin1String("url"))
+            url = value;
+        else if (key == QLatin1String("token"))
+            token = value;
+    }
+    if (url.trimmed().isEmpty())
+        return out;
+
+    out["ok"] = true;
+    out["name"] = name.trimmed();
+    out["baseUrl"] = normalizeBaseUrl(url);
+    out["token"] = token.trimmed();
+    return out;
+}
+
+int ApiClient::profileIndexForUrl(const QString &baseUrl) const
+{
+    const QString want = normalizeBaseUrl(baseUrl);
+    if (want.isEmpty())
+        return -1;
+    for (int i = 0; i < m_profiles.size(); ++i) {
+        const QVariantMap p = m_profiles.at(i).toMap();
+        if (normalizeBaseUrl(p.value("baseUrl").toString()).compare(
+                    want, Qt::CaseInsensitive) == 0)
+            return i;
+    }
+    return -1;
 }
 
 void ApiClient::fetchProjects()
@@ -2924,6 +2987,8 @@ void ApiClient::startLiveTui()
     m_tuiOpen = true;
     m_tuiInFlight = false;
     m_tuiSeq = 0;
+    m_tuiCtrlLatch = false;
+    m_tuiTypeBuf.clear();
     m_tuiText = tr("Connecting to host TUI…");
     m_tuiStatus = tr("Host TUI");
     m_tuiAttached = false;
@@ -2937,8 +3002,11 @@ void ApiClient::startLiveTui()
 
 void ApiClient::stopLiveTui()
 {
+    // Whatever was typed in the last few ms still belongs to the host.
+    flushTuiText();
     m_tuiOpen = false;
     m_tuiInFlight = false;
+    m_tuiCtrlLatch = false;
     m_tuiTimer.stop();
 }
 
@@ -2959,13 +3027,133 @@ void ApiClient::sendTuiKey(const QString &key)
 {
     if (!m_tuiOpen || m_currentSessionId.isEmpty() || key.trimmed().isEmpty())
         return;
+    QString name = key.trimmed();
+    // The soft Ctrl key arms exactly one keystroke. "^C" already carries its
+    // own Ctrl, so a latch held over it never doubles into "Ctrl+Ctrl+C".
+    if (m_tuiCtrlLatch) {
+        if (!name.startsWith(QLatin1String("Ctrl+"), Qt::CaseInsensitive))
+            name = QLatin1String("Ctrl+") + name;
+        m_tuiCtrlLatch = false;
+        m_tuiRev++;
+        emit tuiChanged();
+    }
     QVariantMap body;
+    // Anything typed but not yet flushed rides in the SAME request: the
+    // daemon writes the literal text before the key tokens, so "ab" then
+    // Enter cannot land as Enter then "ab" the way two racing POSTs could.
+    if (!m_tuiTypeBuf.isEmpty()) {
+        body["text"] = m_tuiTypeBuf;
+        m_tuiTypeBuf.clear();
+    }
     QVariantList keys;
-    keys.append(key.trimmed());
+    keys.append(name);
     body["keys"] = keys;
     const QString path = QString("/api/sessions/%1/tui/keys")
             .arg(QString::fromUtf8(QUrl::toPercentEncoding(m_currentSessionId)));
     post(path, body, "tui_keys");
+}
+
+void ApiClient::toggleTuiCtrl()
+{
+    m_tuiCtrlLatch = !m_tuiCtrlLatch;
+    m_tuiRev++;
+    emit tuiChanged();
+}
+
+void ApiClient::typeTuiChar(const QString &ch)
+{
+    if (!m_tuiOpen || m_currentSessionId.isEmpty() || ch.isEmpty())
+        return;
+    m_tuiTypeBuf += ch;
+    if (m_tuiTypePending)
+        return;
+    m_tuiTypePending = true;
+    QTimer::singleShot(TUI_TYPE_COALESCE_MS, this, SLOT(flushTuiText()));
+}
+
+void ApiClient::flushTuiText()
+{
+    m_tuiTypePending = false;
+    if (m_tuiTypeBuf.isEmpty())
+        return;
+    const QString text = m_tuiTypeBuf;
+    m_tuiTypeBuf.clear();
+    if (!m_tuiOpen || m_currentSessionId.isEmpty())
+        return;
+    QVariantMap body;
+    body["text"] = text;
+    const QString path = QString("/api/sessions/%1/tui/keys")
+            .arg(QString::fromUtf8(QUrl::toPercentEncoding(m_currentSessionId)));
+    post(path, body, "tui_keys");
+}
+
+namespace {
+
+// X11 keysym -> the name the daemon's map_key() understands.
+QString tuiKeyNameForKeysym(int ks)
+{
+    switch (ks) {
+    case 0xFF1B: return QLatin1String("Escape");
+    case 0xFF08: return QLatin1String("Backspace");
+    case 0xFF09: return QLatin1String("Tab");
+    case 0xFF0D: return QLatin1String("Enter");
+    case 0xFF50: return QLatin1String("Home");
+    case 0xFF51: return QLatin1String("Left");
+    case 0xFF52: return QLatin1String("Up");
+    case 0xFF53: return QLatin1String("Right");
+    case 0xFF54: return QLatin1String("Down");
+    case 0xFF55: return QLatin1String("PageUp");
+    case 0xFF56: return QLatin1String("PageDown");
+    case 0xFF57: return QLatin1String("End");
+    case 0xFF63: return QLatin1String("Insert");
+    case 0xFFFF: return QLatin1String("Delete");
+    default: break;
+    }
+    if (ks >= 0xFFBE && ks <= 0xFFC9)   // F1 - F12
+        return QString("F%1").arg(ks - 0xFFBE + 1);
+    return QString();
+}
+
+} // namespace
+
+// KEYCAP DECIDES WHAT A KEY IS - not `key`, and not `unicode`. Measured on a
+// Passport (bb10-porthole 1.0.25): a real character arrives keycap=0x61
+// key=0x61 uni='a', backspace keycap=0xF008, and LEFT SHIFT keycap=0xF0E1
+// key=0xE1 uni='a-acute'. QNX codes every non-character key as
+// 0xF000 | (X11 keysym & 0x0FFF), and `keycap` carries that intact while
+// `key` arrives with the top byte gone and the platform derives `unicode`
+// from what is left - so trusting either one types an accented a every time
+// shift is pressed.
+void ApiClient::sendTuiKeyEvent(const QString &unicode, int keycap, int key,
+                                bool ctrlPressed)
+{
+    if (!m_tuiOpen || m_currentSessionId.isEmpty())
+        return;
+    if ((keycap & 0xFF00) == 0xF000) {
+        const int ks = 0xFF00 | (keycap & 0xFF);
+        // The modifiers are the keyboard's own business: shift retoggles its
+        // layout and the NEXT key arrives capitalised.
+        if (ks >= 0xFFE1 && ks <= 0xFFEE)
+            return;
+        const QString name = tuiKeyNameForKeysym(ks);
+        if (name.isEmpty())
+            return;   // a key we have no token for; its low byte is not text
+        sendTuiKey(name);
+        return;
+    }
+    // A character key: the platform has already applied shift and the Alt
+    // symbol layer, so what it produced is what the terminal should receive.
+    QString ch = unicode;
+    if (ch.isEmpty() && key > 0 && key < 0x10000)
+        ch = QString(QChar(key));
+    if (ch.isEmpty())
+        return;
+    // A chord is a key token, never literal text.
+    if (ctrlPressed || m_tuiCtrlLatch) {
+        sendTuiKey(QLatin1String("Ctrl+") + ch);
+        return;
+    }
+    typeTuiChar(ch);
 }
 
 void ApiClient::sendTuiLine(const QString &text)
