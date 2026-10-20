@@ -2,12 +2,16 @@
 #
 #   powershell -ExecutionPolicy Bypass -File daemon\scripts\install-windows.ps1
 #   powershell -ExecutionPolicy Bypass -File daemon\scripts\install-windows.ps1 -Provider grok -Port 8473
+#
+# Without -Provider the harnesses installed on PATH are detected and enabled
+# (claude, grok, codex, cursor-agent, copilot, codebuddy, dsh); claude is the
+# fallback when none is found.
 #   powershell -ExecutionPolicy Bypass -File daemon\scripts\install-windows.ps1 -Uninstall
 #
 # No admin rights: the daemon runs from a Scheduled Task at logon, which
 # also restarts it if it exits. Data lives in %USERPROFILE%\.agentremoted.
 param(
-    [string]$Provider = "claude",
+    [string]$Provider = "",
     [int]$Port = 8473,
     [string]$Bind = "127.0.0.1",
     [switch]$Uninstall
@@ -26,6 +30,31 @@ if ($Uninstall) {
 
 $DaemonDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
+# -Provider is a seed for config.json, not a Windows requirement: the daemon
+# mounts only the harnesses listed there. Detect the installed CLIs so a
+# fresh box does not end up with a provider it does not have.
+if (-not $Provider) {
+    $candidates = @(
+        @{ name = "claude";    bin = "claude" },
+        @{ name = "grok";      bin = "grok" },
+        @{ name = "codex";     bin = "codex" },
+        @{ name = "cursor";    bin = "cursor-agent" },
+        @{ name = "copilot";   bin = "copilot" },
+        @{ name = "codebuddy"; bin = "codebuddy" },
+        @{ name = "deepseek";  bin = "dsh" }
+    )
+    $found = @()
+    foreach ($c in $candidates) {
+        if (Get-Command $c.bin -ErrorAction SilentlyContinue) { $found += $c.name }
+    }
+    if ($found.Count -eq 0) {
+        $found = @("claude")
+        Write-Warning "No harness CLI found on PATH; enabling claude. Install one and re-run with -Provider."
+    }
+    $Provider = ($found -join ",")
+    Write-Host "Detected harnesses: $Provider"
+}
+
 # Find a real python.exe (the py launcher is a wrapper, not an executable).
 $PyExe = ""
 $py = Get-Command python -ErrorAction SilentlyContinue
@@ -42,8 +71,9 @@ New-Item -ItemType Directory -Force -Path $HomeDir | Out-Null
 
 $cfgPath = Join-Path $HomeDir "config.json"
 if (-not (Test-Path $cfgPath)) {
+    $providers = @($Provider.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $cfg = [ordered]@{
-        providers   = @($Provider)
+        providers   = $providers
         port        = $Port
         bind        = $Bind
         turn_timeout = 1800

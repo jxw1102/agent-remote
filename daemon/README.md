@@ -19,6 +19,12 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.18.1** The Windows installer enables the harnesses it finds. `-Provider`
+was only ever a seed for `config.json`, but defaulting it to claude enabled
+a CLI a fresh box may not have. Without the flag the script now detects
+claude/grok/codex/cursor-agent/copilot/codebuddy/dsh on PATH and writes that
+list, falling back to claude when nothing is found.
+
 **2.18.0** Provider colours come from the daemon. /api/ping now carries a
 `palette` per provider (single mount) and `palettes` + `provider_details.*.
 palette` (multi), and /api/share/<token> carries one for the share page.
@@ -460,9 +466,15 @@ launchctl kickstart -k "gui/$(id -u)/com.agentremoted"
 Script: [`scripts/install-windows.ps1`](scripts/install-windows.ps1)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Provider claude -Port 8473
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Provider grok -Port 8473
 powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Uninstall
 ```
+
+`-Provider` is only a seed for `config.json` (the daemon mounts what is
+listed there). Omit it and the script enables the harnesses it finds on PATH
+(claude, grok, codex, cursor-agent, copilot, codebuddy, dsh), falling back to
+claude when none is found.
 
 It writes `%USERPROFILE%\.agentremoted\config.json` (kept if present), a token,
 and a `run-agentremoted.cmd`, then registers the `agentremoted` task at logon
