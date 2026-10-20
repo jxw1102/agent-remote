@@ -965,9 +965,35 @@ function toast(message) {
 
 // --------------------------------------------------------------- profiles
 
+/** Provider colours: the daemon owns them (palette / palettes in ping).
+ *  PROVIDERS stays as the offline/older-daemon fallback. */
+function applyRemotePalettes(ping) {
+  const map = (ping && ping.palettes) || {};
+  if (!Object.keys(map).length && ping && ping.palette && ping.provider) {
+    map[ping.provider] = ping.palette;
+  }
+  let changed = false;
+  Object.entries(map).forEach(([name, p]) => {
+    if (!p || !p.accent) return;
+    const cur = PROVIDERS[name] || {};
+    if (cur.accent === p.accent && (!p.heading || cur.heading === p.heading)
+        && (!p.inline || cur.inline === p.inline)) return;
+    PROVIDERS[name] = {
+      ...cur,
+      ...(p.label ? { label: p.label } : {}),
+      accent: p.accent || cur.accent,
+      heading: p.heading || cur.heading,
+      inline: p.inline || cur.inline,
+    };
+    changed = true;
+  });
+  return changed;
+}
+
 async function pingProfile(profile) {
   try {
     const ping = await call(profile, "/api/ping", { timeout: 10000 });
+    if (applyRemotePalettes(ping)) render();
     profile.provider = ping.provider || "";
     profile.caps = ping.caps || {};
     profile.slashCommands = ping.slash_commands || [];

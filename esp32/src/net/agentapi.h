@@ -48,6 +48,10 @@ void setDaemonCount(int count);
 int daemonCount();
 void configure(int idx, const String &baseUrl, const String &token);
 bool ping(int daemon, String *versionOut = nullptr, String *errOut = nullptr);
+
+// Brand accent from the daemon's /api/ping (palettes[provider].accent),
+// learned on the last ping. 0 = unknown, caller uses its built-in colour.
+uint32_t providerAccentRgb(const String &provider);
 bool fetchSessions(int daemon, std::vector<SessionRow> *out,
                    String *errOut = nullptr);
 // Focus rows only (GET /api/focus), most urgent first. The pager shows

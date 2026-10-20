@@ -218,6 +218,10 @@ void cue(chime::Cue c) {
 
 // Brand accents shared with Android/web (Theme.kt Accent).
 lv_color_t providerColor(const String &p) {
+  // The daemon owns the palette; fall back to the built-ins below when it
+  // did not announce one (older firmware/daemon).
+  const uint32_t remote = agentapi::providerAccentRgb(p);
+  if (remote) return lv_color_hex(remote);
   if (p.startsWith("cl")) return lv_color_hex(0xd97757);  // Claude warm orange
   if (p.startsWith("cu")) return lv_color_hex(0xd946ef);  // Cursor magenta
   // "cop" before "co": Copilot would otherwise take Codex's teal.

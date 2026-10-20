@@ -299,6 +299,16 @@ check("codebuddy usage models",
       any("test-model" in (b.get("resets_text") or "") for b in _ub), _ub)
 check("codebuddy advertises usage", runner.capabilities().get("can_show_usage") is True)
 
+# Provider colours come from the daemon, not from each client.
+from agentremoted import palette as palette_mod            # noqa: E402
+check("codebuddy palette",
+      palette_mod.palette_for("codebuddy").get("accent") == "#58c08b"
+      and palette_mod.palette_for("codebuddy").get("heading") == "#7fd4a8")
+check("palette aliases resolve",
+      palette_mod.palette_for("dsh").get("accent") == "#4d6bfe"
+      and palette_mod.palette_for("cbc").get("accent") == "#58c08b")
+check("unknown provider has no palette", palette_mod.palette_for("nope") == {})
+
 check("titler project not listed",
       all(p["id"] != "-agentremoted-titler" for p in store.list_projects()),
       [p["id"] for p in store.list_projects()])

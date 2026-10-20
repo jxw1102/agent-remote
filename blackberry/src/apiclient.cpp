@@ -552,11 +552,36 @@ QString ApiClient::agentName() const
     return QLatin1String(BRAND_AGENT_NAME);
 }
 
+QString ApiClient::paletteColor(const QString &provider,
+                                 const QString &role,
+                                 const QString &fallback) const
+{
+    if (m_activeProfile >= 0 && m_activeProfile < m_profiles.size()) {
+        const QVariantMap prof = m_profiles.at(m_activeProfile).toMap();
+        QVariantMap pal;
+        const QVariantMap palettes = prof.value("palettes").toMap();
+        if (palettes.contains(provider))
+            pal = palettes.value(provider).toMap();
+        if (pal.isEmpty()) {
+            const QVariantMap details = prof.value("provider_details").toMap();
+            pal = details.value(provider).toMap().value("palette").toMap();
+        }
+        if (pal.isEmpty()
+                && prof.value("provider").toString() == provider)
+            pal = prof.value("palette").toMap();
+        const QString value = pal.value(role).toString();
+        if (!value.isEmpty())
+            return value;
+    }
+    return fallback;
+}
+
 QString ApiClient::providerAccent(const QString &provider) const
 {
     const ProviderPalette *pal = palForProvider(provider);
-    return pal ? QString::fromLatin1(pal->accent)
-               : QString::fromLatin1(BRAND_ACCENT_COLOR);
+    return paletteColor(provider, "accent",
+                        pal ? QString::fromLatin1(pal->accent)
+                            : QString::fromLatin1(BRAND_ACCENT_COLOR));
 }
 
 // File-local helper: BB10 GCC 4.6 has no C++11 lambdas. Tags usage buckets
@@ -856,7 +881,9 @@ QString ApiClient::themeBannerBg() const
 {
 #ifdef VARIANT_UNIFIED
     const ProviderPalette *pal = palForProvider(themeProvider());
-    if (pal) return QString::fromLatin1(pal->bannerBg);
+    return paletteColor(themeProvider(), "banner_bg",
+                        pal ? QString::fromLatin1(pal->bannerBg)
+                            : QLatin1String(BRAND_BANNER_BG));
 #endif
     return QLatin1String(BRAND_BANNER_BG);
 }
@@ -864,7 +891,9 @@ QString ApiClient::themeBannerText() const
 {
 #ifdef VARIANT_UNIFIED
     const ProviderPalette *pal = palForProvider(themeProvider());
-    if (pal) return QString::fromLatin1(pal->bannerText);
+    return paletteColor(themeProvider(), "banner_text",
+                        pal ? QString::fromLatin1(pal->bannerText)
+                            : QLatin1String(BRAND_BANNER_TEXT));
 #endif
     return QLatin1String(BRAND_BANNER_TEXT);
 }
@@ -873,7 +902,9 @@ QString ApiClient::themeLiveWell() const
 {
 #ifdef VARIANT_UNIFIED
     const ProviderPalette *pal = palForProvider(themeProvider());
-    if (pal) return QString::fromLatin1(pal->liveWell);
+    return paletteColor(themeProvider(), "live_well",
+                        pal ? QString::fromLatin1(pal->liveWell)
+                            : QLatin1String(BRAND_LIVE_WELL));
 #endif
     return QLatin1String(BRAND_LIVE_WELL);
 }
@@ -881,7 +912,9 @@ QString ApiClient::themeHeading() const
 {
 #ifdef VARIANT_UNIFIED
     const ProviderPalette *pal = palForProvider(themeProvider());
-    if (pal) return QString::fromLatin1(pal->heading);
+    return paletteColor(themeProvider(), "heading",
+                        pal ? QString::fromLatin1(pal->heading)
+                            : QLatin1String(BRAND_RICH_HEADING));
 #endif
     return QLatin1String(BRAND_RICH_HEADING);
 }
@@ -889,7 +922,9 @@ QString ApiClient::themeMetaThought() const
 {
 #ifdef VARIANT_UNIFIED
     const ProviderPalette *pal = palForProvider(themeProvider());
-    if (pal) return QString::fromLatin1(pal->thought);
+    return paletteColor(themeProvider(), "thought",
+                        pal ? QString::fromLatin1(pal->thought)
+                            : QLatin1String(BRAND_META_THOUGHT));
 #endif
     return QLatin1String(BRAND_META_THOUGHT);
 }
@@ -1911,13 +1946,18 @@ QString ApiClient::remapAccent(const QString &rich) const
     if (rich.isEmpty())
         return rich;
     const ProviderPalette *pal = palForProvider(m_provider);
-    if (!pal || m_provider == QLatin1String("grok"))
+    const QString inlineCol = paletteColor(
+        m_provider, "inline",
+        pal ? QString::fromLatin1(pal->inlineCode) : QString());
+    const QString headingCol = paletteColor(
+        m_provider, "heading",
+        pal ? QString::fromLatin1(pal->heading) : QString());
+    if (inlineCol.isEmpty() || headingCol.isEmpty())
         return rich;
     QString s = rich;
-    s.replace(QLatin1String(WIRE_RICH_INLINE),
-              QLatin1String(pal->inlineCode), Qt::CaseInsensitive);
-    s.replace(QLatin1String(WIRE_RICH_HEADING),
-              QLatin1String(pal->heading), Qt::CaseInsensitive);
+    s.replace(QLatin1String(WIRE_RICH_INLINE), inlineCol, Qt::CaseInsensitive);
+    s.replace(QLatin1String(WIRE_RICH_HEADING), headingCol,
+              Qt::CaseInsensitive);
     s.replace(QLatin1String(WIRE_META_THOUGHT),
               QLatin1String(pal->thought), Qt::CaseInsensitive);
     return s;

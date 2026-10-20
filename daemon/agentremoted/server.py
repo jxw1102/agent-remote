@@ -95,6 +95,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote, quote
 
 from . import __version__
+from . import palette
 from . import accounts
 from . import focus as focus_store
 from . import shares as share_store
@@ -1634,10 +1635,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "metaKind": m.get("metaKind") or "",
             })
         title = str(session.get("title") or rec.get("title") or "").strip()
+        provider = rec.get("provider") or session.get("provider") or ""
         return {
             "ok": True,
             "title": title or "Shared session",
-            "provider": rec.get("provider") or session.get("provider") or "",
+            "provider": provider,
+            # Colours travel with the data: the share page is standalone and
+            # cannot call /api/ping (no token). Built-in palette is fallback.
+            "palette": palette.palette_for(provider),
             "last_active": session.get("last_active") or "",
             "expires_at": rec["expires_at"],
             "expires_in": max(0, int(rec["expires_at"] - time.time())),
@@ -1925,6 +1930,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 for name, b in bundle_items:
                     details[name] = {
                         "caps": b.runner.capabilities(),
+                        # Brand colours: one source of truth for every
+                        # client (they keep a built-in fallback).
+                        "palette": palette.palette_for(name),
                     }
                     auth_fn = getattr(b.runner, "auth_health", None)
                     if callable(auth_fn):
@@ -1983,6 +1991,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                         elif key not in union:
                             union[key] = val
                 payload["caps"] = union
+                # Flat view of the same palettes, for clients that only read
+                # the root payload.
+                payload["palettes"] = palette.palettes_for(provider_names)
                 # Focus list support: clients gate the mode toggle,
                 # rename, and regenerate on this flag.
                 payload["focus"] = self.focus is not None
@@ -2004,6 +2015,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "host": platform.node(),
                 "provider": self.runner.name,
                 "caps": self.runner.capabilities(),
+                "palette": palette.palette_for(self.runner.name),
             }
             auth_fn = getattr(self.runner, "auth_health", None)
             if callable(auth_fn):

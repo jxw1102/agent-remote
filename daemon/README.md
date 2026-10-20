@@ -19,6 +19,15 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.18.0** Provider colours come from the daemon. /api/ping now carries a
+`palette` per provider (single mount) and `palettes` + `provider_details.*.
+palette` (multi), and /api/share/<token> carries one for the share page.
+Clients use it and fall back to their built-in palette when it is absent:
+web and the share page merge it into PROVIDERS at ping time, BlackBerry's
+theme getters consult it (ProviderPalette stays the fallback), and the pager
+remembers `palettes[provider].accent`. Android still renders its built-in
+Accent enum (identical values) until its theme layer is data-driven.
+
 **2.17.1** Codex wears indigo (#484cf4) instead of teal, with matching
 heading/inline variants on web, Android, BlackBerry and the pager.
 

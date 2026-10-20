@@ -475,6 +475,10 @@ public:
     // Accent hex for a provider name ("claude"/"grok"/"codex"/"cursor"/other) - the
     // QML profile chips color themselves with this.
     Q_INVOKABLE QString providerAccent(const QString &provider) const;
+    // Palette colour from the daemon's /api/ping (palette / palettes), with
+    // the built-in ProviderPalette as the fallback for older daemons.
+    QString paletteColor(const QString &provider, const QString &role,
+                         const QString &fallback) const;
     // Active profile's harness list (multi daemon → claude/grok/codex).
     Q_INVOKABLE QStringList profileHarnesses() const;
     // requires_cwd for a specific harness on a multi host (else profile caps).

@@ -4,14 +4,43 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
+#include <cstdlib>
 
 namespace agentapi {
 namespace {
 
 constexpr int kMax = 3;
+constexpr int kAccents = 8;
 String g_base[kMax];
 String g_token[kMax];
 int g_count = 0;
+
+// Palettes learned from /api/ping: 0 means "not announced", so the UI keeps
+// its built-in colour (older daemons never send the field).
+struct AccentEntry { String provider; uint32_t rgb; };
+AccentEntry g_accents[kAccents];
+int g_accentCount = 0;
+
+uint32_t parseHex(const char *s) {
+  if (!s || s[0] != '#') return 0;
+  return (uint32_t)strtoul(s + 1, nullptr, 16);
+}
+
+void rememberAccent(const String &provider, const char *hex) {
+  const uint32_t rgb = parseHex(hex);
+  if (!rgb || !provider.length()) return;
+  for (int i = 0; i < g_accentCount; ++i) {
+    if (g_accents[i].provider == provider) {
+      g_accents[i].rgb = rgb;
+      return;
+    }
+  }
+  if (g_accentCount < kAccents) {
+    g_accents[g_accentCount].provider = provider;
+    g_accents[g_accentCount].rgb = rgb;
+    ++g_accentCount;
+  }
+}
 
 // One TLS client for every call, guarded by a mutex: each WiFiClientSecure
 // costs ~40 KB of heap during a session, and three of them alongside NimBLE
@@ -151,7 +180,26 @@ bool ping(int daemon, String *versionOut, String *errOut) {
     return false;
   }
   if (versionOut) *versionOut = doc["version"] | "";
+  // Colours: {palettes:{provider:{accent}}} on multi daemons, {palette:{…},
+  // provider} on single ones. Absent on older daemons -> keep built-ins.
+  JsonObject palettes = doc["palettes"].as<JsonObject>();
+  if (!palettes.isNull()) {
+    for (JsonPair kv : palettes) {
+      const char *accent = kv.value()["accent"] | "";
+      rememberAccent(String(kv.key().c_str()), accent);
+    }
+  } else {
+    const char *accent = (doc["palette"])["accent"] | "";
+    const char *provider = doc["provider"] | "";
+    if (accent[0] && provider[0]) rememberAccent(String(provider), accent);
+  }
   return doc["ok"] | false;
+}
+
+uint32_t providerAccentRgb(const String &provider) {
+  for (int i = 0; i < g_accentCount; ++i)
+    if (g_accents[i].provider == provider) return g_accents[i].rgb;
+  return 0;
 }
 
 const char *focusStateLabel(const String &state) {

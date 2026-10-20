@@ -104,9 +104,12 @@ function empty(title, detail) {
   return box;
 }
 
-function applyAccent(provider) {
+function applyAccent(provider, palette) {
   const p = String(provider || "").toLowerCase();
-  const accent = p === "grok" ? "#00d4ff"
+  // The daemon ships its palette with the share payload; this chain is the
+  // fallback for older daemons and offline copies.
+  const accent = (palette && palette.accent) ? palette.accent
+    : p === "grok" ? "#00d4ff"
     : p === "claude" ? "#d97757"
     : p === "codex" ? "#484cf4"
     : (p === "deepseek" || p === "dsh") ? "#4d6bfe"
@@ -157,7 +160,7 @@ async function load() {
     return;
   }
 
-  applyAccent(data.provider);
+  applyAccent(data.provider, data.palette);
   $("share-title").textContent = data.title || "Shared session";
   document.title = (data.title || "Shared session") + " · Agent Remote";
   const bits = [];
