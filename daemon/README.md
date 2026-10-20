@@ -19,6 +19,16 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.18.3** Questions in panes the daemon is not driving reach the phone.
+A question or permission dialog can appear in a TUI the daemon only adopted -
+the human typed in a terminal, or the turn ended while the panel was up - and
+the turn loop only watches panes it drives, so the CLI sat blocked and no
+client ever saw it. A pane watcher now polls those panes and publishes what
+it finds as a job (no turn), which is exactly what clients already poll and
+answer. Separately, CodeBuddy's tool arguments are a JSON string whose
+"questions" is itself a JSON string; unfolded, the question never reached the
+phone at all.
+
 **2.18.2** A CodeBuddy session's model is no longer "default". The ptc
 `function_call` records carry `providerData.model`; folding them now keeps it
 on the record, so sessions whose assistant text omits the model still report

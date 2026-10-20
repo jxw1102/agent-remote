@@ -62,6 +62,11 @@ class Job:
         # Harness name (claude/grok/codex) for guest provider allow-lists.
         self.provider = ""
         self.status = "starting"           # starting|running|done|error|stopped
+        # A "watch" job carries a question for a pane the daemon is not
+        # driving (the CLI asked from a terminal). It runs no turn, so it
+        # is not persisted and never resumed - the pane watcher re-publishes
+        # the question after a restart.
+        self.watch = False
         self.error = ""
         self.result_text = ""
         self.events = []                   # [{seq, kind, text, ...}]
@@ -454,7 +459,7 @@ class JobManager:
         """Write starting/running jobs so a restart can resume them."""
         with self.lock:
             active = [j for j in self.jobs.values()
-                      if j.status in ("starting", "running")]
+                      if j.status in ("starting", "running") and not j.watch]
             rows = [j.to_dict() for j in active]
         path = self._jobs_path()
         try:
@@ -560,6 +565,27 @@ class JobManager:
         self._flush_active()
         thread = threading.Thread(target=self._run, args=(job, permission_mode), daemon=True)
         thread.start()
+        return job
+
+    def new_watch_job(self, session_id: str, provider: str = "",
+                          account: str = "main") -> Job:
+        """A job that exists only to carry a question for an idle pane.
+
+        The CLI asked something in a TUI the daemon only adopted, so no turn
+        owns it and no client had a job to poll. The question rides on this
+        one: clients already poll /api/jobs/<id> and answer through
+        /api/jobs/<id>/question, so nothing else has to change.
+        """
+        job = Job(uuid.uuid4().hex[:12], session_id, "", "")
+        job.provider = str(provider or getattr(self.runner, "name", "") or "").strip().lower()
+        job.account = str(account or "main")
+        job.status = "running"
+        job.watch = True
+        job.set_phase("asking", "question")
+        with self.lock:
+            self.jobs[job.id] = job
+            self._prune_locked()
+        self._flush_active()
         return job
 
     def get(self, job_id: str) -> Job:

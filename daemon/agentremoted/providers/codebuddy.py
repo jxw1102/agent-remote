@@ -141,6 +141,18 @@ def _ptc_record(obj):
             args = {}
         if not isinstance(args, dict):
             args = {}
+        # CodeBuddy sends tool arguments as a JSON *string* whose values may
+        # themselves be JSON strings: AskUserQuestion arrives as
+        # {"questions": "[{...}]"}. Unwrap that, or the question never
+        # reaches the phone at all (the list is a string, not a list).
+        _q = args.get("questions")
+        if isinstance(_q, str):
+            try:
+                _parsed = json.loads(_q)
+            except ValueError:
+                _parsed = None
+            if isinstance(_parsed, list):
+                args["questions"] = _parsed
         message = {"role": "assistant", "content": [{
             "type": "tool_use",
             "id": obj.get("callId") or obj.get("id"),
@@ -388,7 +400,7 @@ class CodebuddyRunner:
         with self._interactive_lock:
             if self._interactive is None:
                 from .codebuddy_interactive import CodebuddyInteractiveManager
-                self._interactive = CodebuddyInteractiveManager(self.config)
+                self._interactive = CodebuddyInteractiveManager(self.config, self)
             return self._interactive
 
     def run_alternate(self, job, mode) -> bool:

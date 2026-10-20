@@ -2233,7 +2233,7 @@ class ClaudeRunner:
         with self._interactive_lock:
             if self._interactive is None:
                 from .claude_interactive import InteractiveManager
-                self._interactive = InteractiveManager(self.config)
+                self._interactive = InteractiveManager(self.config, self)
             return self._interactive
 
     def run_alternate(self, job, mode) -> bool:

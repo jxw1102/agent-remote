@@ -301,6 +301,26 @@ check("codebuddy advertises usage", runner.capabilities().get("can_show_usage") 
 
 # Provider colours come from the daemon, not from each client.
 from agentremoted import palette as palette_mod            # noqa: E402
+# CodeBuddy sends tool arguments as a JSON string whose "questions" is
+# itself a JSON string; unfolded, the question never reached the phone.
+_qargs = json.dumps({"questions": json.dumps([
+    {"question": "Which path?", "header": "Scope", "options": [
+        {"label": "Scaffold only", "description": "stub"},
+        {"label": "Full decoder", "description": "big"}]}])
+})
+from agentremoted.providers.codebuddy import _ptc_record   # noqa: E402
+_qrec = _ptc_record({"id": "q1", "parentId": None, "type": "function_call",
+                      "name": "AskUserQuestion", "arguments": _qargs,
+                      "timestamp": 1789000002000})
+_qtool = _qrec["message"]["content"][0]
+check("ptc AskUserQuestion questions unfold",
+      isinstance(_qtool["input"].get("questions"), list)
+      and _qtool["input"]["questions"][0]["question"] == "Which path?",
+      _qtool["input"].get("questions"))
+check("ptc AskUserQuestion options survive",
+      [o.get("label") for o in _qtool["input"]["questions"][0]["options"]]
+      == ["Scaffold only", "Full decoder"], _qtool["input"])
+
 check("codebuddy palette",
       palette_mod.palette_for("codebuddy").get("accent") == "#58c08b"
       and palette_mod.palette_for("codebuddy").get("heading") == "#7fd4a8")

@@ -292,12 +292,18 @@ class InteractiveManager:
     disable_view_env = "CLAUDE_CODE_DISABLE_AGENT_VIEW"
     product = "claude"
 
-    def __init__(self, config):
+    def __init__(self, config, runner=None):
         self.config = config
+        # The provider's job manager - the watcher publishes panels as jobs.
+        self.runner = runner
+        self.jobs = getattr(runner, "jobs", None)
         self.secret = _hook_secret()
         self._tuis = {}               # tmux name -> _Tui
         self._lock = threading.Lock()
+        self._watched = {}            # tmux name -> job id of a published panel
+        self._watch_stop = threading.Event()
         self._adopt_or_reap()
+        self._start_watcher()
 
     @property
     def state_file(self):
@@ -1399,6 +1405,91 @@ class InteractiveManager:
             } for o in options],
             "multi_select": False,
         }
+
+    # -- watcher: panels in TUIs nobody is driving ----------------------
+    #
+    # A question or a permission dialog can appear in a TUI the daemon only
+    # adopted - the human typed in a terminal, or the turn ended while the
+    # panel was up. The turn loop only watches panes it drives, so such a
+    # panel was invisible: the CLI sat blocked and no client ever saw it.
+    # The watcher polls those panes and publishes what it finds as a job
+    # (no turn), which is exactly what clients already poll and answer.
+
+    _WATCH_INTERVAL_S = 1.5
+
+    def _start_watcher(self) -> None:
+        try:
+            threading.Thread(target=self._watch_loop, daemon=True,
+                             name="tui-watcher").start()
+        except Exception:  # never let a watcher break the manager
+            log.exception("could not start the TUI watcher")
+
+    def _watch_loop(self) -> None:
+        while not self._watch_stop.wait(self._WATCH_INTERVAL_S):
+            try:
+                self._watch_once()
+            except Exception:  # keep watching
+                log.exception("TUI watcher pass failed")
+
+    def _watch_once(self) -> None:
+        jobs = self.jobs or getattr(self.runner, "jobs", None)
+        if jobs is None:
+            return
+        for tui in list(self._tuis.values()):
+            if tui.job is not None:
+                continue        # a turn owns this pane; its loop watches it
+            sid = (tui.session_id or "").strip()
+            if not sid:
+                continue
+            try:
+                pane = self._pane_text(tui.name)
+            except Exception:
+                continue
+            if not pane:
+                continue
+            panel = self._ask_panel(pane)
+            kind = "ask"
+            if not panel:
+                panel = self._permission_panel(pane)
+                kind = "permission"
+            if not panel:
+                with self._lock:
+                    self._watched.pop(tui.name, None)
+                continue
+            with self._lock:
+                if self._watched.get(tui.name):
+                    continue    # already published for this pane
+            job = jobs.new_watch_job(sid, provider=self.product)
+            with self._lock:
+                self._watched[tui.name] = job.id
+            log.info("TUI %s: publishing a %s panel for session %s",
+                     tui.name, kind, sid[:8])
+            threading.Thread(
+                target=self._run_watch, args=(job, tui, panel, kind),
+                daemon=True, name="tui-watch-%s" % tui.name).start()
+
+    def _run_watch(self, job, tui: _Tui, panel: dict, kind: str) -> None:
+        """Answer the published panel from the phone, then close the job."""
+        try:
+            if kind == "ask":
+                questions = [{
+                    "question": panel.get("question") or "",
+                    "header": panel.get("header") or "Question",
+                    "options": panel.get("options") or [],
+                    "multi_select": bool(panel.get("multi_select")),
+                }]
+                self._answer_questions(job, tui, questions)
+            else:
+                self._answer_permission(job, tui, panel)
+        except Exception:
+            log.exception("watched panel failed")
+        finally:
+            with job.lock:
+                job.status = "done"
+            job.add_event("result", is_error=False, duration_ms=0, cost_usd=0)
+            with self._lock:
+                if self._watched.get(tui.name) == job.id:
+                    self._watched.pop(tui.name, None)
 
     def _ask_seen(self, job, tool_input: dict, state: dict):
         """Record an AskUserQuestion the transcript (or PreToolUse hook) showed.

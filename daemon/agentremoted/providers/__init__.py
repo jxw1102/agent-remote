@@ -115,6 +115,12 @@ def build_all(config, job_manager_cls):
     for name in config.provider_names():
         store, runner = build_one(config, name)
         jobs = job_manager_cls(config, runner)
+        # The runner's interactive manager creates "watch" jobs for panels in
+        # panes it only adopted, so it needs the job manager.
+        try:
+            runner.jobs = jobs
+        except Exception:  # pragma: no cover - a runner may forbid attributes
+            pass
         bundles[name] = ProviderBundle(name, store, runner, jobs)
     if not bundles:
         raise ValueError("no providers configured")
