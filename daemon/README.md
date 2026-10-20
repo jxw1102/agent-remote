@@ -467,14 +467,14 @@ Script: [`scripts/install-windows.ps1`](scripts/install-windows.ps1)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
-powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Provider grok -Port 8473
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Port 8473
 powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Uninstall
 ```
 
-`-Provider` is only a seed for `config.json` (the daemon mounts what is
-listed there). Omit it and the script enables the harnesses it finds on PATH
-(claude, grok, codex, cursor-agent, copilot, codebuddy, dsh), falling back to
-claude when none is found.
+The script enables the harnesses it finds on PATH (claude, grok, codex,
+cursor-agent, copilot, codebuddy, dsh), falling back to claude when none is
+found. `-Provider` exists only as a seed for `config.json` — the daemon
+mounts what is listed there — and is not needed normally.
 
 It writes `%USERPROFILE%\.agentremoted\config.json` (kept if present), a token,
 and a `run-agentremoted.cmd`, then registers the `agentremoted` task at logon

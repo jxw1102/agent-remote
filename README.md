@@ -45,7 +45,7 @@ from a logon task — headless turns work, the Live TUI does not (it needs tmux)
 powershell -ExecutionPolicy Bypass -File daemon\scripts\install-windows.ps1
 ```
 
-It enables every harness CLI it finds on PATH (`-Provider grok` overrides).
+It enables every harness CLI it finds on PATH.
 
 **Or hand this to your coding agent.** Paste into Claude Code, Codex, Grok, DeepSeek, Cursor, Copilot, or CodeBuddy
 (no clone needed):
