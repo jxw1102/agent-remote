@@ -225,7 +225,7 @@ lv_color_t providerColor(const String &p) {
     return lv_color_hex(0x8957e5);                         // Copilot purple
   if (p.startsWith("code") || p.startsWith("cbc"))
     return lv_color_hex(0x58c08b);                         // CodeBuddy green
-  if (p.startsWith("co")) return lv_color_hex(0x10a37f);  // Codex teal
+  if (p.startsWith("co")) return lv_color_hex(0x484cf4);  // Codex indigo
   if (p.startsWith("gr")) return lv_color_hex(0x00d4ff);  // Grok icon cyan
   if (p.startsWith("de") || p.startsWith("ds")) return lv_color_hex(0x4d6bfe);
   return lv_color_hex(0x9aa4b2);                           // neutral

@@ -19,6 +19,9 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.17.1** Codex wears indigo (#484cf4) instead of teal, with matching
+heading/inline variants on web, Android, BlackBerry and the pager.
+
 **2.17.0** Windows. The daemon runs on Windows for headless turns: process
 groups become CREATE_NEW_PROCESS_GROUP, os.killpg/SIGKILL become taskkill /T
 (procutil.py), npm CLIs are routed through cmd.exe because CreateProcess

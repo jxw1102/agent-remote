@@ -27,7 +27,7 @@ import androidx.compose.ui.unit.sp
 enum class Accent(val tint: Color, val onTint: Color, val label: String) {
     Claude(Color(0xFFD97757), Color(0xFF20120C), "Claude"),
     Grok(Color(0xFF00D4FF), Color(0xFF04222A), "Grok"),
-    Codex(Color(0xFF10A37F), Color(0xFF042018), "Codex"),
+    Codex(Color(0xFF484CF4), Color(0xFF15162E), "Codex"),
     DeepSeek(Color(0xFF4D6BFE), Color(0xFF0B1024), "DeepSeek"),
     Cursor(Color(0xFFD946EF), Color(0xFF24082A), "Cursor"),
     Copilot(Color(0xFF8957E5), Color(0xFF160B2A), "Copilot"),
@@ -81,7 +81,7 @@ private fun darkPalette(accent: Accent) = RemotePalette(
     codeBorder = Color(0xFF23262D),
     inlineCode = when (accent) {
         Accent.Claude -> Color(0xFFE0A183)
-        Accent.Codex -> Color(0xFF6EE7B7)
+        Accent.Codex -> Color(0xFFA9ABFA)
         Accent.DeepSeek -> Color(0xFF93A8FF)
         Accent.Cursor -> Color(0xFFF0ABFC)
         Accent.Copilot -> Color(0xFFD2A8FF)
@@ -90,7 +90,7 @@ private fun darkPalette(accent: Accent) = RemotePalette(
     },
     heading = when (accent) {
         Accent.Claude -> Color(0xFFE9A47F)
-        Accent.Codex -> Color(0xFF3DD68C)
+        Accent.Codex -> Color(0xFF7B7EF7)
         Accent.DeepSeek -> Color(0xFF7B93FF)
         Accent.Cursor -> Color(0xFFE879F9)
         Accent.Copilot -> Color(0xFFB392F0)
@@ -115,7 +115,7 @@ private fun lightPalette(accent: Accent) = RemotePalette(
     codeBorder = Color(0xFFDDE1E8),
     inlineCode = when (accent) {
         Accent.Claude -> Color(0xFFA9532F)
-        Accent.Codex -> Color(0xFF0D7A5A)
+        Accent.Codex -> Color(0xFF3B3FC4)
         Accent.Cursor -> Color(0xFFA21CAF)
         Accent.Copilot -> Color(0xFF6E40C9)
         Accent.CodeBuddy -> Color(0xFF268253)
@@ -123,7 +123,7 @@ private fun lightPalette(accent: Accent) = RemotePalette(
     },
     heading = when (accent) {
         Accent.Claude -> Color(0xFFA9532F)
-        Accent.Codex -> Color(0xFF0D7A5A)
+        Accent.Codex -> Color(0xFF3B3FC4)
         Accent.Cursor -> Color(0xFFA21CAF)
         Accent.Copilot -> Color(0xFF6E40C9)
         Accent.CodeBuddy -> Color(0xFF268253)

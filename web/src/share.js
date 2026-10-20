@@ -108,7 +108,7 @@ function applyAccent(provider) {
   const p = String(provider || "").toLowerCase();
   const accent = p === "grok" ? "#00d4ff"
     : p === "claude" ? "#d97757"
-    : p === "codex" ? "#10a37f"
+    : p === "codex" ? "#484cf4"
     : (p === "deepseek" || p === "dsh") ? "#4d6bfe"
     : (p === "cursor" || p === "cursor-agent") ? "#d946ef"
     : (p === "copilot" || p === "github-copilot") ? "#8957e5"

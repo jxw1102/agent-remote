@@ -211,7 +211,7 @@ const ProviderPalette CLAUDE_PALETTE =
 const ProviderPalette GROK_PALETTE =
     {"#00d4ff", "#0d1a1f", "#00d4ff", "#17171c", "#c678dd", "#9a8fb0", "#67e8f9"};
 const ProviderPalette CODEX_PALETTE =
-    {"#10a37f", "#0d1f1a", "#3dd68c", "#141a17", "#3dd68c", "#7a9a8a", "#6ee7b7"};
+    {"#484cf4", "#1b1c3a", "#9a9df9", "#16172c", "#7b7ef7", "#8e90b8", "#a9abfa"};
 const ProviderPalette DEEPSEEK_PALETTE =
     {"#4d6bfe", "#12162a", "#7b93ff", "#14161f", "#7b93ff", "#8a92e0", "#93a8ff"};
 const ProviderPalette CURSOR_PALETTE =

@@ -14,7 +14,7 @@ import { qrSvg } from "./qr.js";
 const PROVIDERS = {
   claude: { label: "Claude", accent: "#d97757", heading: "#e08a5c", inline: "#e0a183" },
   grok: { label: "Grok", accent: "#00d4ff", heading: "#b9a2f0", inline: "#67e8f9" },
-  codex: { label: "Codex", accent: "#10a37f", heading: "#3dd68c", inline: "#6ee7b7" },
+  codex: { label: "Codex", accent: "#484cf4", heading: "#7b7ef7", inline: "#a9abfa" },
   deepseek: { label: "DeepSeek", accent: "#4d6bfe", heading: "#7b93ff", inline: "#93a8ff" },
   dsh: { label: "DeepSeek", accent: "#4d6bfe", heading: "#7b93ff", inline: "#93a8ff" },
   cursor: { label: "Cursor", accent: "#d946ef", heading: "#e879f9", inline: "#f0abfc" },
