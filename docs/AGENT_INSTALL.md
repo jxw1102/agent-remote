@@ -100,6 +100,31 @@ clients show the transcript view. Guest isolation (chroot / bind mounts) is
 POSIX-only. Troubleshooting: `Get-ScheduledTask agentremoted`, and the task's
 History tab in Task Scheduler for logs.
 
+### Want the Live TUI on Windows? Use WSL2
+
+There is **no native tmux for Windows** — tmux needs a POSIX pty, and the
+native daemon cannot drive one. MSYS2/Cygwin ship a tmux binary, but a native
+Windows Python spawning it is unsupported.
+
+The supported route is to run *the daemon itself* inside WSL2, where it is
+just Linux:
+
+```powershell
+wsl --install -d Ubuntu        # once, then reboot
+wsl                            # inside the distro:
+```
+
+```bash
+sudo apt update && sudo apt install -y tmux
+curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.sh | bash
+```
+
+The host CLIs (`claude`, `codex`, …) must be installed **inside** WSL — the
+daemon runs the sessions there, not in native Windows. Point clients at the
+WSL instance (WSL2 forwards `localhost`, so `http://127.0.0.1:8473` usually
+works from Windows; from other devices use the Windows host's LAN IP plus a
+`netsh interface portproxy` rule).
+
 ## Manual fallback
 
 ```bash

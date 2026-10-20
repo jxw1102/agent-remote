@@ -482,6 +482,12 @@ with restart-on-failure. Headless turns run; **interactive / Live TUI needs
 tmux**, so those capabilities are false on Windows and clients fall back to
 the transcript view. Guest isolation (chroot/bind mounts) is POSIX-only.
 
+There is no native tmux on Windows (it needs a POSIX pty; the MSYS2 binary is
+not supported from a native Python). For the Live TUI, install WSL2
+(`wsl --install -d Ubuntu`, reboot), then `sudo apt install tmux` and run the
+Linux `install.sh` **inside** the distro — the harness CLIs must live there
+too, since the daemon runs the sessions in WSL.
+
 ### Linux — systemd
 
 #### A) Deploy script

@@ -39,7 +39,8 @@ curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.s
 
 It prints a **Base URL** and **token**. On macOS it installs a launchd service;
 on Linux, a user systemd unit. On **Windows** (no admin needed) the daemon runs
-from a logon task — headless turns work, the Live TUI does not (it needs tmux):
+from a logon task — headless turns work; the Live TUI needs tmux, so use WSL2
+for that (see [docs/AGENT_INSTALL.md](docs/AGENT_INSTALL.md#want-the-live-tui-on-windows-use-wsl2)):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File daemon\scripts\install-windows.ps1
