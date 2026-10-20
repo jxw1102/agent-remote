@@ -19,6 +19,12 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.18.5** BlackBerry: the Ctrl hold button no longer stops the app from
+starting. The first version declared a `readonly property` on the Button,
+which the BB10 QML engine rejects ("Readonly not yet supported") - the whole
+Live TUI sheet then failed to load and the app refused to start. The armed
+state is now carried by the button label and a hint line.
+
 **2.18.4** Questions show their body. The clients paint a question body
 from its rich blocks, and the daemon sent only the plain string, so the
 BlackBerry sheet showed a header and the options but no question. Every

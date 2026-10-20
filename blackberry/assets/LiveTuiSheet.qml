@@ -113,6 +113,19 @@ Sheet {
             verticalAlignment: VerticalAlignment.Fill
             layout: StackLayout {}
 
+            // The hold state, spelled out: a Button tint is not worth the
+            // risk on this QML engine, but a Label is - and the user must
+            // see that Ctrl is armed before the next key.
+            Label {
+                visible: liveTuiSheet.api ? liveTuiSheet.api.tuiCtrlLatch : false
+                text: qsTr("Ctrl held - the next key is sent as Ctrl+key")
+                textStyle.fontSize: FontSize.XXSmall
+                textStyle.color: Color.create("#4ad06a")
+                leftPadding: 12
+                rightPadding: 12
+                bottomMargin: 2
+            }
+
             // Soft keys — one compact row (same Button chrome).
             // Esc as ASCII: ⎋ is missing from BB system fonts and shows as tofu.
             Container {
@@ -128,13 +141,15 @@ Sheet {
                 // BB10 keyboards have no Ctrl key of their own, so this one
                 // HOLDS Ctrl: tap it, then press a key (or type one letter)
                 // and it arrives as Ctrl+<key>; the hold ends with that key.
-                // The label and the colour say whether it is armed - the
-                // state has to be readable at a glance, on a small screen.
+                // The label and the hint line above say whether it is armed
+                // - the state has to be readable at a glance, on a small
+                // screen.
                 Button {
-                    readonly property bool armed:
-                        liveTuiSheet.api && liveTuiSheet.api.tuiCtrlLatch
-                    text: armed ? "Ctrl \u25CF" : "Ctrl"
-                    textColor: armed ? "#4ad06a" : "white"
+                    // No readonly property here: Cascades' QML engine on
+                    // BB10 rejects it ("Readonly not yet supported"), which
+                    // stops main.qml from loading this sheet at all.
+                    text: (liveTuiSheet.api && liveTuiSheet.api.tuiCtrlLatch)
+                          ? "Ctrl \u25CF" : "Ctrl"
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
                     preferredHeight: liveTuiSheet.api
                               ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
