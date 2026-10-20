@@ -28,11 +28,13 @@ The daemon does **not** sell LLM tokens. It runs the host’s existing CLIs. The
 
 1. `python3` on `PATH` (3.9+ is fine).
 2. At least one of: `claude`, `grok`, `codex`, `cursor-agent`, `codebuddy`, `dsh` on `PATH` (warn if missing; still install).
-3. macOS or Linux. Windows: WSL2 or manual Python run is acceptable; document it.
+3. macOS, Linux, or Windows 10/11 (PowerShell 5.1+). On Windows, `python`
+   from python.org with "Add to PATH" ticked — not the Store stub.
 
 ## Preferred install (one command)
 
-Do **not** clone the repo. Run:
+Do **not** clone the repo (macOS/Linux — Windows needs a clone, see
+[Windows](#windows)). Run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.sh | bash
@@ -47,16 +49,56 @@ What success looks like:
 
 ### Platform notes
 
-| OS | What `install.sh` does |
+| OS | What the installer does |
 |----|------------------------|
 | macOS | Copies daemon under `~/.local/share/agent-remote`, runs `daemon/scripts/install-launchd.sh` |
 | Linux | User systemd unit `agentremoted.service` (no root) |
+| Windows | `daemon\scripts\install-windows.ps1`: logon task `agentremoted`, no admin (see below) |
 
 Foreground (debug):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.sh | bash -s -- --foreground
 ```
+
+## Windows
+
+`install.sh` is a bash script, so Windows uses the PowerShell installer. It
+needs a **clone** (or the repo ZIP) because the script runs from the tree:
+
+```powershell
+git clone https://github.com/jxw1102/agent-remote.git
+cd agent-remote
+powershell -ExecutionPolicy Bypass -File daemon\scripts\install-windows.ps1
+```
+
+No git? Download the ZIP from
+https://github.com/jxw1102/agent-remote/archive/refs/heads/main.zip, extract
+it, then run the same command from the extracted folder. If PowerShell
+blocks the script, either pass `-ExecutionPolicy Bypass` (shown above) or run
+`Unblock-File daemon\scripts\install-windows.ps1` once.
+
+What it does, and what success looks like:
+
+- Writes `%USERPROFILE%\.agentremoted\config.json` (kept if already present)
+  with every harness CLI it finds on `PATH` — claude, grok, codex,
+  cursor-agent, copilot, codebuddy, dsh — and a random token in
+  `%USERPROFILE%\.agentremoted\token`.
+- Registers the scheduled task `agentremoted` at logon, restart on failure,
+  running `run-agentremoted.cmd`; **no admin rights needed**.
+- `Invoke-RestMethod http://127.0.0.1:8473/api/ping` returns `ok: true`,
+  `app: "agentremoted"`, and the providers it enabled.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File daemon\scripts\install-windows.ps1 -Port 8473
+powershell -ExecutionPolicy Bypass -File daemon\scripts\install-windows.ps1 -Uninstall
+```
+
+**Limits on Windows:** headless turns only. Interactive mode and the Live TUI
+need `tmux`, so `/api/ping` reports `interactive: false` and `live_tui: false`;
+clients show the transcript view. Guest isolation (chroot / bind mounts) is
+POSIX-only. Troubleshooting: `Get-ScheduledTask agentremoted`, and the task's
+History tab in Task Scheduler for logs.
 
 ## Manual fallback
 
