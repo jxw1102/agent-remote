@@ -124,6 +124,13 @@ _USAGE_EXIT_S = 3         # /exit closing the pane before we kill it
 #     Next reset: August 2, 17:39
 # Parsed generically — any "<label>: <n>%" row is a bucket, so a future
 # hourly/monthly row shows up on the phone without a daemon change.
+# The upgrade splash an account without a subscription parks on.
+_NO_SUB_MARKERS = (
+    "Click here to Upgrade",
+    "to subscribe",
+    "try it out for free",
+    "Upgrade for more usage",
+)
 _USAGE_PCT_RE = re.compile(r"^([A-Za-z][^:]{0,40}):\s*(\d{1,3}(?:\.\d+)?)\s*%$")
 _USAGE_RESET_RE = re.compile(r"^(?:next reset|resets?)\s*:\s*(.+)$", re.I)
 _USAGE_WARN_PCT = 75
@@ -668,6 +675,26 @@ class GrokInteractiveManager:
             self._exit_tui(probe)
         if buckets:
             return {"ok": True, "buckets": buckets}
+        # No subscription: /usage prints nothing and the TUI parks on the
+        # upgrade splash ("... try it out for free ...", "[Click here to
+        # Upgrade]"). Say that plainly instead of "could not read".
+        pane = self._pane_text(probe.name)
+        if any(marker in pane for marker in _NO_SUB_MARKERS):
+            return {"ok": False,
+                    "error": "No active Grok subscription — /usage shows the "
+                             "upgrade screen. Subscribe to see limits."}
+        # With a lapsed subscription /usage prints NOTHING: the only new
+        # rows are the echoed prompt and the status bar. Saying "could not
+        # read" there sends people hunting for a bug that is not one.
+        meaningful = [row for row in rows
+                      if row.strip() and "/usage" not in row
+                      and "always-approve" not in row
+                      and "ctrl+o" not in row]
+        if not meaningful:
+            return {"ok": False,
+                    "error": "Grok reported no usage limits — the account has "
+                             "no active subscription (or /usage printed "
+                             "nothing)."}
         screen = " | ".join(rows)[:300]
         return {"ok": False,
                 "error": "Could not read grok's /usage output" +

@@ -5047,7 +5047,9 @@ function appendUsageBuckets(body, buckets, accent) {
     // percentage to draw; the daemon says so with show_bar=false and the
     // resets line carries the amount. Absent means true.
     const showBar = b.show_bar !== false;
-    const top = el("div", "usage-top");
+    // emphasis=value: the row IS a number (Cursor spend). Draw it large.
+    const top = el("div", b.emphasis === "value"
+      ? "usage-top usage-hero" : "usage-top");
     top.appendChild(el("span", null, b.title || ""));
     if (showBar) top.appendChild(el("span", null, `${b.percent || 0}%`));
     item.appendChild(top);

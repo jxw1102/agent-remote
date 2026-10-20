@@ -507,13 +507,25 @@ class InteractiveManager:
                     tui.hook_ask = qs
         elif event == "Notification" and job is not None:
             # "Claude is waiting for your input" etc. — surface on the banner.
-            msg = str(payload.get("message", "") or "waiting for input")
-            job.set_phase("waiting", msg)
+            msg = self._notification_message(payload)
+            if msg:
+                job.set_phase("waiting", msg)
         elif event in ("PreCompact", "PostCompact"):
             tui.compacting = event == "PreCompact"
             if job is not None:
                 job.set_phase("compacting", "")
         return True
+
+    def _notification_message(self, payload: dict) -> str:
+        """Banner text for a Notification hook, or "" to ignore the event.
+
+        Claude sends a human sentence ("Claude is waiting for your input")
+        and no notification_type. Harnesses that tag their notifications
+        (CodeBuddy) also fire non-blocking ones — auth_success carries the
+        signed-in nickname, agent_completed a turn notice — which must not
+        overwrite the status line with machine text.
+        """
+        return str(payload.get("message", "") or "waiting for input")
 
     # -- tmux helpers ------------------------------------------------------
 
@@ -1464,19 +1476,23 @@ class InteractiveManager:
         if q_at < 0:
             return {}
         options = []
-        for line in rows[q_at + 1:]:
-            m = _PERM_OPT_RE.match(line)
+        last_opt = q_at
+        for i in range(q_at + 1, len(rows)):
+            m = _PERM_OPT_RE.match(rows[i])
             if m:
                 options.append(m.group(2)[:_PERM_LINE_CAP])
-            elif options or line:
+                last_opt = i
+            elif options or rows[i]:
                 break            # options are contiguous; anything else ends it
         if len(options) < 2:
             return {}
         # Still up, or answered and merely still on screen? An open dialog is
         # the last thing in the pane apart from its own footer; once answered,
         # the tool output follows it. Typing into that would land keys on a
-        # live prompt, so anything else below means stale.
-        tail = [l for l in rows[q_at + 1 + len(options):] if l]
+        # live prompt, so anything else below means stale. Index off the last
+        # option actually matched: CodeBuddy leaves a blank line between the
+        # question and the options, so counting from q_at + 1 is off by one.
+        tail = [l for l in rows[last_opt + 1:] if l]
         if any(not _PERM_FOOTER_RE.search(l) for l in tail):
             return {}
 
@@ -1786,8 +1802,14 @@ class InteractiveManager:
             # Crash watchdog (_CRASH_STALL_S): claude can die leaving a
             # backtrace in a still-alive pane — no Stop hook will ever come.
             now = time.time()
-            asking = state["ask"] or (state["ask_thread"]
-                                      and state["ask_thread"].is_alive())
+            # A live wait on the human (question panel OR pane permission
+            # dialog) is not a crash: nobody is expected to touch the pane,
+            # so the transcript is quiet and the pane looks frozen.
+            perm_wait = state.get("perm_thread")
+            asking = (state["ask"]
+                      or (state["ask_thread"] and state["ask_thread"].is_alive())
+                      or bool(job.pending_permission)
+                      or (perm_wait and perm_wait.is_alive()))
             if offset != last_offset or tui.compacting or asking:
                 last_offset = offset
                 life_t = now

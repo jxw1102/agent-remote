@@ -180,9 +180,105 @@ check("ptc tool_use carries name and args",
       and "1+1" in (tool["preview"] or "") + (tool.get("detail") or ""), tool)
 check("ptc search hits the body",
       [h["id"] for h in store.search_sessions("cert was expired")] == [S4])
+
+# Harness plumbing that leaked into the transcript until 2.16.1: the hint
+# line and warning banner that follow a </task-notification> block, the
+# same two lines quoted back with no tags around them, and non-blocking
+# Notification events (auth_success) claiming the status strip.
+from agentremoted.providers.claude import _human_user_text        # noqa: E402
+from agentremoted.providers.codebuddy_interactive import (        # noqa: E402
+    CodebuddyInteractiveManager)
+
+_hint = ('Use the TaskOutput tool with task_id="j1" to retrieve unread '
+         "output if you need to act on it. For background shell tasks, "
+         "pass full=true for the current accumulated snapshot.")
+_banner = ("[SYSTEM NOTIFICATION - NOT USER INPUT] This is an automated "
+           "background-task event, not a message from the user.")
+_clean = lambda text: _human_user_text({                          # noqa: E731
+    "type": "user", "message": {"role": "user",
+                                "content": [{"type": "text", "text": text}]}})
+check("task-notification block plus trail is not a prompt",
+      _clean("<task-notification>\n<task-id>j1</task-id>\n"
+             "</task-notification>\n\n%s\n%s\n" % (_hint, _banner)) == "")
+check("pasted content wrapper is stripped, text kept",
+      _clean('<pasted_content id="20e4">\nssh -i ~/.ssh/k root@10.0.0.1\n'
+             '</pasted_content id="20e4">')
+      == "ssh -i ~/.ssh/k root@10.0.0.1")
+check("bare pasted content wrapper is stripped",
+      _clean("<pasted_content>hello</pasted_content>") == "hello")
+check("quoted notification trail leaves the typed prose",
+      _clean("> %s\n%s\n\nfix the parser" % (_hint, _banner))
+      == "fix the parser")
+
+_ni = CodebuddyInteractiveManager(Config({"codebuddy_home": str(HOME)}))
+check("auth_success notice is not a wait",
+      _ni._notification_message(
+          {"notification_type": "auth_success",
+           "message": "auth_success: 木乃猫"}) == "")
+check("agent_completed notice is not a wait",
+      _ni._notification_message(
+          {"notification_type": "agent_completed", "message": "done"}) == "")
+check("permission prompt still reaches the banner",
+      _ni._notification_message(
+          {"notification_type": "permission_prompt",
+           "message": "needs your permission to use Bash"})
+      == "needs your permission to use Bash")
 done, preview = runner.rewind_session(S4, 1)
 check("ptc rewind cuts the only prompt",
       (done, preview) == (1, "diagnose the cert error"), (done, preview))
+
+# The title generator shells out to `codebuddy -p` in ~/.agentremoted/titler;
+# CodeBuddy journals those one-shots like any session, and they are not the
+# human's work. (Claude titles in-process, so only this store leaks them.)
+from agentremoted import titles as titles_mod              # noqa: E402
+_tproj = HOME / "projects" / "-agentremoted-titler"
+_tproj.mkdir(parents=True, exist_ok=True)
+_tcwd = str(titles_mod.titler_cwd())
+(_tproj / "TITLER.jsonl").write_text(json.dumps({
+    "type": "session-meta", "id": "t0", "sessionId": "TITLER",
+    "timestamp": 1789000001000, "meta": {"codebuddy.ai/mainAgent": "ptc"},
+}) + "\n" + json.dumps({
+    "id": "t1", "parentId": None, "type": "message", "role": "user",
+    "timestamp": 1789000001000, "cwd": _tcwd,
+    "content": [{"type": "input_text", "text": "Name this session"}],
+}) + "\n" + json.dumps({
+    "id": "t2", "parentId": "t1", "type": "message", "role": "assistant",
+    "timestamp": 1789000002000, "cwd": _tcwd,
+    "providerData": {"model": "hy4-preview"},
+    "content": [{"type": "output_text", "text": "A short title"}],
+}) + "\n", encoding="utf-8")
+_ids = [s["id"] for s in store.list_sessions()]
+check("titler session not listed", "TITLER" not in _ids, _ids)
+# Usage: no quota endpoint, so the runner sums providerData.usage from the
+# transcripts. A session stamped "now" keeps the today/7d windows stable.
+S5 = "55555555-5555-4555-8555-555555555555"
+_now_ms = int(time.time() * 1000)
+write_jsonl(S5, [
+    {"type": "session-meta", "id": "u0", "sessionId": S5,
+     "timestamp": _now_ms, "meta": {"codebuddy.ai/mainAgent": "ptc"}},
+    {"id": "u1", "parentId": None, "type": "message", "role": "user",
+     "timestamp": _now_ms, "cwd": CWD,
+     "content": [{"type": "input_text", "text": "do a thing"}]},
+    {"id": "u2", "parentId": "u1", "type": "function_call", "callId": "c9",
+     "name": "REPL", "arguments": "{}", "timestamp": _now_ms,
+     "providerData": {"model": "test-model",
+                      "usage": {"totalTokens": 1234}}},
+])
+from agentremoted.providers import codebuddy as codebuddy_mod     # noqa: E402
+codebuddy_mod._usage_cache = (0.0, None)
+_usage = runner.usage()
+_ub = _usage.get("buckets") or []
+check("codebuddy usage ok", _usage.get("ok") is True, _usage)
+check("codebuddy usage today bucket",
+      bool(_ub) and _ub[0].get("title") == "Today"
+      and "1.2k tokens" in _ub[0].get("resets_text", ""), _ub)
+check("codebuddy usage models",
+      any("test-model" in (b.get("resets_text") or "") for b in _ub), _ub)
+check("codebuddy advertises usage", runner.capabilities().get("can_show_usage") is True)
+
+check("titler project not listed",
+      all(p["id"] != "-agentremoted-titler" for p in store.list_projects()),
+      [p["id"] for p in store.list_projects()])
 
 print("rewind")
 done, preview = runner.rewind_session(S1, 1)

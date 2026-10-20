@@ -1307,14 +1307,16 @@ class CursorRunner:
             if not buckets:
                 # No plan or spend limit to measure against (Enterprise seats
                 # report pooled spend only), so there is no percentage: the
-                # row is money, and clients hide the bar on show_bar=false.
+                # row IS the money. Put the amount in the title and mark it
+                # emphasis=value so clients draw it large — "$38.39 used this
+                # cycle" tucked into the dim footer was too easy to miss.
                 cost = _as_float(aggregate.get("totalCostCents"))
-                detail = "$%.2f used this cycle" % (cost / 100.0)
                 buckets.append({
-                    "title": "Usage · %s" % plan_name,
+                    "title": "$%.2f used this cycle" % (cost / 100.0),
                     "percent": 0,
                     "show_bar": False,
-                    "resets_text": detail + ((" · " + reset) if reset else ""),
+                    "emphasis": "value",
+                    "resets_text": reset or plan_name,
                     "severity": "normal",
                 })
             result = {
@@ -1552,6 +1554,32 @@ class CursorRunner:
             state.setdefault("full", []).append(text)
             job.add_event("text", text=text, blocks=markdown_to_blocks(text))
             job.set_phase("writing", text[-160:])
+            return
+
+        if kind == "interaction_query" and subtype == "request":
+            # Cursor asks through an interaction query, and in --print mode
+            # it is answered there and then with "Questions skipped by the
+            # user" — there is no channel to answer it headless. Surface the
+            # ask so the phone at least shows what the agent wanted, then let
+            # the turn carry on (the model is told to continue).
+            questions = (((obj.get("query") or {})
+                          .get("askQuestionInteractionQuery") or {})
+                         .get("args") or {}).get("questions") or []
+            lines = []
+            for q in questions:
+                if not isinstance(q, dict) or not q.get("prompt"):
+                    continue
+                opts = [str(o.get("label") or "") for o in (q.get("options")
+                                                            or [])
+                        if isinstance(o, dict) and o.get("label")]
+                lines.append(str(q["prompt"]).strip()
+                             + ("  (" + " / ".join(opts) + ")" if opts else ""))
+            if lines:
+                text = ("Cursor asked (skipped in headless mode — reply to "
+                        "answer):\n" + "\n".join(lines))
+                job.add_event("text", text=text,
+                              blocks=markdown_to_blocks(text))
+            job.set_phase("thinking", "")
             return
 
         if kind == "tool_call":

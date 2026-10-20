@@ -877,6 +877,15 @@ class CodexInteractiveManager:
                           duration_ms=int((time.time() - job.started_at) * 1000),
                           cost_usd=0)
 
+    def _maybe_answer_panel(self, job, tui: _Tui) -> bool:
+        """Hook: surface a pane panel that blocks the turn on a human.
+
+        Codex has no such panel; Cursor overrides this for its ask-question
+        UI. Called once per turn-loop poll, so implementations must rate
+        limit their own pane reads.
+        """
+        return False
+
     def _run_turn(self, job, tui: _Tui, launched_at: float, resume: bool = False):
         state = job.runner_state
         state.clear()
@@ -990,6 +999,9 @@ class CodexInteractiveManager:
                         last_off = 0
 
             done = self._poll_rollout(job, tui)
+            # A TUI panel that blocks the turn on a human (Cursor asks its
+            # questions this way) is handled outside the journal.
+            self._maybe_answer_panel(job, tui)
             if tui.rollout_offset != last_off:
                 quiet_since = time.time()
                 last_off = tui.rollout_offset

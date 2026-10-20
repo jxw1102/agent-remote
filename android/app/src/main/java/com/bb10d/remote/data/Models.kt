@@ -411,6 +411,8 @@ data class UsageBucketDto(
     /** false = spend-only row (Cursor Enterprise): no percentage, draw no bar. */
     @SerialName("show_bar") val showBar: Boolean = true,
     @SerialName("resets_text") val resetsText: String = "",
+    /** "value" = the row is a headline number (Cursor spend): draw it large. */
+    val emphasis: String = "",
     /** normal | warning | critical */
     val severity: String = "normal",
     /** Multi-daemon root tags each bucket with the harness name. */

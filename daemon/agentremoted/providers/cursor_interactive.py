@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -27,6 +29,7 @@ from .codex_interactive import (
     _READY_SETTLE_S,
     tmux_available,
 )
+from .claude_interactive import _unbox
 from .cursor import (
     CursorStore,
     _assistant_text,
@@ -48,6 +51,16 @@ _READY_MARKERS = (
     "Run Everything",
     "Plan, search, build anything",
 )
+
+# Cursor's ask-question panel. This is Cursor's ONLY blocking UI that is not
+# a journal event: the CLI prints "Question 1 of 1", the numbered prompt, one
+# checkbox row per option (the cursor row starts with ›), and a footer
+# of key hints. Nothing in the stream-json or the transcript carries it, so
+# the pane is the only place to lift it from.
+_Q_TITLE_RE = re.compile(r"^Question (\d+) of (\d+)$")
+_Q_PROMPT_RE = re.compile(r"^(\d+)\.\s+(.+)$")
+_Q_OPT_RE = re.compile(r"^([\u203a>])?\s*\[\s*[xX]?\s*\]\s*(.+)$")
+_Q_FOOTER_RE = re.compile(r"Space select|Enter next/submit|Esc to skip")
 
 
 def _pane_ready(text: str) -> bool:
@@ -352,6 +365,158 @@ class CursorInteractiveManager(CodexInteractiveManager):
         except OSError:
             return -1
         return count
+
+    # -- ask-question panel ------------------------------------------------
+
+    @staticmethod
+    def _question_panel(pane: str) -> dict:
+        """Cursor's ask-question panel as a question payload, else {}.
+
+        Shape (Cursor Agent 2026.10):
+
+            Question 1 of 1
+            1. Should the project use tabs or spaces for indentation?
+              › [ ] Tabs
+                [ ] Spaces (2)
+                [ ] Other: (type to answer)
+            ↑/↓ option · ←/→ question · Space select · Enter next/submit · Esc to skip
+
+        Only the LAST title counts (scrollback holds answered questions), the
+        footer must still be on screen (an answered panel is gone), and
+        "Other: (type to answer)" is dropped — it opens a text field that
+        this path cannot type into.
+        """
+        rows = [_unbox(line) for line in (pane or "").splitlines()]
+        start = -1
+        for i in range(len(rows) - 1, -1, -1):
+            if _Q_TITLE_RE.match(rows[i]):
+                start = i
+                break
+        if start < 0:
+            return {}
+        prompt = ""
+        options = []
+        seen_footer = False
+        for line in rows[start + 1:]:
+            if _Q_FOOTER_RE.search(line):
+                seen_footer = True
+                break
+            if not prompt:
+                m = _Q_PROMPT_RE.match(line)
+                if m:
+                    prompt = m.group(2).strip()
+                    continue
+            m = _Q_OPT_RE.match(line)
+            if m:
+                label = m.group(2).strip()
+                if label and not label.lower().startswith("other:"):
+                    options.append(label)
+        if not (seen_footer and prompt and options):
+            return {}
+        return {
+            "question": prompt,
+            "header": "Question",
+            "options": [{
+                "label": o if len(o) <= 60 else o[:57] + "...",
+                "description": o if len(o) > 60 else "",
+            } for o in options],
+            "multi_select": False,
+        }
+
+    @staticmethod
+    def _question_cursor(pane: str, labels: list) -> int:
+        """Index of the option the › marker sits on (0 when unknown)."""
+        seen = 0
+        for line in [_unbox(l) for l in (pane or "").splitlines()]:
+            m = _Q_OPT_RE.match(line)
+            if not m:
+                continue
+            label = m.group(2).strip()
+            if not label or label.lower().startswith("other:"):
+                continue
+            if m.group(1):
+                return seen
+            seen += 1
+        return 0
+
+    def _maybe_answer_panel(self, job, tui: _Tui) -> bool:
+        """Lift Cursor's ask-question panel onto the phone (once per second)."""
+        state = job.runner_state
+        thread = state.get("ask_thread")
+        if thread and thread.is_alive():
+            return False
+        now = time.time()
+        if now - float(state.get("panel_tick_at") or 0) < 1.0:
+            return False
+        state["panel_tick_at"] = now
+        panel = self._question_panel(self._pane_text(tui.name))
+        if not panel:
+            return False
+        thread = threading.Thread(target=self._answer_question_panel,
+                                  args=(job, tui, panel), daemon=True)
+        state["ask_thread"] = thread
+        thread.start()
+        return True
+
+    def _answer_question_panel(self, job, tui: _Tui, panel: dict):
+        """Ask the phone, then key the pick: arrows → Space → Enter.
+
+        Cursor shows one question at a time ("Question 1 of N"): Enter advances
+        to the next instead of closing, so the same panel shape is re-read and
+        answered until it is gone. Cancel / timeout / no usable answer sends
+        Escape, which skips the question set and lets the model carry on.
+        """
+        secs = float(getattr(self.config, "question_timeout", 0) or 0)
+        timeout = secs if secs > 0 else None
+        answered = set()
+        for _ in range(12):
+            pane = self._pane_text(tui.name)
+            current = self._question_panel(pane)
+            if not current:
+                return
+            key = current["question"]
+            if key in answered:
+                return
+            labels = [o["label"] for o in current["options"]]
+            job.set_phase("asking", "question")
+            answers = job.request_question(
+                [current], timeout,
+                abort_when=lambda: not self._question_panel(
+                    self._pane_text(tui.name)))
+            picked = [l for l in (answers[0] if answers else []) if l in labels]
+            if answers is None or not picked:
+                if self._question_panel(self._pane_text(tui.name)):
+                    self._tmux("send-keys", "-t", tui.name, "Escape")
+                    job.add_event("tool", name="Question",
+                                  detail="skipped (no answer from the client)")
+                return
+            target = labels.index(picked[0])
+            cursor = self._question_cursor(pane, labels)
+            step = "Down" if target >= cursor else "Up"
+            try:
+                for _ in range(abs(target - cursor)):
+                    self._tmux("send-keys", "-t", tui.name, step)
+                    time.sleep(0.08)
+                self._tmux("send-keys", "-t", tui.name, "Space")
+                time.sleep(0.08)
+                self._tmux("send-keys", "-t", tui.name, "Enter")
+            except (OSError, subprocess.TimeoutExpired) as e:
+                log.warning("cursor question panel: tmux input failed: %s", e)
+                return
+            answered.add(key)
+            job.add_event("tool", name="Question answered", detail=picked[0])
+            end = time.time() + 8.0
+            while time.time() < end:
+                nxt = self._question_panel(self._pane_text(tui.name))
+                if not nxt or nxt["question"] != key:
+                    break
+                time.sleep(_POLL_S)
+            else:
+                try:
+                    self._tmux("send-keys", "-t", tui.name, "Escape")
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                return
 
     def _send_prompt(self, tui: _Tui, prompt: str) -> str:
         tui.cursor_local_command = (prompt or "").lstrip().startswith("/")

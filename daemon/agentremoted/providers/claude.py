@@ -1055,33 +1055,49 @@ _INJECTED_BLOCK_RE = re.compile(
     r"<(%s)(?:\s[^>]*)?>.*?</\1>" % _TAG_ALT, re.S)
 _INJECTED_OPEN_RE = re.compile(r"<(?:%s)(?:\s[^>]*)?>" % _TAG_ALT)
 _COMMAND_NAME_RE = re.compile(r"<command-name>(.*?)</command-name>", re.S)
+# Pasted clipboard content is wrapped in <pasted_content [id="…"]>…</…>
+# (the CLI even repeats the attribute on the closing tag). The wrapper is
+# harness plumbing; the text inside is exactly what the human pasted.
+_PASTED_TAG_RE = re.compile(r"</?pasted_content(?:\s[^>]*)?>", re.I)
 _COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 _LOCAL_STDOUT_RE = re.compile(
     r"<local-command-std(out|err)>.*?</local-command-std\1>", re.S)
-# The harness appends this hint line *after* the </task-notification> block,
+# The harness appends a hint line *after* the </task-notification> block,
 # so it survives _INJECTED_BLOCK_RE and would otherwise show as a user prompt.
+# Two phrasings exist: the monitor's "Read the output file…" and the
+# background-shell "Use the TaskOutput tool with task_id=…".
 _TASK_RESULT_HINT_RE = re.compile(
-    r"^\s*Read the output file to retrieve the result:.*$", re.M)
+    r"^\s*(?:>\s*)?(?:Read the output file to retrieve the result"
+    r"|Use the TaskOutput tool with task_id=)[^\n]*$", re.M)
+# The "not user input" banner that trails that hint line.
+_SYSTEM_NOTIFICATION_RE = re.compile(
+    r"^\s*\[SYSTEM NOTIFICATION[^\n]*$", re.M)
 
 
 def _clean_user_text(text: str) -> str:
     """The human-typed remainder of a user line ("" = nothing was typed)."""
-    if "<" not in text:
-        return text.strip()
-    # A slash command is stored as an envelope; show it as "/cmd args".
-    m = _COMMAND_NAME_RE.search(text)
-    if m:
-        cmd = m.group(1).strip()
-        args = _COMMAND_ARGS_RE.search(text)
-        arg_text = args.group(1).strip() if args else ""
-        return (cmd + " " + arg_text).strip() if arg_text else cmd
-    text = _LOCAL_STDOUT_RE.sub("", text)
-    text = _INJECTED_BLOCK_RE.sub("", text)
+    if not text:
+        return ""
+    if "<" in text:
+        # A slash command is stored as an envelope; show it as "/cmd args".
+        m = _COMMAND_NAME_RE.search(text)
+        if m:
+            cmd = m.group(1).strip()
+            args = _COMMAND_ARGS_RE.search(text)
+            arg_text = args.group(1).strip() if args else ""
+            return (cmd + " " + arg_text).strip() if arg_text else cmd
+        text = _LOCAL_STDOUT_RE.sub("", text)
+        text = _PASTED_TAG_RE.sub("", text)
+        text = _INJECTED_BLOCK_RE.sub("", text)
+    # The hint/banner trail can also arrive with no tags around it (a queued
+    # message that quoted one), so these strip regardless of "<".
     text = _TASK_RESULT_HINT_RE.sub("", text)
-    # An unclosed block (truncated injection) would leak its head.
-    m = _INJECTED_OPEN_RE.search(text)
-    if m:
-        text = text[:m.start()]
+    text = _SYSTEM_NOTIFICATION_RE.sub("", text)
+    if "<" in text:
+        # An unclosed block (truncated injection) would leak its head.
+        m = _INJECTED_OPEN_RE.search(text)
+        if m:
+            text = text[:m.start()]
     return text.strip()
 
 
@@ -1470,6 +1486,12 @@ class ClaudeStore:
                 continue
             latest = max(f.stat().st_mtime for f in files)
             cwd = self._project_cwd(entry, files)
+            # The title one-shots run in ~/.agentremoted/titler; the harness
+            # stores their sessions like any other, and they are not the
+            # human's work. (Claude titles in-process, CodeBuddy shells out —
+            # which is why this shows up as CodeBuddy "spam" projects.)
+            if titles.is_titler_cwd(cwd):
+                continue
             projects.append({
                 "id": entry.name,
                 "cwd": cwd,
@@ -1508,6 +1530,8 @@ class ClaudeStore:
             if sid in seen_ids:
                 continue
             summary = self._session_summary(f)
+            if summary and titles.is_titler_cwd(summary.get("cwd") or ""):
+                continue          # titler scratch session, not the human's
             if summary:
                 seen_ids.add(sid)
                 sessions.append(summary)
@@ -1559,7 +1583,7 @@ class ClaudeStore:
             if user_only and not self._is_user_session(path):
                 continue
             summary = self._session_summary(path, light=True)
-            if not summary:
+            if not summary or titles.is_titler_cwd(summary.get("cwd") or ""):
                 continue
             hit = self._match_meta(summary, q)
             if hit is not None:

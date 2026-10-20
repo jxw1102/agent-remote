@@ -48,12 +48,13 @@ import shutil
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import titles
 from ..render_blocks import markdown_to_blocks
-from .claude import ClaudeStore, _human_user_text, _is_safe_id, tool_status_parts
+from .claude import (ClaudeStore, _human_user_text, _is_safe_id, _safe_json,
+                     tool_status_parts)
 from .. import providers
 
 _MODELS_TTL_S = 900
@@ -287,6 +288,83 @@ class CodebuddyStore(ClaudeStore):
         return _ptc_record(obj)
 
 
+_USAGE_TTL_S = 60.0
+_usage_cache = (0.0, None)
+_usage_lock = threading.Lock()
+
+
+def _fmt_tokens(n: int) -> str:
+    if n >= 1_000_000:
+        return ("%.1fM" if n < 10_000_000 else "%.0fM") % (n / 1_000_000.0)
+    if n >= 1_000:
+        return ("%.1fk" if n < 10_000 else "%.0fk") % (n / 1_000.0)
+    return str(int(n))
+
+
+def _usage_stats(home: Path) -> dict:
+    """CodeBuddy has no quota endpoint; aggregate its own transcripts.
+
+    Every function_call entry carries providerData.usage (input/output/
+    total tokens) and the model that made it, so the same numbers the CLI
+    /stats dashboard shows can be summed locally - no extra process, no
+    network. Days are local dates; a session counts once it has any message.
+    """
+    projects = home / "projects"
+    today = datetime.now().date()
+    week_start = today - timedelta(days=6)
+    days = {}
+    models = {}
+    sessions = set()
+    active = set()
+    if not projects.is_dir():
+        return {"days": days, "models": models, "sessions": sessions,
+                "active": active, "today": today, "week_start": week_start}
+    for path in projects.glob("*/*.jsonl"):
+        had_msg = False
+        try:
+            handle = open(path, "r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                obj = _safe_json(line)
+                if not isinstance(obj, dict):
+                    continue
+                kind = obj.get("type")
+                if kind not in ("message", "function_call"):
+                    continue
+                had_msg = True
+                try:
+                    day = datetime.fromtimestamp(
+                        int(obj.get("timestamp")) / 1000).date()
+                except (TypeError, ValueError, OSError, OverflowError):
+                    continue
+                row = days.setdefault(
+                    day, {"messages": 0, "tools": 0, "tokens": 0})
+                if kind == "message":
+                    row["messages"] += 1
+                    continue
+                row["tools"] += 1
+                provider = obj.get("providerData") or {}
+                usage = provider.get("usage") if isinstance(
+                    provider.get("usage"), dict) else {}
+                try:
+                    tokens = int(usage.get("totalTokens") or 0)
+                except (TypeError, ValueError):
+                    tokens = 0
+                row["tokens"] += tokens
+                model = str(provider.get("model") or "")
+                if model and day >= week_start:
+                    models[model] = models.get(model, 0) + tokens
+        if had_msg:
+            sessions.add(path.stem)
+    for day, row in days.items():
+        if row["messages"] or row["tools"]:
+            active.add(day)
+    return {"days": days, "models": models, "sessions": sessions,
+            "active": active, "today": today, "week_start": week_start}
+
+
 class CodebuddyRunner:
     """One turn as ``codebuddy -p`` with stream-json on stdout."""
 
@@ -353,11 +431,88 @@ class CodebuddyRunner:
             "requires_cwd": True,
             "can_set_model": True,
             "can_set_effort": True,
-            "can_show_usage": False,
+            # Activity/token stats from the local transcripts; CodeBuddy
+            # has no subscription-limits endpoint to query.
+            "can_show_usage": True,
             "interactive": has_tmux,
             "live_tui": has_tmux,
             "rewind": True,
         }
+
+    def usage(self) -> dict:
+        """Activity and token usage, read from the local transcripts.
+
+        CodeBuddy publishes no subscription quota (no /usage command and no
+        limits endpoint), so the Usage sheet shows what the CLI's own /stats
+        dashboard reports: today, the last week, which models did the work,
+        and the activity streak."""
+        global _usage_cache
+        now = time.monotonic()
+        cached_at, cached = _usage_cache
+        if cached is not None and now - cached_at < _USAGE_TTL_S:
+            return dict(cached)
+        with _usage_lock:
+            cached_at, cached = _usage_cache
+            if cached is not None and time.monotonic() - cached_at < _USAGE_TTL_S:
+                return dict(cached)
+            stats = _usage_stats(self._home())
+            day = stats["days"]
+
+            def window(since):
+                row = {"messages": 0, "tools": 0, "tokens": 0}
+                for date, val in day.items():
+                    if date >= since:
+                        for key in row:
+                            row[key] += val[key]
+                return row
+
+            if not stats["sessions"]:
+                result = {"ok": False, "error": "No CodeBuddy activity yet",
+                          "provider": "codebuddy", "account": "",
+                          "account_id": ""}
+                _usage_cache = (time.monotonic(), dict(result))
+                return result
+            today = window(stats["today"])
+            week = window(stats["week_start"])
+            streak = 0
+            cur = stats["today"]
+            if cur not in stats["active"]:
+                cur -= timedelta(days=1)
+            while cur in stats["active"]:
+                streak += 1
+                cur -= timedelta(days=1)
+
+            def line(row):
+                return "%s tokens · %d messages · %d tool calls" % (
+                    _fmt_tokens(row["tokens"]), row["messages"], row["tools"])
+
+            buckets = [
+                {"title": "Today", "percent": 0, "show_bar": False,
+                 "severity": "normal", "resets_text": line(today)},
+                {"title": "Last 7 days", "percent": 0, "show_bar": False,
+                 "severity": "normal", "resets_text": line(week)},
+            ]
+            top = sorted(stats["models"].items(), key=lambda kv: -kv[1])[:3]
+            if top:
+                buckets.append({
+                    "title": "Models · 7d", "percent": 0, "show_bar": False,
+                    "severity": "normal",
+                    "resets_text": " · ".join(
+                        "%s %s" % (name, _fmt_tokens(tokens))
+                        for name, tokens in top),
+                })
+            buckets.append({
+                "title": "Activity", "percent": 0, "show_bar": False,
+                "severity": "normal",
+                "resets_text": "%d session%s · %d active day%s · streak %d" % (
+                    len(stats["sessions"]), "" if len(stats["sessions"]) == 1 else "s",
+                    len(stats["active"]), "" if len(stats["active"]) == 1 else "s",
+                    streak),
+            })
+            result = {"ok": True, "buckets": buckets, "provider": "codebuddy",
+                      "account": "", "account_id": ""}
+            _usage_cache = (time.monotonic(), dict(result))
+            return result
 
     def auth_health(self) -> dict:
         on_path = self._on_path()

@@ -19,6 +19,56 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.16.7** Grok with no subscription says so. /usage prints nothing at all
+in that state (no splash either), so the sheet blamed parsing. Empty output
+now reads "no active subscription", and the upgrade splash is recognised
+too.
+
+**2.16.6** Usage sheet: no-subscription Grok, big Cursor spend, CodeBuddy
+stats. When the Grok account has no subscription, /usage prints nothing and
+the TUI parks on the upgrade splash — the sheet now says "No active Grok
+subscription" instead of "could not read". A spend-only Cursor row (no plan
+limit) headlines the amount ("$38.39 used this cycle") with emphasis=value,
+which web, Android and BlackBerry draw large instead of tucking it in the
+dim footer. CodeBuddy now reports usage: no quota endpoint exists, so the
+runner aggregates its own transcripts (tokens per model from
+providerData.usage) into Today / last 7 days / models / activity rows.
+
+**2.16.5** Pasted clipboard content reads as the text, not the wrapper.
+Claude Code journals pastes as `<pasted_content [id="…"]>…</pasted_content …>`;
+the user-text cleaner kept the tags, so transcripts showed them above every
+pasted prompt. Both tag forms are stripped, the pasted text is kept.
+
+**2.16.4** The title generator's own sessions stop appearing as projects.
+Titles are made by a one-shot CLI run in `~/.agentremoted/titler`; every
+harness journals that run like any session, and the CodeBuddy store listed
+them (Claude titles in-process, grok/copilot/cursor already filtered). The
+store now drops titler-cwd sessions from projects, the session list and
+search.
+
+**2.16.3** Cursor's questions reach the phone. The interactive TUI asks
+through a pane panel ("Question 1 of 1", `› [ ] Tabs`, Space/Enter) that
+appears in neither the stream-json nor the transcript, so it was never
+lifted. The Cursor manager now parses that panel, sends it to the phone as a
+question (multi-question sets advance one Enter at a time) and keys the pick
+back. Headless `cursor-agent --print` answers "skipped" by design; that path
+now surfaces the ask as a transcript note instead of dropping it.
+
+**2.16.2** CodeBuddy permission dialogs reach the phone again. CodeBuddy
+leaves a blank line between "Do you want to proceed…?" and the numbered
+options, and the pane parser counted the tail from the question line — it
+landed on option 3, decided the dialog was stale, and never lifted it. The
+turn then looked frozen and was killed as "crashed mid-turn" after 20s. The
+tail is now counted from the last option matched, and a live permission wait
+counts as life for the crash watchdog.
+
+**2.16.1** Harness noise stops leaking into transcripts and the status
+strip. The hint line and "not user input" banner that trail a
+`<task-notification>` block are no longer shown as user prompts (also when
+quoted back with no tags around them), and CodeBuddy's non-blocking
+notifications (`auth_success`, `agent_completed`) no longer claim the banner —
+only permission/idle prompts do.
+
 **2.16.0** CodeBuddy sessions written by the `ptc` agent render again.
 CodeBuddy's older CLI wrote Claude-shaped JSONL; the current `ptc` host
 writes Codex-shaped records (`message` / `reasoning` / `function_call` /

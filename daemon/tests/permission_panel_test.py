@@ -75,6 +75,19 @@ ASK_PANEL = """\u2502 Which approach?
 \u2570\u2500 \u2191\u2193 to navigate \u00b7 Esc to cancel
 """
 
+# CodeBuddy's dialog: no box gutter, a blank line between the question and
+# the options, and the key hints inline in the option labels. Counting the
+# tail from q_at + 1 landed on option 3 and rejected the whole dialog.
+CB_DIALOG = """ Bash command
+   mkdir -p /tmp/cb-perm-test/sub && touch /tmp/cb-perm-test/sub/x.txt
+\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+ Do you want to proceed(High risk operation detected - requires confirmation every time)?
+
+ > 1. Yes
+   2. Yes, and don't ask again for session (shift + tab)
+   3. No, and tell CodeBuddy what to do differently (escape)
+"""
+
 IDLE = "\u276f \n  ? for shortcuts\n"
 PROSE = "\u2502 I will ask: Do you want to proceed?\n\u2502 and then continue\n\u276f\n"
 
@@ -86,6 +99,9 @@ def main() -> int:
         ("three-way dialog", THREE_WAY, True),
         ("edit dialog", EDIT, True),
         ("answered, output below", ANSWERED, False),
+        ("codebuddy dialog (blank line before options)", CB_DIALOG, True),
+        ("codebuddy dialog answered, output below", CB_DIALOG
+         + "\n     42: done\n\u276f\n", False),
         ("AskUserQuestion panel", ASK_PANEL, False),
         ("idle pane", IDLE, False),
         ("prose that mentions the phrase", PROSE, False),

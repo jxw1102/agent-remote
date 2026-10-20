@@ -403,11 +403,13 @@ def main():
     CursorRunner._usage_cache = (0.0, None)
     _, usage = api(base, token, "/api/usage")
     buckets = usage.get("buckets") or []
-    check("spend-only seat reports money without a bar",
+    check("spend-only seat headlines the money",
           usage.get("ok") is True and buckets
           and buckets[0].get("show_bar") is False
           and buckets[0].get("percent") == 0
-          and "$25.00 used this cycle" in buckets[0].get("resets_text", ""), usage)
+          and buckets[0].get("emphasis") == "value"
+          and "$25.00 used this cycle" in buckets[0].get("title", "")
+          and buckets[0].get("resets_text", ""), usage)
     UsageHandler.spend_only = False
     CursorRunner._usage_cache = (0.0, None)
 

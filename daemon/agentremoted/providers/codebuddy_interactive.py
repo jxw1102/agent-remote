@@ -101,6 +101,22 @@ class CodebuddyInteractiveManager(InteractiveManager):
             return ""
         return super()._startup_key(text, nudge_i)
 
+    # Notification kinds that block the pane on a human. CodeBuddy also
+    # fires auth_success ("auth_success: <nickname>") and agent_completed,
+    # which are progress, not a wait — surfacing them made the status strip
+    # read "waiting · auth_success: …" mid-turn.
+    _NOTIFY_WAIT_KINDS = ("permission_prompt", "idle_prompt",
+                          "elicitation_dialog", "agent_needs_input")
+
+    def _notification_message(self, payload: dict) -> str:
+        kind = str(payload.get("notification_type") or "").strip()
+        if kind and kind not in self._NOTIFY_WAIT_KINDS:
+            return ""
+        text = str(payload.get("message") or "").strip()
+        if text.lower().startswith(("auth_success", "agent_completed")):
+            return ""
+        return super()._notification_message(payload)
+
     def _note_todos(self, job, sid: str) -> None:
         return None
 

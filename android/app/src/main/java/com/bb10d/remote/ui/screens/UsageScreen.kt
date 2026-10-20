@@ -199,6 +199,7 @@ fun UsageScreen(vm: UsageViewModel, onBack: () -> Unit, onOpenWeb: (String) -> U
                                             percent = bucket.percent,
                                             showBar = bucket.showBar,
                                             resets = bucket.resetsText,
+                                            emphasis = bucket.emphasis,
                                             severity = bucket.severity,
                                             accent = Accent.forProvider(harness).tint,
                                         )
@@ -245,6 +246,7 @@ private fun UsageBar(
     percent: Int,
     showBar: Boolean = true,
     resets: String,
+    emphasis: String = "",
     severity: String,
     accent: androidx.compose.ui.graphics.Color,
 ) {
@@ -262,7 +264,11 @@ private fun UsageBar(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 title,
-                style = MaterialTheme.typography.bodyMedium,
+                // A spend-only row is the number itself (Cursor "$38.39
+                // used this cycle") — big enough to catch the eye.
+                style = if (emphasis == "value")
+                    MaterialTheme.typography.headlineSmall
+                else MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f),
             )
             if (showBar) {
@@ -289,7 +295,12 @@ private fun UsageBar(
         }
         if (resets.isNotBlank()) {
             Spacer(Modifier.height(4.dp))
-            Text(resets, style = MaterialTheme.typography.labelSmall, color = pal.dim)
+            Text(
+                resets,
+                style = if (emphasis == "value") MaterialTheme.typography.labelMedium
+                else MaterialTheme.typography.labelSmall,
+                color = pal.dim,
+            )
         }
     }
 }

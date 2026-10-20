@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <meta name="referrer" content="no-referrer">
 <title>Shared session · Agent Remote</title>
-<!-- built 2026-10-20 15:42 from web/src -->
+<!-- built 2026-10-20 16:45 from web/src -->
 <style>
 /* Agent Remote, browser client.
  *
@@ -1259,6 +1259,10 @@ button.icon-btn.icon-idle {
 .usage-src { font-size: 11.5px; font-weight: 600; color: var(--tag, var(--accent)); }
 .usage-top { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
 .usage-foot { display: flex; justify-content: space-between; color: var(--dim); font-size: 11.5px; }
+/* A spend-only row is the number itself (Cursor "$38.39 used this cycle"):
+   draw it big enough to catch the eye from across the room. */
+.usage-top.usage-hero { font-size: 19px; font-weight: 600; letter-spacing: -0.2px; }
+.usage-hero + .usage-foot { font-size: 12.5px; }
 
 .q-block { margin-bottom: 18px; }
 .q-head { font-size: 12px; font-weight: 700; color: var(--accent); margin-bottom: 6px; }

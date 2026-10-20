@@ -130,10 +130,13 @@ Sheet {
                             }
 
                             // Bucket name, e.g. "Weekly · all models".
+                            // emphasis "value" = the row IS the number
+                            // (Cursor "$38.39 used this cycle"): draw it big.
                             Label {
                                 text: ListItemData.title
                                 multiline: true
-                                textStyle.fontSize: FontSize.Small
+                                textStyle.fontSize: ListItemData.emphasis == "value"
+                                                     ? FontSize.Large : FontSize.Small
                                 textStyle.color: Color.create("#e4e4e4")
                                 textStyle.fontWeight: FontWeight.Bold
                             }
@@ -192,7 +195,8 @@ Sheet {
                                 Label {
                                     text: ListItemData.resets_text
                                     visible: ListItemData.resets_text != ""
-                                    textStyle.fontSize: FontSize.XSmall
+                                    textStyle.fontSize: ListItemData.emphasis == "value"
+                                                         ? FontSize.Small : FontSize.XSmall
                                     textStyle.color: Color.create("#8a8a8a")
                                     layoutProperties: StackLayoutProperties {
                                         spaceQuota: 1
