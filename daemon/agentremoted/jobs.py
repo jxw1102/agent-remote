@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 
+from . import procutil
 from .config import CONFIG_DIR
 from .providers import RunnerError
 
@@ -817,7 +818,7 @@ class JobManager:
             "errors": "replace",
             # Own process group so stop() can kill the CLI *and* whatever
             # tools it spawned, not just the top-level process.
-            "start_new_session": True,
+            **procutil.spawn_kwargs(),
         }
         if job.isolate_root:
             iso = _accounts.isolation_popen_kwargs(job.isolate_root)
@@ -833,6 +834,8 @@ class JobManager:
             # macOS: seatbelt so absolute paths cannot walk out of the root
             # (chroot alone needs euid 0; HOME rewrite is not enough).
             cmd = _accounts.isolate_argv(cmd, job.isolate_root)
+        # Windows runs npm shims (.cmd) through cmd.exe; POSIX unchanged.
+        cmd = procutil.argv_for(cmd)
         try:
             proc = subprocess.Popen(cmd, **popen_kw)
         except OSError as e:
@@ -866,7 +869,7 @@ class JobManager:
                 self.runner.tick(job)
                 if deadline and time.time() > deadline and proc.poll() is None:
                     timed_out = True
-                    _signal_group(proc, signal.SIGKILL)
+                    _signal_group(proc, procutil.SIGKILL)
                     break
                 continue
             if line is None:  # EOF
@@ -1013,7 +1016,7 @@ def _reap(proc, grace_s: float = 5.0):
     try:
         return proc.wait(timeout=grace_s)
     except subprocess.TimeoutExpired:
-        _signal_group(proc, signal.SIGKILL)
+        _signal_group(proc, procutil.SIGKILL)
         try:
             return proc.wait(timeout=grace_s)
         except subprocess.TimeoutExpired:
@@ -1021,18 +1024,12 @@ def _reap(proc, grace_s: float = 5.0):
 
 
 def _signal_group(proc, sig):
-    """Signal the job's whole process group; fall back to the process."""
-    try:
-        os.killpg(os.getpgid(proc.pid), sig)
-    except (OSError, ProcessLookupError):
-        try:
-            proc.send_signal(sig)
-        except (OSError, ProcessLookupError):
-            pass
+    """Signal the job's whole process group (taskkill /T on Windows)."""
+    procutil.signal_tree(proc, sig)
 
 
 def _ensure_dead(proc, grace_s: float = 10.0):
     try:
         proc.wait(timeout=grace_s)
     except subprocess.TimeoutExpired:
-        _signal_group(proc, signal.SIGKILL)
+        _signal_group(proc, procutil.SIGKILL)

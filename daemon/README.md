@@ -19,6 +19,14 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.17.0** Windows. The daemon runs on Windows for headless turns: process
+groups become CREATE_NEW_PROCESS_GROUP, os.killpg/SIGKILL become taskkill /T
+(procutil.py), npm CLIs are routed through cmd.exe because CreateProcess
+cannot run .cmd shims, guest isolation (chroot/bind mounts) stays off, and
+`scripts/install-windows.ps1` registers a logon task with restart-on-failure
+(no admin). Interactive / Live TUI stays POSIX-only — it needs tmux — and the
+capabilities already report it off, so clients fall back to the transcript.
+
 **2.16.8** CodeBuddy's AskUserQuestion panel survives. The panel exists only
 in the pane (the transcript line is written after the answer), so the turn
 looked frozen and the 20s crash watchdog killed the TUI while a question was
@@ -434,6 +442,21 @@ launchctl kickstart -k "gui/$(id -u)/com.agentremoted"
 ```
 
 ---
+
+### Windows — logon task (no admin)
+
+Script: [`scripts/install-windows.ps1`](scripts/install-windows.ps1)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Provider claude -Port 8473
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Uninstall
+```
+
+It writes `%USERPROFILE%\.agentremoted\config.json` (kept if present), a token,
+and a `run-agentremoted.cmd`, then registers the `agentremoted` task at logon
+with restart-on-failure. Headless turns run; **interactive / Live TUI needs
+tmux**, so those capabilities are false on Windows and clients fall back to
+the transcript view. Guest isolation (chroot/bind mounts) is POSIX-only.
 
 ### Linux — systemd
 

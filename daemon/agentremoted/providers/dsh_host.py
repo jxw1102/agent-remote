@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -28,6 +29,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .. import procutil
 from ..config import CONFIG_DIR
 from .dsh_rpc import DEFAULT_URL, DshClient, DshError
 
@@ -349,7 +351,7 @@ class DshHost:
         # Child is its own session leader (start_new_session).
         try:
             if pid:
-                os.killpg(int(pid), 15)
+                procutil.signal_tree(proc, signal.SIGTERM)
             else:
                 proc.terminate()
         except (OSError, ProcessLookupError, TypeError):
@@ -362,7 +364,7 @@ class DshHost:
         except (TypeError, subprocess.TimeoutExpired):
             try:
                 if pid:
-                    os.killpg(int(pid), 9)
+                    procutil.signal_tree(proc, procutil.SIGKILL)
                 else:
                     proc.kill()
             except (OSError, ProcessLookupError, TypeError, AttributeError):

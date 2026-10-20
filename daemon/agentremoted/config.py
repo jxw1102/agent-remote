@@ -107,6 +107,8 @@ def write_tmux_helper() -> str:
     """
     import shutil
 
+    if os.name == "nt":
+        return ""          # no tmux on Windows; interactive mode is off
     path = CONFIG_DIR / "tmux"
     body = _TMUX_HELPER % {
         "self": path,

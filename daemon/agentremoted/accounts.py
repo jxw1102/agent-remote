@@ -1287,7 +1287,9 @@ def isolation_popen_kwargs(isolate_root: str) -> dict:
     privileged (bind-mount jail on Linux, plain chroot elsewhere).
     """
     root = _realpath(isolate_root) if isolate_root else ""
-    if not root:
+    if not root or os.name == "nt":
+        # Guest isolation is a POSIX feature (chroot / bind mounts);
+        # Windows has no equivalent here, so run unconfined.
         return {}
     ensure_root_dir(root)
     kwargs = {"cwd": root}

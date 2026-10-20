@@ -34,6 +34,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .. import procutil
 from .. import providers
 from .. import steps as steps_mod
 from .. import titles
@@ -1537,8 +1538,8 @@ class GrokRunner:
         so only ever called from the background titler.
         """
         cwd = str(titles.titler_cwd())
-        cmd = [self.config.grok_bin, "-p", titles.prompt_for(text),
-               "--cwd", cwd]
+        cmd = procutil.argv_for([self.config.grok_bin, "-p",
+                                 titles.prompt_for(text), "--cwd", cwd])
         env = dict(os.environ)
         env.update({str(k): str(v)
                     for k, v in (getattr(self.config, "grok_env", None) or {}).items()})

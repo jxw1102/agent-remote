@@ -49,6 +49,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .. import procutil
 from .. import providers
 from .. import search_util
 from .. import steps as steps_mod
@@ -777,6 +778,7 @@ class CopilotRunner:
         cwd = str(titles.titler_cwd())
         cmd = [self._bin(), "-p", titles.prompt_for(text), "--silent",
                "--allow-all-tools"]
+        cmd = procutil.argv_for(cmd)
         try:
             out = subprocess.run(cmd, cwd=cwd, env=copilot_env(self.config),
                                  capture_output=True, text=True,

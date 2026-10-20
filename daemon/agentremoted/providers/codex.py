@@ -31,6 +31,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from .. import procutil
 from .. import providers
 from .. import steps as steps_mod
 from ..render_blocks import inline_to_rich, markdown_to_blocks
@@ -337,7 +338,8 @@ def _fetch_usage_via_app_server(config) -> dict:
 
     try:
         proc = subprocess.Popen(
-            [bin_path, "app-server", "--listen", "stdio://"],
+            procutil.argv_for([bin_path, "app-server", "--listen",
+                               "stdio://"]),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1678,8 +1680,9 @@ class CodexRunner:
         cached hard and only ever run from the background titler.
         """
         cwd = str(titles.titler_cwd())
-        cmd = [_codex_bin(self.config), "exec", "--skip-git-repo-check",
-               "-C", cwd, titles.prompt_for(text)]
+        cmd = procutil.argv_for([_codex_bin(self.config), "exec",
+                                 "--skip-git-repo-check", "-C", cwd,
+                                 titles.prompt_for(text)])
         env = os.environ.copy()
         env["CODEX_HOME"] = str(
             Path(getattr(self.config, "codex_home_path", None)

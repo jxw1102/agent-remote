@@ -51,6 +51,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .. import procutil
 from .. import titles
 from ..render_blocks import markdown_to_blocks
 from .claude import (ClaudeStore, _human_user_text, _is_safe_id, _safe_json,
@@ -590,7 +591,7 @@ class CodebuddyRunner:
             return []
         try:
             out = subprocess.run(
-                [binary, "--help"], capture_output=True, text=True,
+                procutil.argv_for([binary, "--help"]), capture_output=True, text=True,
                 timeout=20, env=codebuddy_env(self.config)).stdout
         except (OSError, subprocess.SubprocessError):
             return []
@@ -633,6 +634,7 @@ class CodebuddyRunner:
             "--output-format", "text",
             "--dangerously-skip-permissions",
         ]
+        cmd = procutil.argv_for(cmd)
         try:
             out = subprocess.run(
                 cmd, cwd=cwd, env=codebuddy_env(self.config),

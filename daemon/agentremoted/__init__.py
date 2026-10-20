@@ -6,5 +6,5 @@ token-authenticated HTTP API. Multi-provider mode mounts each harness under
 ``/{name}/…`` so clients keep one profile per harness against a single process.
 """
 
-__version__ = "2.16.8"
+__version__ = "2.17.0"
 

@@ -43,6 +43,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .. import procutil
 from .. import providers
 from .. import search_util
 from .. import steps as steps_mod
@@ -1391,7 +1392,7 @@ class CursorRunner:
         ids = []
         try:
             out = subprocess.run(
-                [self._bin(), "--list-models"],
+                procutil.argv_for([self._bin(), "--list-models"]),
                 capture_output=True, text=True, timeout=20,
             ).stdout or ""
             listing = False
@@ -1456,6 +1457,7 @@ class CursorRunner:
         env = dict(os.environ)
         extra = getattr(self.config, "cursor_env", None) or {}
         env.update({str(k): str(v) for k, v in extra.items()})
+        cmd = procutil.argv_for(cmd)
         try:
             out = subprocess.run(
                 cmd, cwd=cwd, env=env, capture_output=True,
