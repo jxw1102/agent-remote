@@ -26,8 +26,8 @@ list**.
 ## Get started
 
 You need **Python 3** and at least one working CLI on the machine you install
-on: `claude`, `grok`, `codex`, `cursor-agent`, `codebuddy`, and/or `dsh` (DeepSeek Harness) — subscription
-login or API key. Confirm the CLI works in a normal terminal first.
+on: `claude`, `grok`, `codex`, `dsh` (DeepSeek Harness), `cursor-agent`,
+`copilot`, and/or `codebuddy` — subscription login or API key. Confirm the CLI works in a normal terminal first.
 
 ### 1. Install the daemon
 
@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.s
 It prints a **Base URL** and **token**. On macOS it installs a launchd service;
 on Linux, a user systemd unit.
 
-**Or hand this to your coding agent.** Paste into Claude, Codex, Grok, Cursor, Copilot, or CodeBuddy
+**Or hand this to your coding agent.** Paste into Claude Code, Codex, Grok, DeepSeek, Cursor, Copilot, or CodeBuddy
 (no clone needed):
 
 ```text
@@ -121,6 +121,26 @@ and update the Agent Remote daemon on this machine to the latest release.
 Keep the existing token and config. Print the Base URL, token, and new version when done.
 ```
 
+## Supported harnesses
+
+One daemon fronts any mix of these harnesses. Put the ids in `providers` and
+each is mounted under `/<id>/`, so a client keeps one profile per harness
+against a single process.
+
+| Harness | `providers` ids | Runs on the host as |
+|---------|-----------------|---------------------|
+| Claude Code | `claude` | `claude` — print mode and the real TUI |
+| Grok | `grok` | `grok` |
+| Codex | `codex` | `codex` |
+| DeepSeek Harness | `deepseek`, `dsh` | `dsh web` on localhost (started by the daemon if it is not running) — no TUI |
+| Cursor Agent | `cursor`, `cursor-agent` | `cursor-agent --print` |
+| GitHub Copilot | `copilot`, `github-copilot` | `copilot -p` — sessions in `~/.copilot/session-state/` |
+| Tencent CodeBuddy Code | `codebuddy`, `cbc` | `codebuddy -p`, or the interactive TUI in tmux — sessions in `~/.codebuddy/projects/` |
+
+Auth stays with the CLI on the host — a subscription login or an API key.
+Clients only ever store the daemon URL and token. Per-harness flags and
+defaults live in [daemon/README.md](daemon/README.md).
+
 ## You already pay the model. Not us.
 
 Agent Remote **does not** bill usage and **does not** need its own
@@ -132,6 +152,9 @@ Anthropic / OpenAI / xAI account.
 | ChatGPT / Codex (or API key) | Host `codex` CLI |
 | xAI / Grok | Host `grok` CLI |
 | DeepSeek (or API key) | Host `dsh` harness |
+| Cursor subscription (or API key) | Host `cursor-agent` CLI |
+| GitHub Copilot subscription | Host `copilot` CLI |
+| Tencent CodeBuddy (subscription or API key) | Host `codebuddy` CLI |
 | Nothing extra for AR | Only a local daemon **token** for clients |
 
 Log into each CLI **on the host** once. Clients only store the daemon URL +
@@ -171,7 +194,7 @@ CLI bills the **API key** — unset the key to stay on Max. Full notes:
 
 ## Features
 
-- Multi-host profiles and multi-agent sessions (Claude · Grok · Codex · DeepSeek)
+- Multi-host profiles and multi-agent sessions (Claude · Grok · Codex · DeepSeek · Cursor · Copilot · CodeBuddy)
 - Live status (SSE / WebSocket), queues, stop, capability discovery (`GET /api/ping`)
 - Auth / login health on `/api/ping` (daemon ≥ 2.5.3)
 - Focus mode: filter the list to the projects you are carrying, tagged *needs
@@ -199,7 +222,7 @@ CLI bills the **API key** — unset the key to stay on Max. Full notes:
 ```bash
 mkdir -p ~/.agentremoted
 cp deploy/config.example.json ~/.agentremoted/config.json
-# providers: ["claude","grok","codex","deepseek"] — trim to CLIs on PATH
+# providers: ["claude","grok","codex","deepseek","cursor","copilot","codebuddy"] — trim to CLIs on PATH
 cd daemon && PYTHONPATH=. python3 -m agentremoted
 curl -s http://127.0.0.1:8473/api/ping
 ```
