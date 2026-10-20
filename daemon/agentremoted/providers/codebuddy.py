@@ -141,14 +141,20 @@ def _ptc_record(obj):
             args = {}
         if not isinstance(args, dict):
             args = {}
+        message = {"role": "assistant", "content": [{
+            "type": "tool_use",
+            "id": obj.get("callId") or obj.get("id"),
+            "name": obj.get("name") or "tool",
+            "input": args,
+        }]}
+        # Tool calls carry the model that made them. Sessions whose assistant
+        # text records omit providerData still get a model in their summary
+        # (the Android/web "Model" row used to fall back to "default").
+        model = str((obj.get("providerData") or {}).get("model") or "")
+        if model:
+            message["model"] = model
         rec.update(type="assistant", uuid=obj.get("id"),
-                   parentUuid=obj.get("parentId"),
-                   message={"role": "assistant", "content": [{
-                       "type": "tool_use",
-                       "id": obj.get("callId") or obj.get("id"),
-                       "name": obj.get("name") or "tool",
-                       "input": args,
-                   }]})
+                   parentUuid=obj.get("parentId"), message=message)
     elif kind == "function_call_result":
         output = obj.get("output")
         if isinstance(output, dict):

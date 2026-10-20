@@ -48,7 +48,19 @@ Sheet {
             if (! models || models.length == 0)
                 models = [ "default" ];
             var mo = sessionSheet.api.modelOverride;
-            fillDropdown(modelDrop, models, mo == "" ? "default" : mo);
+            // No explicit override: show the model this session last ran on
+            // instead of the list's first entry ("default").
+            var sm = "" + (sessionSheet.api.sessionModel || "");
+            if (mo == "" || mo == "default") {
+                if (sm != "" && sm != "default") {
+                    if (models.indexOf(sm) < 0)
+                        models = models.concat([ sm ]);
+                    mo = sm;
+                } else {
+                    mo = "default";
+                }
+            }
+            fillDropdown(modelDrop, models, mo);
 
             var efforts = sessionSheet.api.sessionEfforts;
             if (! efforts)

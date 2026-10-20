@@ -5249,13 +5249,25 @@ function openOptions() {
       // BB Session sheet parity: show what the OPEN session last used.
       const sessionModel = String(
         (state.open.session && state.open.session.model) || "").trim();
+      // The picker is about this session: keep a model the CLI list omits
+      // (e.g. a CodeBuddy session on a model the help text does not list).
+      const modelOptions = (sessionModel && sessionModel !== "default"
+        && !models.includes(sessionModel))
+        ? [...models, sessionModel] : models;
       if (sessionModel && sessionModel !== "default" && sessionModel !== "interactive") {
         body.appendChild(el("div", "help",
           `This session last ran on ${sessionModel}`));
       }
-      if (capOf(profile, "can_set_model", true, harness || null) && models.length) {
-        const cur = modelOf(profile, harness || null);
-        group("Model", models, cur, (v) => { setModelFor(profile, harness || null, v); });
+      if (capOf(profile, "can_set_model", true, harness || null) && modelOptions.length) {
+        // Prefer an explicit choice; otherwise show what the session ran on
+        // instead of the first list entry ("default" for CodeBuddy).
+        const stored = ((profile.modelByHarness || {})[
+          (harness || "").toLowerCase()] || "");
+        const cur = stored && modelOptions.includes(stored) ? stored
+          : (sessionModel && modelOptions.includes(sessionModel) ? sessionModel
+            : modelOf(profile, harness || null));
+        group("Model", modelOptions, cur,
+          (v) => { setModelFor(profile, harness || null, v); });
       }
       const efforts = effortsOf(profile, harness || null);
       if (capOf(profile, "can_set_effort", false, harness || null) && efforts.length) {

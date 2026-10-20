@@ -19,6 +19,12 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.18.2** A CodeBuddy session's model is no longer "default". The ptc
+`function_call` records carry `providerData.model`; folding them now keeps it
+on the record, so sessions whose assistant text omits the model still report
+the real one. Android and the web picker also prefer the open session's
+model over the first list entry when the profile has no explicit choice.
+
 **2.18.1** The Windows installer enables the harnesses it finds. `-Provider`
 was only ever a seed for `config.json`, but defaulting it to claude enabled
 a CLI a fresh box may not have. Without the flag the script now detects

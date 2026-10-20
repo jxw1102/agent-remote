@@ -1368,7 +1368,15 @@ private fun TurnOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.remote.
     val interactive = caps.interactiveFor(h)
     val canSetModel = caps.canSetModelFor(h)
     val canSetEffort = caps.canSetEffortFor(h)
-    val selectedModel = profile.model.takeIf { it in models } ?: models.firstOrNull().orEmpty()
+    // The sheet is about the session on screen, so show the model that
+    // session actually used when the profile has no explicit override —
+    // otherwise every CodeBuddy session read "default".
+    val session by vm.session.collectAsStateWithLifecycle()
+    val currentModel = profile.model.ifBlank { session?.model.orEmpty() }
+    val modelOptions = if (currentModel.isNotBlank() && currentModel !in models)
+        models + currentModel else models
+    val selectedModel = currentModel.takeIf { it in modelOptions }
+        ?: modelOptions.firstOrNull().orEmpty()
     val selectedEffort = profile.effort.takeIf { it in efforts } ?: efforts.firstOrNull().orEmpty()
     Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 28.dp)) {
         Text("Turn options", style = MaterialTheme.typography.titleMedium)
@@ -1400,7 +1408,7 @@ private fun TurnOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.remote.
             Spacer(Modifier.height(16.dp))
             OptionRow(
                 label = "Model",
-                options = models,
+                options = modelOptions,
                 selected = selectedModel,
                 display = { it },
                 onSelect = { vm.setModel(it) },
