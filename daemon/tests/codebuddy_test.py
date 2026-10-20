@@ -200,6 +200,29 @@ _clean = lambda text: _human_user_text({                          # noqa: E731
 check("task-notification block plus trail is not a prompt",
       _clean("<task-notification>\n<task-id>j1</task-id>\n"
              "</task-notification>\n\n%s\n%s\n" % (_hint, _banner)) == "")
+# CodeBuddy paints AskUserQuestion only in the pane (its transcript line is
+# written after the answer). Without this the turn looked frozen and the
+# crash watchdog killed the TUI mid-question.
+_panel = """❯ 1. You run ssh-copy-id
+     Run: ssh-copy-id -i ~/.ssh/id.pub root@host
+  2. Paste the password
+     Send the root password.
+  3. Different key path
+  4. Skip the VPS deploy
+  5. Type something
+  Submit
+  Chat about this
+Enter to select · ↑/↓ to navigate · Esc to cancel
+"""
+from agentremoted.providers.claude_interactive import InteractiveManager  # noqa: E402
+_p = InteractiveManager._ask_panel(_panel)
+check("ask panel parsed", bool(_p), _p)
+check("ask panel options",
+      [o["label"] for o in (_p or {}).get("options") or []]
+      == ["You run ssh-copy-id", "Paste the password", "Different key path",
+          "Skip the VPS deploy"], _p)
+check("ask panel ignores idle pane", InteractiveManager._ask_panel("❯\n") == {})
+
 check("pasted content wrapper is stripped, text kept",
       _clean('<pasted_content id="20e4">\nssh -i ~/.ssh/k root@10.0.0.1\n'
              '</pasted_content id="20e4">')

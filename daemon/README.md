@@ -19,6 +19,13 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.16.8** CodeBuddy's AskUserQuestion panel survives. The panel exists only
+in the pane (the transcript line is written after the answer), so the turn
+looked frozen and the 20s crash watchdog killed the TUI while a question was
+on screen. The panel is parsed from the pane (anchored on its footer, so
+scrollback cannot confuse it), lifted onto the phone, and a visible panel
+counts as life for the watchdog.
+
 **2.16.7** Grok with no subscription says so. /usage prints nothing at all
 in that state (no splash either), so the sheet blamed parsing. Empty output
 now reads "no active subscription", and the upgrade splash is recognised

@@ -1330,6 +1330,76 @@ class InteractiveManager:
             blob = repr(questions)
         return hashlib.sha1(blob.encode("utf-8", errors="replace")).hexdigest()[:20]
 
+    @staticmethod
+    def _ask_panel(pane: str) -> dict:
+        """The AskUserQuestion panel on screen as a question payload, else {}.
+
+        Claude announces this through the PreToolUse hook. CodeBuddy only
+        paints it and writes its transcript line AFTER the answer, so the
+        pane is the only early signal - without this the turn looked frozen
+        and the crash watchdog killed the TUI mid-question. Shape:
+
+            \u276f 1. You run ssh-copy-id
+                 Run: ssh-copy-id -i ~/.ssh/id.pub root@host
+              2. Paste the password
+              5. Type something
+              Submit
+              Chat about this
+            Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel
+        """
+        if not pane or _ASK_PANEL_MARKER not in pane \
+                or "Enter to select" not in pane:
+            return {}
+        rows = [_unbox(line) for line in pane.splitlines()]
+        # Anchor on the panel FOOTER. The scrollback above it holds old
+        # numbered lines (transcript steps, earlier dialogs), so scanning
+        # from the top grabs history instead of this panel.
+        footer = -1
+        for i in range(len(rows) - 1, -1, -1):
+            if "Enter to select" in rows[i]:
+                footer = i
+                break
+        if footer < 0:
+            return {}
+        found = {}
+        expect = None          # options form a descending run 5,4,3,2,1
+        top = footer
+        for i in range(footer - 1, max(-1, footer - 80), -1):
+            m = _PERM_OPT_RE.match(rows[i])
+            if not m:
+                continue        # description lines and chrome
+            num = int(m.group(1))
+            if expect is not None and num != expect:
+                continue        # not this panel's sequence
+            found[num] = m.group(2).strip()
+            expect = num - 1
+            top = i
+            if num == 1:
+                break
+        if len(found) < 2:
+            return {}
+        options = [found[n] for n in sorted(found)
+                   if found[n].lower() != "type something"]
+        if len(options) < 2:
+            return {}
+        # The tab strip above the question ("\u2190  \u2610 Header  \u2714 Submit  \u2192")
+        # is chrome, not part of the ask.
+        context = [r for r in rows[max(0, top - 6):top]
+                   if r.strip()
+                   and not r.startswith(("\u25cf", "\u2234", "\u2514", "\u2500"))
+                   and not any(mark in r for mark in ("\u2610", "\u2714",
+                                                      "\u2190", "\u2192"))]
+        question = "\n".join(context[-2:]) or "Answer on the phone"
+        return {
+            "question": question[:400],
+            "header": "Question",
+            "options": [{
+                "label": o if len(o) <= 60 else o[:57] + "...",
+                "description": o if len(o) > 60 else "",
+            } for o in options],
+            "multi_select": False,
+        }
+
     def _ask_seen(self, job, tool_input: dict, state: dict):
         """Record an AskUserQuestion the transcript (or PreToolUse hook) showed.
 
@@ -1694,6 +1764,20 @@ class InteractiveManager:
             # and the two must not race for the same keystrokes.
             perm_t = state.get("perm_thread")
             ask_t = state.get("ask_thread")
+            # AskUserQuestion panel: on Claude the PreToolUse hook announces
+            # it; on CodeBuddy only the pane has it (its transcript line is
+            # written after the answer). Parse the pane so the phone gets the
+            # question and the frozen pane is not read as a crash.
+            ask_busy = bool(state["ask"] or tui.hook_ask
+                            or job.pending_question
+                            or (ask_t and ask_t.is_alive()))
+            if (not ask_busy
+                    and now - float(state.get("ask_tick_at") or 0) >= 1.0):
+                state["ask_tick_at"] = now
+                pane_q = self._ask_panel(self._pane_text(tui.name))
+                if pane_q:
+                    self._ask_seen(job, {"questions": [pane_q]}, state)
+                    ask_busy = True
             if (not (perm_t and perm_t.is_alive())
                     and not state["ask"] and not tui.hook_ask
                     and not (ask_t and ask_t.is_alive())
@@ -1816,7 +1900,11 @@ class InteractiveManager:
                 dead_t = 0.0
             elif now - pane_t >= 1.0:
                 pane_t = now
-                if self._pane_busy(tui.name):
+                if _ASK_PANEL_MARKER in self._pane_text(tui.name):
+                    # A question panel blocks on the human: frozen is normal.
+                    life_t = now
+                    dead_t = 0.0
+                elif self._pane_busy(tui.name):
                     life_t = now
                     dead_t = 0.0
                 elif not self._pane_healthy(tui.name):
