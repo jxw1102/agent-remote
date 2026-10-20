@@ -8,7 +8,7 @@
 | Product | **D Pocket agent + B Talk**, one watchapp |
 | Hardware | Pebble Time 2 only (`emery`, 200×228, 64-color MIP) |
 | Companion | PKJS inside the official Pebble iOS/Android app + Clay |
-| Workspace | `pebble/` in this repo |
+| Workspace | `/Users/xiaowen.ji/Developer/cloud-projects/bb10-remote` |
 | Related | [`pebble/design-preview/index.html`](design-preview/index.html), [`AGENTS.md`](../AGENTS.md), [`daemon/README.md`](../daemon/README.md), [`esp32/README.md`](../esp32/README.md) |
 
 This is an implementation spec, not an options document. Product A (Pager pins), C (Desk watchface), Duo/flint, and an Android-`PebbleKit` companion are out of scope for v1.

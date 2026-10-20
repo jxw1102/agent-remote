@@ -218,6 +218,8 @@ const ProviderPalette CURSOR_PALETTE =
     {"#d946ef", "#24122a", "#e879f9", "#1a1220", "#e879f9", "#a98fb5", "#f0abfc"};
 const ProviderPalette COPILOT_PALETTE =
     {"#8957e5", "#1a1228", "#b392f0", "#17131f", "#b392f0", "#9a8fb0", "#d2a8ff"};
+const ProviderPalette CODEBUDDY_PALETTE =
+    {"#58c08b", "#0d211a", "#8fdcb4", "#131f1a", "#7fd4a8", "#7a9a8a", "#a8e3c8"};
 
 const ProviderPalette *palForProvider(const QString &provider)
 {
@@ -236,6 +238,10 @@ const ProviderPalette *palForProvider(const QString &provider)
     if (provider == QLatin1String("copilot")
             || provider == QLatin1String("github-copilot"))
         return &COPILOT_PALETTE;
+    if (provider == QLatin1String("codebuddy")
+            || provider == QLatin1String("cbc")
+            || provider == QLatin1String("codebuddy-code"))
+        return &CODEBUDDY_PALETTE;
     return 0; // unknown -> brand.hpp neutral fallbacks
 }
 
@@ -539,6 +545,9 @@ QString ApiClient::agentName() const
     if (m_provider == QLatin1String("copilot")
             || m_provider == QLatin1String("github-copilot"))
         return QLatin1String("Copilot");
+    if (m_provider == QLatin1String("codebuddy")
+            || m_provider == QLatin1String("cbc"))
+        return QLatin1String("CodeBuddy");
 #endif
     return QLatin1String(BRAND_AGENT_NAME);
 }
@@ -781,6 +790,40 @@ bool ApiClient::harnessRequiresCwd(const QString &harness) const
     return m_capRequiresCwd;
 }
 
+// Per-harness model list for the NEW-session sheet. sessionModels() keys on
+// m_sessionProvider (the OPEN session), which is empty before a session
+// starts — so it would fall back to the multi-host root union (m_models),
+// which on a multi-harness daemon is often empty or just "default". This
+// reads provider_details[h].models for the harness the user just picked,
+// mirroring sessionModels() for an open session. Falls back to m_models
+// when the harness is unknown (single-provider daemon, old ping).
+QStringList ApiClient::harnessModels(const QString &harness) const
+{
+    const QString h = harness.trimmed().toLower();
+    if (!h.isEmpty() && m_activeProfile >= 0
+            && m_activeProfile < m_profiles.size()) {
+        QVariantMap prof = m_profiles.at(m_activeProfile).toMap();
+        QVariantMap d = prof.value("provider_details").toMap().value(h).toMap();
+        if (d.contains(QLatin1String("models"))) {
+            QStringList out;
+            QVariantList raw = d.value("models").toList();
+            for (int i = 0; i < raw.size(); ++i)
+                out.append(raw.at(i).toString());
+            if (!out.isEmpty())
+                return out;
+        }
+    }
+    return m_models;
+}
+
+bool ApiClient::harnessCapSetModel(const QString &harness) const
+{
+    const QString h = harness.trimmed().toLower();
+    if (h.isEmpty())
+        return m_capSetModel;
+    return harnessCap(h, QLatin1String("can_set_model"), m_capSetModel);
+}
+
 // Theme/chrome provider: open session's harness wins (multi hosts keep a
 // neutral profile accent until you open a Claude/Grok/Codex row).
 QString ApiClient::themeProvider() const
@@ -870,6 +913,9 @@ QString ApiClient::statusActor() const
     if (m_sessionProvider == QLatin1String("copilot")
             || m_sessionProvider == QLatin1String("github-copilot"))
         return QLatin1String("Copilot");
+    if (m_sessionProvider == QLatin1String("codebuddy")
+            || m_sessionProvider == QLatin1String("cbc"))
+        return QLatin1String("CodeBuddy");
     // Fallback: active profile provider, then brand agent name.
     if (m_provider == QLatin1String("claude"))
         return QLatin1String("Claude");
@@ -886,6 +932,9 @@ QString ApiClient::statusActor() const
     if (m_provider == QLatin1String("copilot")
             || m_provider == QLatin1String("github-copilot"))
         return QLatin1String("Copilot");
+    if (m_provider == QLatin1String("codebuddy")
+            || m_provider == QLatin1String("cbc"))
+        return QLatin1String("CodeBuddy");
     return agentName();
 }
 

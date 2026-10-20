@@ -18,7 +18,7 @@
   <img src="docs/cover.jpg" alt="Agent Remote — control your AI sessions from anywhere" width="100%">
 </p>
 
-Start, watch, and steer Claude Code, Grok, Codex, DeepSeek, Cursor Agent, and GitHub Copilot from your
+Start, watch, and steer Claude Code, Grok, Codex, DeepSeek, Cursor Agent, GitHub Copilot, and CodeBuddy Code from your
 phone or browser — even when you are away from the desk. A small daemon on your Mac or
 VPS talks to the CLIs you already use. Clients merge every host into **one
 list**.
@@ -26,7 +26,7 @@ list**.
 ## Get started
 
 You need **Python 3** and at least one working CLI on the machine you install
-on: `claude`, `grok`, `codex`, `cursor-agent`, and/or `dsh` (DeepSeek Harness) — subscription
+on: `claude`, `grok`, `codex`, `cursor-agent`, `codebuddy`, and/or `dsh` (DeepSeek Harness) — subscription
 login or API key. Confirm the CLI works in a normal terminal first.
 
 ### 1. Install the daemon
@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/jxw1102/agent-remote/main/install.s
 It prints a **Base URL** and **token**. On macOS it installs a launchd service;
 on Linux, a user systemd unit.
 
-**Or hand this to your coding agent.** Paste into Claude, Codex, Grok, Cursor, or Copilot
+**Or hand this to your coding agent.** Paste into Claude, Codex, Grok, Cursor, Copilot, or CodeBuddy
 (no clone needed):
 
 ```text

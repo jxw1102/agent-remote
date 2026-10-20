@@ -31,6 +31,7 @@ enum class Accent(val tint: Color, val onTint: Color, val label: String) {
     DeepSeek(Color(0xFF4D6BFE), Color(0xFF0B1024), "DeepSeek"),
     Cursor(Color(0xFFD946EF), Color(0xFF24082A), "Cursor"),
     Copilot(Color(0xFF8957E5), Color(0xFF160B2A), "Copilot"),
+    CodeBuddy(Color(0xFF58C08B), Color(0xFF10281B), "CodeBuddy"),
     Neutral(Color(0xFF9AA4B2), Color(0xFF11151A), "Agent"),
     ;
 
@@ -42,6 +43,7 @@ enum class Accent(val tint: Color, val onTint: Color, val label: String) {
             "deepseek", "dsh" -> DeepSeek
             "cursor", "cursor-agent" -> Cursor
             "copilot", "github-copilot" -> Copilot
+            "codebuddy", "cbc", "codebuddy-code" -> CodeBuddy
             else -> Neutral
         }
     }
@@ -83,6 +85,7 @@ private fun darkPalette(accent: Accent) = RemotePalette(
         Accent.DeepSeek -> Color(0xFF93A8FF)
         Accent.Cursor -> Color(0xFFF0ABFC)
         Accent.Copilot -> Color(0xFFD2A8FF)
+        Accent.CodeBuddy -> Color(0xFFA8E3C8)
         else -> Color(0xFF67E8F9)
     },
     heading = when (accent) {
@@ -91,6 +94,7 @@ private fun darkPalette(accent: Accent) = RemotePalette(
         Accent.DeepSeek -> Color(0xFF7B93FF)
         Accent.Cursor -> Color(0xFFE879F9)
         Accent.Copilot -> Color(0xFFB392F0)
+        Accent.CodeBuddy -> Color(0xFF7FD4A8)
         else -> Color(0xFFB9A2F0)
     },
     thought = Color(0xFF8B93A3),
@@ -114,6 +118,7 @@ private fun lightPalette(accent: Accent) = RemotePalette(
         Accent.Codex -> Color(0xFF0D7A5A)
         Accent.Cursor -> Color(0xFFA21CAF)
         Accent.Copilot -> Color(0xFF6E40C9)
+        Accent.CodeBuddy -> Color(0xFF268253)
         else -> Color(0xFF0B7C93)
     },
     heading = when (accent) {
@@ -121,6 +126,7 @@ private fun lightPalette(accent: Accent) = RemotePalette(
         Accent.Codex -> Color(0xFF0D7A5A)
         Accent.Cursor -> Color(0xFFA21CAF)
         Accent.Copilot -> Color(0xFF6E40C9)
+        Accent.CodeBuddy -> Color(0xFF268253)
         else -> Color(0xFF5B3FA8)
     },
     thought = Color(0xFF5C6472),

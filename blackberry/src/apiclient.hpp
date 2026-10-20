@@ -479,6 +479,13 @@ public:
     Q_INVOKABLE QStringList profileHarnesses() const;
     // requires_cwd for a specific harness on a multi host (else profile caps).
     Q_INVOKABLE bool harnessRequiresCwd(const QString &harness) const;
+    // Per-harness model list and can_set_model cap for the NEW-session
+    // sheet, where no session is open yet so sessionModels()/sessionCapSetModel
+    // (keyed on m_sessionProvider) would fall back to the multi-host root
+    // union, which is often empty / just "default". Reads the same
+    // provider_details[h] catalogue the Session sheet uses for an open session.
+    Q_INVOKABLE QStringList harnessModels(const QString &harness) const;
+    Q_INVOKABLE bool harnessCapSetModel(const QString &harness) const;
     bool harnessCap(const QString &harness, const QString &cap,
                     bool fallback) const;
     // Rewind is per harness (a multi host's root caps are a union), so the

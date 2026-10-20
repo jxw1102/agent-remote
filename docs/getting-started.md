@@ -10,6 +10,7 @@ Smoke path for a **fresh machine → working phone client**.
   - and/or `codex`
   - and/or `grok`
   - and/or `cursor-agent`
+  - and/or `codebuddy` (Tencent CodeBuddy Code)
 - Optional: `cloudflared` for HTTPS to the phone
   ([downloads](https://developers.cloudflare.com/tunnel/downloads/) —
   macOS: `brew install cloudflared`)
@@ -17,7 +18,7 @@ Smoke path for a **fresh machine → working phone client**.
 Confirm the CLI alone:
 
 ```bash
-claude   # or: codex / grok / cursor-agent
+claude   # or: codex / grok / cursor-agent / codebuddy
 # complete login if prompted, then quit
 ```
 

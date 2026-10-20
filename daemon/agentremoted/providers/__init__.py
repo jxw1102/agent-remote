@@ -19,7 +19,7 @@ get_messages) never filter, so a link to any session still resolves.
             blocks}]} | None
 
 Runner — how one turn is executed as a subprocess (used by jobs.JobManager):
-    name                                  "claude" | "grok" | "codex" | "deepseek" | "cursor" | "copilot"
+    name                                  "claude" | "grok" | "codex" | "deepseek" | "cursor" | "copilot" | "codebuddy"
     capabilities() -> dict                feature flags for /api/ping
     auth_health() -> dict                 optional CLI/login snapshot for /api/ping
     slash_commands() -> [str]             commands offered to the app
@@ -89,13 +89,16 @@ def build_one(config, name: str):
     elif name in ("copilot", "github-copilot", "gh-copilot"):
         from .copilot import CopilotRunner, CopilotStore
         store, runner = CopilotStore(config.copilot_home_path, config), CopilotRunner(config)
+    elif name in ("codebuddy", "cbc", "codebuddy-code"):
+        from .codebuddy import CodebuddyRunner, CodebuddyStore
+        store, runner = CodebuddyStore(config.codebuddy_home_path, config), CodebuddyRunner(config)
     if store is not None:
         titler = getattr(runner, "title_for", None)
         if callable(titler):
             store.titler = titler
         return store, runner
     raise ValueError(
-        "unknown provider %r (expected 'claude', 'grok', 'codex', 'deepseek', 'cursor', or 'copilot')"
+        "unknown provider %r (expected 'claude', 'grok', 'codex', 'deepseek', 'cursor', 'copilot', or 'codebuddy')"
         % name)
 
 

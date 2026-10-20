@@ -5,7 +5,7 @@ Everything lives under ~/.agentremoted/ (override with AGENTREMOTED_HOME):
     token        — shared secret clients must present (auto-generated)
     daemon.log   — log file when running under launchd/systemd
 
-Recommended config uses ``"providers": ["claude", "grok", "codex", "cursor"]`` (one
+Recommended config uses ``"providers": ["claude", "grok", "codex", "cursor", "codebuddy"]`` (one
 process, every harness). A lone ``"provider"`` string still works as a
 fallback when ``providers`` is empty.
 """
@@ -248,6 +248,15 @@ DEFAULTS = {
     # tool prompt. e.g. "--allow-all-paths" to lift path verification.
     "copilot_flags": "",
     "copilot_env": {},
+
+    # ---- tencent codebuddy (codebuddy / cbc) ----------------------------
+    "codebuddy_home": str(Path.home() / ".codebuddy"),
+    "codebuddy_bin": "codebuddy",
+    # Extra flags for every headless turn (whitespace-split). -y and
+    # --permission-mode are always applied in prepare().
+    "codebuddy_flags": "",
+    "codebuddy_default_cwd": "",
+    "codebuddy_env": {},
 }
 
 
@@ -283,6 +292,10 @@ class Config:
         return Path(self._data["copilot_home"]).expanduser()
 
     @property
+    def codebuddy_home_path(self) -> Path:
+        return Path(self._data["codebuddy_home"]).expanduser()
+
+    @property
     def upload_path(self) -> Path:
         raw = str(self._data.get("upload_dir") or "").strip()
         return Path(raw).expanduser() if raw else CONFIG_DIR / "uploads"
@@ -307,6 +320,8 @@ class Config:
                     name = "cursor"
                 if name in ("github-copilot", "gh-copilot"):
                     name = "copilot"
+                if name in ("cbc", "codebuddy-code"):
+                    name = "codebuddy"
                 if name and name not in out:
                     out.append(name)
             if out:
@@ -316,6 +331,8 @@ class Config:
             name = "cursor"
         if name in ("github-copilot", "gh-copilot"):
             name = "copilot"
+        if name in ("cbc", "codebuddy-code"):
+            name = "codebuddy"
         return [name]
 
     def multi_mode(self) -> bool:

@@ -262,6 +262,14 @@ def main():
           and FakeGitHub.seen_auth[-1] == "token gho_testtoken", (u, FakeGitHub.seen_auth))
     ah = runner.auth_health()
     check("auth reads the login", ah["mode"] == "subscription" and "dev" in ah["detail"], ah)
+    cfg_text = (HOME / "config.json").read_text()
+    (HOME / "config.json").write_text("// managed automatically\n" + json.dumps({
+        "lastLoggedInUser": {"host": "https://github.com", "login": "dev"},
+        "loggedInUsers": [{"host": "https://github.com", "login": "dev"}]}))
+    kc = runner.auth_health()
+    check("keychain-stored token still counts as logged in",
+          kc["status"] in ("ok", "warning") and "keychain" in kc["detail"], kc)
+    (HOME / "config.json").write_text(cfg_text)
     check("models: auto + history", runner.models()[:2] == ["auto", "claude-sonnet-5"], runner.models())
     check("efforts", runner.efforts() == ["low", "medium", "high", "xhigh"])
     caps = runner.capabilities()

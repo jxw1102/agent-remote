@@ -277,7 +277,20 @@ class _Tui:
 
 
 class InteractiveManager:
-    """Owns the tmux TUIs and runs "interactive" jobs against them."""
+    """Owns the tmux TUIs and runs "interactive" jobs against them.
+
+    CodeBuddy subclasses this and overrides the class attributes plus the
+    small hooks (_cli_parts, _project_dir, _startup_key, …). The turn loop,
+    transcript tail, and Live TUI capture stay here.
+    """
+
+    prefix = "cld-"
+    old_prefixes = ("cld-", "bb10i-")
+    state_name = "tuis.json"
+    binary_attr = "claude_bin"
+    default_binary = "claude"
+    disable_view_env = "CLAUDE_CODE_DISABLE_AGENT_VIEW"
+    product = "claude"
 
     def __init__(self, config):
         self.config = config
@@ -285,6 +298,89 @@ class InteractiveManager:
         self._tuis = {}               # tmux name -> _Tui
         self._lock = threading.Lock()
         self._adopt_or_reap()
+
+    @property
+    def state_file(self):
+        return CONFIG_DIR / self.state_name
+
+    def _binary(self) -> str:
+        return str(getattr(self.config, self.binary_attr, "")
+                   or self.default_binary)
+
+    def _plugin_for(self, isolate_root: str) -> str:
+        plugin = _PLUGIN_DIR
+        if isolate_root:
+            from .. import accounts as _accounts
+            plugin = _accounts.guest_claude_plugin_dir(isolate_root) or plugin
+        return plugin
+
+    def _project_dir(self, cwd: str, isolate_root: str = "") -> str:
+        return _claude_project_dir(cwd, isolate_root)
+
+    def _extra_exports(self, tui) -> list:
+        """(name, value) pairs exported into the TUI shell, besides the hook URL."""
+        return []
+
+    def _cli_parts(self, tui, resume_sid: str, model: str, effort: str = "") -> list:
+        parts = [self._binary(), "--permission-mode", "bypassPermissions",
+                 "--plugin-dir", self._plugin_for(tui.isolate_root)]
+        if resume_sid:
+            parts += ["--resume", resume_sid]
+        if model and model != "default":
+            parts += ["--model", model]
+        return parts
+
+    def _exec_line(self, tui, parts, *, guest: bool) -> str:
+        joined = " ".join(shlex.quote(p) for p in parts)
+        hook = shlex.quote(self._hook_url(tui.name))
+        view = self.disable_view_env
+        if guest:
+            bits = [
+                "ulimit -n 65536 2>/dev/null",
+                "export AGENTREMOTE_HOOK_URL=%s" % hook,
+                "export %s=1" % view,
+            ]
+            for key, value in self._extra_exports(tui):
+                bits.append("export %s=%s" % (key, shlex.quote(str(value))))
+            bits.append("exec %s" % joined)
+            return "; ".join(bits)
+        assigns = [
+            "AGENTREMOTE_HOOK_URL=%s" % hook,
+            "%s=1" % view,
+        ]
+        for key, value in self._extra_exports(tui):
+            assigns.append("%s=%s" % (key, shlex.quote(str(value))))
+        return "ulimit -n 65536 2>/dev/null; %s exec %s" % (
+            " ".join(assigns), joined)
+
+    def _pane_is_ready(self, text: str) -> bool:
+        return _claude_pane_ready(text)
+
+    def _pane_is_splash(self, text: str) -> bool:
+        return _claude_splash(text)
+
+    def _blocked_reason(self, text: str) -> str:
+        """Non-empty when the pane is waiting on a human we must not key past."""
+        return ""
+
+    def _startup_key(self, text: str, nudge_i: int) -> str:
+        """One tmux key to dismiss first-run chrome, or "" to leave the pane."""
+        if self._pane_is_splash(text):
+            return _SPLASH_NUDGE_KEYS[nudge_i % len(_SPLASH_NUDGE_KEYS)]
+        return ""
+
+    def _note_todos(self, job, sid: str) -> None:
+        from .claude import emit_claude_todos
+        if sid:
+            emit_claude_todos(job, str(sid))
+
+    def _on_task_tool(self, job, sid: str, tool_input) -> bool:
+        """Handle a task-list tool. True means it was fully consumed."""
+        from .claude import emit_claude_todos
+        emit_claude_todos(
+            job, str(sid or ""),
+            tool_input=tool_input if isinstance(tool_input, dict) else None)
+        return True
 
     def _save_state(self):
         """Persist the name->session mapping (see _adopt_or_reap). Only
@@ -295,10 +391,10 @@ class InteractiveManager:
                 for t in list(self._tuis.values()) if t.spawned]
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            tmp = str(_STATE_FILE) + ".tmp"
+            tmp = str(self.state_file) + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(rows, f)
-            os.replace(tmp, str(_STATE_FILE))
+            os.replace(tmp, str(self.state_file))
         except OSError:
             pass
 
@@ -310,11 +406,11 @@ class InteractiveManager:
         have no record of can never receive a turn, so those are killed."""
         known = {}
         try:
-            saved = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+            saved = json.loads(self.state_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             saved = []
         for entry in saved if isinstance(saved, list) else []:
-            if isinstance(entry, dict) and str(entry.get("name", "")).startswith(_OLD_PREFIXES):
+            if isinstance(entry, dict) and str(entry.get("name", "")).startswith(self.old_prefixes):
                 known[str(entry["name"])] = entry
         try:
             r = self._tmux("list-sessions", "-F", "#{session_name}",
@@ -322,7 +418,7 @@ class InteractiveManager:
             if r.returncode != 0:
                 return
             for name in r.stdout.decode("utf-8", errors="replace").split():
-                if not name.startswith(_OLD_PREFIXES):
+                if not name.startswith(self.old_prefixes):
                     continue
                 entry = known.get(name)
                 if entry is None:
@@ -332,7 +428,7 @@ class InteractiveManager:
                     # (empty registry, real tmux) constructed a manager, which
                     # is what "claude TUI exited mid-turn" mid-tool-call was.
                     log.info("ignoring unknown TUI %s (absent from %s)",
-                             name, _STATE_FILE.name)
+                             name, self.state_file.name)
                     continue
                 tui = _Tui(name, str(entry.get("cwd", ""))
                            or os.path.expanduser("~"),
@@ -377,7 +473,9 @@ class InteractiveManager:
                         tui = t
                         break
         if tui is None:
-            return True  # not ours (e.g. a TUI we already dropped)
+            # Another harness shares this hook secret. Returning True here
+            # used to swallow its SessionStart/Stop before that runner ran.
+            return False
         if event == "SessionEnd":
             # /clear, /exit, crash: next turn must relaunch-and-rediscover.
             if not tui.session_id or tui.session_id == sid:
@@ -637,25 +735,16 @@ class InteractiveManager:
         """Unique per TUI (not per project): <cwd-hash>-<random> so parallel
         sessions in one project each get their own tmux session."""
         h = hashlib.sha1(os.path.realpath(cwd).encode("utf-8")).hexdigest()[:8]
-        return "%s%s-%s" % (_PREFIX, h, uuid.uuid4().hex[:6])
+        return "%s%s-%s" % (self.prefix, h, uuid.uuid4().hex[:6])
 
-    def _launch(self, tui: _Tui, resume_sid: str, model: str) -> str:
+    def _launch(self, tui: _Tui, resume_sid: str, model: str,
+                effort: str = "") -> str:
         """Start the TUI in a fresh tmux session. Returns "" or an error."""
-        claude = str(getattr(self.config, "claude_bin", "claude") or "claude")
-        plugin = _PLUGIN_DIR
-        if tui.isolate_root:
-            from .. import accounts as _accounts
-            plugin = _accounts.guest_claude_plugin_dir(tui.isolate_root) or plugin
-        parts = [claude, "--permission-mode", "bypassPermissions",
-                 "--plugin-dir", plugin]
-        if resume_sid:
-            parts += ["--resume", resume_sid]
-        if model and model != "default":
-            parts += ["--model", model]
+        parts = self._cli_parts(tui, resume_sid, model, effort)
         # The hook URL (with secret) travels in the TUI's environment; the
         # plugin's hook script no-ops without it. The ulimit raise matters:
         # a tmux server born under launchd gives panes a 256-fd soft limit,
-        # under which claude crashes with EMFILE mid-turn (hard limit is
+        # under which the CLI crashes with EMFILE mid-turn (hard limit is
         # unlimited, so the pane shell may raise it itself).
         tui.start_event.clear()
         tui.session_id = ""
@@ -665,29 +754,18 @@ class InteractiveManager:
             # Same shape as grok guest launch: isolate only the CLI, force
             # env/cwd via accounts.isolate_shell_line (never TERM=dumb).
             from .. import accounts as _accounts
-            body = (
-                "ulimit -n 65536 2>/dev/null; "
-                "export AGENTREMOTE_HOOK_URL=%s; "
-                "export CLAUDE_CODE_DISABLE_AGENT_VIEW=1; exec %s"
-                % (shlex.quote(self._hook_url(tui.name)),
-                   " ".join(shlex.quote(p) for p in parts))
-            )
-            shell_cmd = _accounts.isolate_shell_line(body, tui.isolate_root)
+            shell_cmd = _accounts.isolate_shell_line(
+                self._exec_line(tui, parts, guest=True), tui.isolate_root)
         else:
             # DISABLE_AGENT_VIEW: a stray ← (one Live TUI tap on an idle
             # prompt) must not move the conversation to the background,
             # where pasted prompts render but Enter never submits.
-            shell_cmd = (
-                "ulimit -n 65536 2>/dev/null; AGENTREMOTE_HOOK_URL=%s "
-                "CLAUDE_CODE_DISABLE_AGENT_VIEW=1 exec %s"
-                % (shlex.quote(self._hook_url(tui.name)),
-                   " ".join(shlex.quote(p) for p in parts))
-            )
+            shell_cmd = self._exec_line(tui, parts, guest=False)
         # One creator for the shared socket: concurrent new-session calls
         # would each try to spawn the server, and the loser's teardown takes
         # every other session with it (see config.ensure_tmux_server).
         ensure_tmux_server(self._tmux_bin)
-        proj = _claude_project_dir(launch_cwd, tui.isolate_root)
+        proj = self._project_dir(launch_cwd, tui.isolate_root)
         try:
             before_mtime = os.path.getmtime(proj)
         except OSError:
@@ -720,7 +798,7 @@ class InteractiveManager:
         if tui.session_id and tui.transcript:
             return
         launch_cwd = tui.isolate_root or tui.cwd
-        proj = _claude_project_dir(launch_cwd, tui.isolate_root)
+        proj = self._project_dir(launch_cwd, tui.isolate_root)
         if resume_sid:
             p = os.path.join(proj, resume_sid + ".jsonl")
             if os.path.isfile(p):
@@ -745,24 +823,29 @@ class InteractiveManager:
             if tui.start_event.is_set():
                 break
             text = self._pane_text(tui.name)
-            if _claude_pane_ready(text):
+            if self._pane_is_ready(text):
                 log.info("TUI %s ready without SessionStart (pane chrome)",
                          tui.name)
                 break
+            blocked = self._blocked_reason(text)
+            if blocked:
+                self._kill(tui)
+                return blocked
             dead, why = self._pane_dead(tui.name)
             if (time.time() > deadline or not self._tmux_alive(tui.name)
                     or dead):
                 tail = self._pane_tail(tui.name)
                 self._kill(tui)
                 extra = why or tail
-                return ("claude TUI did not become ready" +
+                return ("%s TUI did not become ready" % self.product +
                         (" — screen: %s" % extra if extra else ""))
-            if _claude_splash(text) and (time.time() - last_nudge) >= _SPLASH_NUDGE_S:
-                key = _SPLASH_NUDGE_KEYS[nudge_i % len(_SPLASH_NUDGE_KEYS)]
-                log.info("TUI %s dismissing splash with %s", tui.name, key)
-                self._tmux("send-keys", "-t", tui.name, key)
-                nudge_i += 1
-                last_nudge = time.time()
+            if (time.time() - last_nudge) >= _SPLASH_NUDGE_S:
+                key = self._startup_key(text, nudge_i)
+                if key:
+                    log.info("TUI %s startup key %s", tui.name, key)
+                    self._tmux("send-keys", "-t", tui.name, key)
+                    nudge_i += 1
+                    last_nudge = time.time()
             time.sleep(_POLL_S)
         if not tui.session_id:
             bind_end = time.time() + 8.0
@@ -817,7 +900,7 @@ class InteractiveManager:
             pass
 
     def _ensure_tui(self, cwd: str, session_id: str, model: str,
-                    isolate_root: str = ""):
+                    isolate_root: str = "", effort: str = ""):
         """Return (tui, error). One TUI per claude session: a continued
         session is matched to its live TUI by session id; a new session (or
         one whose TUI died) gets a fresh TUI, --resume'ing when continuing.
@@ -874,7 +957,7 @@ class InteractiveManager:
                 self._save_state()
             tui = _Tui(self._tui_name(cwd), cwd, isolate_root=iso)
             self._tuis[tui.name] = tui
-        err = self._launch(tui, session_id, model)
+        err = self._launch(tui, session_id, model, effort)
         if err:
             with self._lock:
                 self._tuis.pop(tui.name, None)
@@ -893,7 +976,8 @@ class InteractiveManager:
         cwd = os.path.expanduser(job.cwd or "") or os.path.expanduser("~")
         iso = str(getattr(job, "isolate_root", "") or "")
         tui, err = self._ensure_tui(
-            cwd, job.session_id, job.model, isolate_root=iso)
+            cwd, job.session_id, job.model, isolate_root=iso,
+            effort=str(getattr(job, "effort", "") or ""))
         if err:
             self._fail(job, err)
             return
@@ -928,7 +1012,9 @@ class InteractiveManager:
         if tui is None or not self._tmux_alive(tui.name):
             cwd = os.path.expanduser(job.cwd or "") or os.path.expanduser("~")
             iso = str(getattr(job, "isolate_root", "") or "")
-            tui, err = self._ensure_tui(cwd, sid, job.model, isolate_root=iso)
+            tui, err = self._ensure_tui(
+                cwd, sid, job.model, isolate_root=iso,
+                effort=str(getattr(job, "effort", "") or ""))
             if err:
                 self._fail(job, "interrupted by daemon restart: %s" % err)
                 return
@@ -1144,7 +1230,7 @@ class InteractiveManager:
         if tui is None:
             return "no interactive TUI for this session"
         if not self._tmux_alive(tui.name):
-            return "the claude TUI has exited"
+            return "the %s TUI has exited" % self.product
         # Arm the watch BEFORE sending: the running turn can finish inside the
         # next few milliseconds, and if typed_ahead were still 0 the job would
         # end and this message's reply would stream to nobody.
@@ -1575,13 +1661,11 @@ class InteractiveManager:
             now = time.time()
             if now - float(state.get("todo_tick_at") or 0) >= 1.5:
                 state["todo_tick_at"] = now
-                from .claude import emit_claude_todos
                 sid = (tui.session_id
                        or getattr(job, "session_id", None)
                        or getattr(job, "new_session_id", None)
                        or "")
-                if sid:
-                    emit_claude_todos(job, str(sid))
+                self._note_todos(job, str(sid or ""))
             # A hook-delivered ask (see on_hook/PreToolUse) is the same
             # thing as one spotted in the transcript, just earlier.
             if tui.hook_ask and not state["ask"]:
@@ -1694,9 +1778,10 @@ class InteractiveManager:
                     tui.session_id = ""
                     tui.transcript = ""
                     self._save_state()
-                self._fail(job, "claude TUI exited mid-turn%s"
-                           % (" (%s)" % detail if detail else
-                              " (tmux session vanished — nothing left to read)"))
+                self._fail(job, "%s TUI exited mid-turn%s" % (
+                    self.product,
+                    (" (%s)" % detail if detail else
+                     " (tmux session vanished — nothing left to read)")))
                 return
             # Crash watchdog (_CRASH_STALL_S): claude can die leaving a
             # backtrace in a still-alive pane — no Stop hook will ever come.
@@ -1719,8 +1804,9 @@ class InteractiveManager:
                         self._kill(tui)
                         tui.session_id = ""
                         tui.transcript = ""
-                        self._fail(job, "claude crashed mid-turn (the next "
-                                   "message restarts it) — %s" % detail)
+                        self._fail(job, "%s crashed mid-turn (the next "
+                                   "message restarts it) — %s" % (
+                                       self.product, detail))
                         return
                 else:
                     dead_t = 0.0
@@ -1848,7 +1934,6 @@ class InteractiveManager:
         subtype local_command."""
         from .claude import (
             tool_detail, tool_status_parts, _PHASE_BY_TOOL, _TASK_TOOLS,
-            emit_claude_todos,
         )
         from ..render_blocks import markdown_to_blocks
         if obj.get("isSidechain"):
@@ -1886,10 +1971,8 @@ class InteractiveManager:
                            or getattr(job, "new_session_id", None)
                            or state.get("session_id")
                            or "")
-                    emit_claude_todos(
-                        job, str(sid or ""),
-                        tool_input=tool_input if isinstance(tool_input, dict) else None)
-                    continue
+                    if self._on_task_tool(job, str(sid or ""), tool_input):
+                        continue
                 desc, cmd = tool_status_parts(
                     tool_input if isinstance(tool_input, dict) else {})
                 # phase_detail = description (banner line 1);

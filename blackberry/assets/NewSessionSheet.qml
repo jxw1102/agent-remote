@@ -9,6 +9,9 @@ Sheet {
     property string projectName: ""
     // Multi-harness: which provider to start on (claude|grok|codex).
     property string harness: ""
+    // Guards DropDown onSelectedValueChanged during programmatic setup
+    // (same ready-flag pattern SessionSheet uses).
+    property bool ready: false
 
     signal startRequested(string cwd, string prompt, string provider)
 
@@ -17,13 +20,53 @@ Sheet {
     // Set cwd/projectName first, then call show(). The picked project's
     // path prefills the editable working-directory field.
     function show() {
+        ready = false;
         promptArea.text = "";
         cwdField.text = newSessionSheet.cwd;
         // Default harness: first from multi list, else profile provider.
         var hs = harnesses();
         newSessionSheet.harness = hs.length ? hs[0] : "";
         rebuildHarnessChips();
+        rebuildModelDropdown();
+        ready = true;
         open();
+    }
+
+    // Fill a DropDown from a string list, selecting `current`. Mirrors
+    // SessionSheet.fillDropdown so the two pickers stay consistent.
+    function fillDropdown(dd, list, current) {
+        dd.removeAll();
+        var sel = 0;
+        for (var i = 0; i < list.length; i++) {
+            var name = "" + list[i];
+            var opt = Qt.createQmlObject(
+                "import bb.cascades 1.4; Option {}", dd);
+            opt.text = (name == "default") ? qsTr("Default") : name;
+            opt.value = name;
+            dd.add(opt);
+            if (name == current)
+                sel = i;
+        }
+        if (dd.count() > 0)
+            dd.selectedIndex = sel;
+    }
+
+    function rebuildModelDropdown() {
+        var a = newSessionSheet.api;
+        if (! a)
+            return;
+        // New session has no open session yet, so use the harness-parameterized
+        // catalogue (provider_details[h].models) for the harness the user
+        // picked — NOT the multi-host root union (api.models), which on a
+        // multi-harness daemon is often empty / just "default". Mirrors
+        // sessionModels() for an open session. Falls back to "default"
+        // when the daemon hasn't advertised any for this harness.
+        var h = newSessionSheet.harness;
+        var models = a.harnessModels(h);
+        if (! models || models.length == 0)
+            models = [ "default" ];
+        var mo = a.modelOverride;
+        fillDropdown(modelDrop, models, mo == "" ? "default" : mo);
     }
 
     function harnesses() {
@@ -62,6 +105,7 @@ Sheet {
             else if (h == "deepseek" || h == "dsh") label = "DeepSeek";
             else if (h == "cursor" || h == "cursor-agent") label = "Cursor";
             else if (h == "copilot" || h == "github-copilot") label = "Copilot";
+            else if (h == "codebuddy" || h == "cbc") label = "CodeBuddy";
             else if (label.length > 0)
                 label = label.charAt(0).toUpperCase() + label.substring(1);
             harnessModel.append({
@@ -103,15 +147,21 @@ Sheet {
             }
         }
 
-        Container {
-            leftPadding: 24
-            rightPadding: 24
-            topPadding: 24
+        ScrollView {
+            // Passport: the capacitive-keyboard swipe scrolls the page's
+            // MAIN scrollable. Cascades only auto-picks one when it has no
+            // siblings, so say so explicitly (see SessionSheet / SettingsSheet).
+            scrollRole: ScrollRole.Main
+            Container {
+                leftPadding: 24
+                rightPadding: 24
+                topPadding: 24
+                bottomPadding: 24
 
-            Label {
-                text: newSessionSheet.projectName
-                textStyle.fontSize: FontSize.Large
-            }
+                Label {
+                    text: newSessionSheet.projectName
+                    textStyle.fontSize: FontSize.Large
+                }
 
             // Unified: restates which daemon is active.
             Label {
@@ -188,6 +238,33 @@ Sheet {
                             return;
                         newSessionSheet.harness = item.id;
                         newSessionSheet.rebuildHarnessChips();
+                        // Harness changed → its model catalogue and cap may
+                        // differ (e.g. grok lists models, claude may not).
+                        newSessionSheet.rebuildModelDropdown();
+                    }
+                }
+            }
+
+            // Model picker (per-harness cap + catalogue from /api/ping).
+            // Parity with SessionSheet's picker and Android's NewSessionScreen.
+            Container {
+                id: modelContainer
+                visible: newSessionSheet.api
+                         ? newSessionSheet.api.harnessCapSetModel(newSessionSheet.harness)
+                         : false
+                topMargin: 16
+
+                Label {
+                    text: qsTr("Model")
+                    textStyle.fontSize: FontSize.XSmall
+                    textStyle.color: Color.create("#888888")
+                }
+                DropDown {
+                    id: modelDrop
+                    topMargin: 8
+                    onSelectedValueChanged: {
+                        if (newSessionSheet.ready && newSessionSheet.api && selectedValue)
+                            newSessionSheet.api.setModelOverride("" + selectedValue);
                     }
                 }
             }
@@ -221,10 +298,19 @@ Sheet {
                              || newSessionSheet.harness == "cursor-agent") name = "Cursor";
                     else if (newSessionSheet.harness == "copilot"
                              || newSessionSheet.harness == "github-copilot") name = "Copilot";
+                    else if (newSessionSheet.harness == "codebuddy"
+                             || newSessionSheet.harness == "cbc") name = "CodeBuddy";
                     else if (a) name = a.agentName;
                     return qsTr("What should %1 do?").arg(name);
                 }
-                layoutProperties: StackLayoutProperties { spaceQuota: 1 }
+                // Inside a ScrollView the parent's height is unbounded, so
+                // spaceQuota: 1 would collapse the compose area to its
+                // preferred size. Pin a min/max instead so the field is
+                // comfortable and the sheet scrolls when content overflows.
+                minHeight: 160
+                maxHeight: 320
+                maximumLength: 8000
+            }
             }
         }
     }

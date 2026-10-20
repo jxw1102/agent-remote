@@ -11,18 +11,17 @@ Whenever you change a **client-side** feature, behaviour, or API contract, consi
 
 | Platform | Location |
 |----------|----------|
-| Web | `web/` |
-| Android | `android/` (Compose) |
-| iOS | `ios/` (SwiftUI) |
-| BlackBerry 10 | `blackberry/` (Cascades / QML + C++) |
-| LILYGO T-LoRa Pager | `esp32/` (ESP32-S3 firmware) |
-| Pebble Time 2 | `pebble/` (C + PKJS, emery) |
+| Web | `bb10-remote/web/` |
+| Android | `bb10-remote/android/` (Compose) |
+| BlackBerry 10 | `bb10-remote/blackberry/` (Cascades / QML + C++) |
+| LILYGO T-LoRa Pager | `bb10-remote/esp32/` (ESP32-S3 firmware) |
 
 Harnesses the daemon can front: Claude Code, Grok, Codex, DeepSeek
 Harness (`dsh web` on localhost — no TUI; the daemon is a client of `/api`
 and starts `dsh web` if it is not already running), GitHub Copilot
-(`copilot -p`, sessions in `~/.copilot/session-state/`), and Cursor Agent
-(`cursor-agent --print`).
+(`copilot -p`, sessions in `~/.copilot/session-state/`), Cursor Agent
+(`cursor-agent --print`), and Tencent CodeBuddy Code (`codebuddy -p` or
+the interactive TUI in tmux, sessions in `~/.codebuddy/projects/**/*.jsonl`).
 
 Examples of work that almost always spans clients:
 

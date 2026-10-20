@@ -1348,6 +1348,14 @@ class ClaudeStore:
         # (mtime_ns, size) -> is-the-user's-own-session verdict, same deal.
         self._user_memo = {}
 
+    def _rec(self, obj):
+        """Normalize one parsed transcript record before any consumer sees
+        it. Identity here: Claude Code writes the schema the store walks.
+        Subclasses (CodebuddyStore) override this to fold other record
+        shapes into the same schema, so listing, transcript, steps, search,
+        and /rewind all read through this one seam."""
+        return obj
+
     def _scan_session(self, path: Path):
         """Full-file scan for the number of context compactions, the first
         user message, and the text of the most-recent compaction summary.
@@ -1367,7 +1375,7 @@ class ClaudeStore:
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
-                    obj = _safe_json(line)
+                    obj = self._rec(_safe_json(line))
                     if not obj or obj.get("type") != "user":
                         continue
                     if obj.get("isCompactSummary"):
@@ -1418,7 +1426,7 @@ class ClaudeStore:
         has_reply = False
         sidechain = False
         for line in lines:
-            obj = _safe_json(line)
+            obj = self._rec(_safe_json(line))
             if not obj:
                 continue
             if obj.get("isSidechain") is True:
@@ -1663,7 +1671,7 @@ class ClaudeStore:
             for line in f:
                 if uid not in line:
                     continue      # cheap reject before the JSON parse
-                obj = _safe_json(line)
+                obj = self._rec(_safe_json(line))
                 if not isinstance(obj, dict) or obj.get("uuid") != uid:
                     continue
                 text = _step_full(obj, index)
@@ -1702,7 +1710,7 @@ class ClaudeStore:
         pos = 0
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
-                obj = _safe_json(line)
+                obj = self._rec(_safe_json(line))
                 if isinstance(obj, dict):
                     uid = obj.get("uuid")
                     if uid:
@@ -1771,7 +1779,7 @@ class ClaudeStore:
         name munging is lossy, so read it from the data)."""
         newest = max(files, key=lambda f: f.stat().st_mtime)
         for line in _read_head_lines(newest, _HEAD_BYTES):
-            obj = _safe_json(line)
+            obj = self._rec(_safe_json(line))
             if obj and obj.get("cwd"):
                 return obj["cwd"]
         return ""
@@ -1794,7 +1802,7 @@ class ClaudeStore:
         git_branch = ""
         started = ""
         for line in head:
-            obj = _safe_json(line)
+            obj = self._rec(_safe_json(line))
             if not obj:
                 continue
             if obj.get("type") == "summary" and not summary_text:
@@ -1830,7 +1838,7 @@ class ClaudeStore:
         tail_title = ""
         model = ""
         for line in reversed(tail):
-            obj = _safe_json(line)
+            obj = self._rec(_safe_json(line))
             if not obj:
                 continue
             if obj.get("type") == "ai-title" and not tail_title:
@@ -1919,7 +1927,7 @@ class ClaudeStore:
 
     def _parse_line(self, line: str, obj=None) -> dict:
         if obj is None:
-            obj = _safe_json(line)
+            obj = self._rec(_safe_json(line))
         if not obj or obj.get("type") not in ("user", "assistant"):
             return None
         message = obj.get("message") or {}

@@ -708,6 +708,13 @@ class CopilotRunner:
                     "status": "ok" if on_path else "warning",
                     "detail": ("GitHub Copilot login: %s" % login if login
                                else "GitHub Copilot token present") + tail}
+        if login or self._cli_config().get("loggedInUsers"):
+            # Newer CLIs keep the token in the OS keychain, not config.json.
+            return {"cli": "copilot", "cli_on_path": on_path,
+                    "mode": "subscription",
+                    "status": "ok" if on_path else "warning",
+                    "detail": ("GitHub Copilot login: %s (token in system keychain)"
+                               % (login or "signed in")) + tail}
         return {"cli": "copilot", "cli_on_path": on_path, "mode": "none",
                 "status": "missing",
                 "detail": "No Copilot login on this host — run `copilot login`" + tail}
@@ -818,7 +825,10 @@ class CopilotRunner:
             token = self._token()
             base = {"provider": "copilot", "account": login, "account_id": login}
             if not token:
-                return dict(base, ok=False, error="No Copilot login on this host")
+                return dict(base, ok=False, error=(
+                    "Copilot token is in the system keychain — set "
+                    "COPILOT_GITHUB_TOKEN in copilot_env to show usage" if login
+                    else "No Copilot login on this host"))
             url = str(getattr(self.config, "copilot_usage_url", "") or _USAGE_URL)
             req = urllib.request.Request(url, headers={
                 "Authorization": "token " + token,

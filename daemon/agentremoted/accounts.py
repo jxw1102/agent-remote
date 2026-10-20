@@ -499,7 +499,8 @@ _JAIL_RO_BINDS = (
     "/etc", "/dev", "/proc", "/sys", "/run", "/var/run",
 )
 _JAIL_HOME_BINDS = (
-    ".claude", ".grok", ".codex", ".cursor", ".copilot", ".npm", ".local", ".config",
+    ".claude", ".grok", ".codex", ".cursor", ".copilot", ".codebuddy",
+    ".npm", ".local", ".config",
 )
 
 
@@ -724,6 +725,9 @@ _GUEST_SEED_FILES = (
     ".codex/models_cache.json",
     ".codex/installation_id",
     ".codex/.sandbox_migration",
+    # CodeBuddy
+    ".codebuddy/settings.json",
+    ".codebuddy/settings.local.json",
 )
 
 # $HOME/.claude.json is *outside* ~/.claude/. Copy host keys so the TUI
@@ -748,6 +752,11 @@ _GUEST_SEED_DIRS = (
     (".codex/plugins", ()),
     (".codex/skills", ()),
     (".codex/packages", ()),
+    # CodeBuddy
+    (".codebuddy/skills", ()),
+    (".codebuddy/commands", ()),
+    (".codebuddy/agents", ()),
+    (".codebuddy/rules", ()),
 )
 
 # Names never copied from a seed dir tree (defense in depth).
@@ -941,6 +950,46 @@ def _seed_guest_claude_json(root: str) -> None:
         log.warning("guest .claude.json write: %s", e)
 
 
+def _seed_guest_codebuddy_auth(guest_root: str) -> None:
+    """Copy the CLI login file into the guest HOME.
+
+    CodeBuddy reads ``$HOME/Library/Application Support/CodeBuddyExtension/...``
+    on macOS (and ``~/.local/share/CodeBuddyExtension/...`` on Linux), not
+    ``~/.codebuddy``. A rewritten HOME would otherwise look logged out.
+    """
+    import shutil
+    system = os.uname().sysname if hasattr(os, "uname") else ""
+    if system == "Darwin":
+        rel = os.path.join(
+            "Library", "Application Support", "CodeBuddyExtension",
+            "Data", "Public", "auth")
+    elif system == "Linux":
+        rel = os.path.join(
+            ".local", "share", "CodeBuddyExtension", "Data", "Public", "auth")
+    else:
+        return
+    src = Path.home() / rel
+    if not src.is_dir():
+        return
+    dst = Path(guest_root) / rel
+    try:
+        dst.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        log.warning("guest codebuddy auth mkdir: %s", e)
+        return
+    try:
+        files = [p for p in src.glob("*.info") if p.is_file()]
+    except OSError:
+        return
+    for path in files:
+        target = dst / path.name
+        try:
+            shutil.copy2(path, target)
+            target.chmod(0o600)
+        except OSError as e:
+            log.warning("guest codebuddy auth %s: %s", path.name, e)
+
+
 def seed_guest_home(isolate_root: str) -> None:
     """Mirror main harness config into the guest root as its HOME.
 
@@ -976,6 +1025,7 @@ def seed_guest_home(isolate_root: str) -> None:
         except OSError as e:
             log.warning("guest seed dir %s failed: %s", rel, e)
     _write_guest_trusted_folders(guest / ".grok", root)
+    _seed_guest_codebuddy_auth(root)
     _seed_guest_claude_json(root)
     guest_claude_plugin_dir(root)
     _ensure_guest_home_stubs(root)
@@ -1274,6 +1324,7 @@ def isolation_env(base_env: Optional[dict], isolate_root: str) -> dict:
     env.pop("CLAUDE_CONFIG_DIR", None)
     env["GROK_HOME"] = os.path.join(root, ".grok")
     env["CODEX_HOME"] = os.path.join(root, ".codex")
+    env["CODEBUDDY_CONFIG_DIR"] = os.path.join(root, ".codebuddy")
     tmp = os.path.join(root, ".agentremote", "tmp")
     try:
         os.makedirs(tmp, mode=0o700, exist_ok=True)
@@ -1340,7 +1391,7 @@ def _guest_inner_shell(command: str, root: str) -> str:
         "export HOME=%s "
         "PATH=%s${PATH:+:$PATH} "
         "TMPDIR=%s TMP=%s TEMP=%s "
-        "GROK_HOME=%s CODEX_HOME=%s "
+        "GROK_HOME=%s CODEX_HOME=%s CODEBUDDY_CONFIG_DIR=%s "
         "AGENTREMOTE_ISOLATE_ROOT=%s GROK_SANDBOX=%s; "
         "unset CLAUDE_CONFIG_DIR; "
         "cd %s && %s"
@@ -1352,6 +1403,7 @@ def _guest_inner_shell(command: str, root: str) -> str:
         shlex.quote(tmp),
         shlex.quote(os.path.join(root, ".grok")),
         shlex.quote(os.path.join(root, ".codex")),
+        shlex.quote(os.path.join(root, ".codebuddy")),
         shlex.quote(root),
         shlex.quote(GUEST_GROK_SANDBOX),
         shlex.quote(root),
@@ -1446,6 +1498,7 @@ def _bwrap_argv(root: str, cmd: list) -> list:
         "--setenv", "GROK_HOME", os.path.join(root, ".grok"),
         "--unsetenv", "CLAUDE_CONFIG_DIR",
         "--setenv", "CODEX_HOME", os.path.join(root, ".codex"),
+        "--setenv", "CODEBUDDY_CONFIG_DIR", os.path.join(root, ".codebuddy"),
         "--setenv", "TMPDIR", "/tmp",
         "--setenv", "TMP", "/tmp",
         "--setenv", "TEMP", "/tmp",
@@ -1486,7 +1539,7 @@ def wrap_shell_command(command: str, isolate_root: str) -> str:
     env_exports = (
         "export HOME=%s PATH=%s${PATH:+:$PATH} "
         "TMPDIR=%s TMP=%s TEMP=%s "
-        "GROK_HOME=%s CODEX_HOME=%s "
+        "GROK_HOME=%s CODEX_HOME=%s CODEBUDDY_CONFIG_DIR=%s "
         "AGENTREMOTE_ISOLATE_ROOT=%s GROK_SANDBOX=%s TERM=xterm-256color; "
         "unset CLAUDE_CONFIG_DIR; "
     ) % (
@@ -1497,6 +1550,7 @@ def wrap_shell_command(command: str, isolate_root: str) -> str:
         shlex.quote(tmp),
         shlex.quote(os.path.join(root, ".grok")),
         shlex.quote(os.path.join(root, ".codex")),
+        shlex.quote(os.path.join(root, ".codebuddy")),
         shlex.quote(root),
         shlex.quote(GUEST_GROK_SANDBOX),
     )

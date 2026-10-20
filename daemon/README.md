@@ -19,6 +19,40 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.16.0** CodeBuddy sessions written by the `ptc` agent render again.
+CodeBuddy's older CLI wrote Claude-shaped JSONL; the current `ptc` host
+writes Codex-shaped records (`message` / `reasoning` / `function_call` /
+`function_call_result`, epoch-ms timestamps, `id`/`parentId`). The store now
+folds those into the Claude shape record by record, so the session list,
+transcripts, steps, search and `/rewind` work on both shapes. The CodeBuddy
+brand accent is also green (`#58c08b`) on every client.
+
+**2.14.4** Auth health stops crying wolf. Copilot CLI 1.0.9x keeps its
+token in the macOS Keychain instead of `~/.copilot/config.json`, so a
+signed-in user (`lastLoggedInUser` / `loggedInUsers`) now reports `ok`
+rather than "missing". A Codex `auth.json` with an expired access token but a
+refresh token is also `ok`, since `codex` refreshes it on the next turn.
+
+**2.15.0** Tencent CodeBuddy Code (`codebuddy`, alias `cbc`) as a seventh
+harness. Add `"codebuddy"` to `providers`. Sessions are Claude-shaped JSONL
+under `~/.codebuddy/projects/<cwd>/<id>.jsonl` (override with `codebuddy_home`
+/ `CODEBUDDY_CONFIG_DIR`). Headless turns run
+`codebuddy -p … --output-format stream-json --verbose --dangerously-skip-permissions --permission-mode bypassPermissions`;
+a continuation passes `--resume <uuid>`. The model picker reads the ids from
+`codebuddy --help` (aliases such as `default-model`, plus the concrete ids
+that build lists). Effort maps to `--effort` (`low` … `max`). `/rewind N`
+cuts the JSONL at the Nth-last human message, the same way Claude does.
+Login is `CODEBUDDY_API_KEY`, `CODEBUDDY_AUTH_TOKEN`, settings `apiKeyHelper`,
+or the CLI auth file under `CodeBuddyExtension`. When `tmux` is installed,
+Interactive mode drives the real TUI (`cbc-*` on the private socket) and
+Live TUI can capture that pane. The daemon accepts the folder-trust dialog
+(this folder only) and stops on the login picker instead of opening a
+browser. Headless turns still have no phone permission prompt:
+HIGH/CRITICAL checks can block until the job timeout. Plan mode is passed
+through without `-y`. New config keys: `codebuddy_bin`, `codebuddy_home`,
+`codebuddy_flags`, `codebuddy_default_cwd`, `codebuddy_env`. Covered by
+`tests/codebuddy_test.py`.
+
 **2.14.3** The client timing log is gone. `POST /api/clientlog` used to
 append phones' transcript-load timings to `~/.agentremoted/client-timing.log`
 for off-device analysis; nothing has posted to it since the August builds,
@@ -269,6 +303,7 @@ state tags on session rows, session rename / retitle, and `"focus": true` on
 | `codex`  | `~/.codex` state / rollouts | `codex exec` / interactive TUI |
 | `deepseek` | `dsh web` `/api` on localhost (adopted or daemon-started) | `session.prompt` / `session.cancel` |
 | `copilot` | `~/.copilot/session-state/<id>/events.jsonl` | `copilot -p` (headless) or interactive TUI |
+| `codebuddy` | `~/.codebuddy/projects/**/*.jsonl` | `codebuddy -p` (headless) or interactive TUI |
 
 Everything CLI-specific lives in `agentremoted/providers/`. Queue, stop,
 permission bridge, and status streams are shared.
@@ -403,7 +438,7 @@ sudo systemctl enable --now agentremoted
 - `GET /api/ping` → `multi: true` when more than one provider, plus
   `providers` and per-harness `provider_details`
 - Sessions merged; each row has `provider`
-- `POST /api/sessions/new` requires `"provider": "claude"|"grok"|"codex"|"deepseek"|"cursor"|"copilot"`
+- `POST /api/sessions/new` requires `"provider": "claude"|"grok"|"codex"|"deepseek"|"cursor"|"copilot"|"codebuddy"`
 
 Path mounts (`/claude/…`, `/grok/…`) still work. `/internal/permission` and
 `/internal/hook` stay unprefixed (MCP / TUI).
@@ -550,6 +585,8 @@ session journal, then the next turn resumes from the rewound point.
 * codex — the rollout JSONL is truncated at the turn boundary of the
   Nth-last `user_message`.
 * copilot — `events.jsonl` is cut at the Nth-last `user.message`.
+* codebuddy — the session transcript (`~/.codebuddy/projects/…/<id>.jsonl`) is
+  cut at the Nth-last human message on the active `parentUuid` branch.
 
 Conversation only: file changes on the host are never reverted. Works in
 BOTH execution modes (the journals are what `--resume` replays); a live
@@ -583,6 +620,7 @@ cd daemon
 python3 tests/smoke_test.py
 python3 tests/cursor_test.py
 python3 tests/copilot_test.py
+python3 tests/codebuddy_test.py
 python3 tests/render_test.py
 python3 tests/focus_test.py        # focus state machine (unit)
 python3 tests/focus_api_test.py    # focus over HTTP, incl. enrolment rules

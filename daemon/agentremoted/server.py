@@ -1071,6 +1071,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             if name in ("copilot", "github-copilot", "gh-copilot"):
                 from .providers.copilot import CopilotStore
                 return CopilotStore(root / ".copilot", self.config)
+            if name in ("codebuddy", "cbc", "codebuddy-code"):
+                from .providers.codebuddy import CodebuddyStore
+                return CodebuddyStore(root / ".codebuddy", self.config)
         except Exception:
             log.exception("guest store for %s failed", name)
         return None

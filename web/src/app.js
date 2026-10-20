@@ -21,6 +21,8 @@ const PROVIDERS = {
   "cursor-agent": { label: "Cursor", accent: "#d946ef", heading: "#e879f9", inline: "#f0abfc" },
   copilot: { label: "Copilot", accent: "#8957e5", heading: "#b392f0", inline: "#d2a8ff" },
   "github-copilot": { label: "Copilot", accent: "#8957e5", heading: "#b392f0", inline: "#d2a8ff" },
+  codebuddy: { label: "CodeBuddy", accent: "#58c08b", heading: "#7fd4a8", inline: "#a8e3c8" },
+  cbc: { label: "CodeBuddy", accent: "#58c08b", heading: "#7fd4a8", inline: "#a8e3c8" },
 };
 const NEUTRAL = { label: "Agent", accent: "#9aa4b2", heading: "#9aa4b2", inline: "#9aa4b2" };
 // Multi-harness host chrome (one profile, Claude+Grok+Codex) — purple, not gray.
@@ -3998,7 +4000,7 @@ function normalizeBaseUrl(raw) {
   let url = String(raw || "").trim().replace(/\/+$/, "");
   if (url && !/^https?:\/\//i.test(url)) url = "http://" + url;
   // Strip accidental /claude|/grok|/codex suffixes — multi lives at the root.
-  return url.replace(/\/(claude|grok|codex|deepseek|dsh|cursor|cursor-agent|copilot)$/i, "");
+  return url.replace(/\/(claude|grok|codex|deepseek|dsh|cursor|cursor-agent|copilot|codebuddy|cbc)$/i, "");
 }
 
 function normalizeProfile(p) {

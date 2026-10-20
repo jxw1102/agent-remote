@@ -9,7 +9,7 @@ tokens and does not hold Anthropic/OpenAI/xAI API keys in its own config
 | Credential | Who issues it | Purpose |
 |------------|---------------|---------|
 | **Daemon token** (`~/.agentremoted/token`) | agentremoted on first start | Authenticates clients to the HTTP API |
-| **Harness login / API key** | Claude, Codex, Grok, DeepSeek, Cursor, Copilot CLIs | Pays for model usage |
+| **Harness login / API key** | Claude, Codex, Grok, DeepSeek, Cursor, Copilot, CodeBuddy CLIs | Pays for model usage |
 
 Clients only ever send the **daemon token**. LLM billing stays with the host
 CLIs.
@@ -28,7 +28,8 @@ Codex is similar: ChatGPT login vs `OPENAI_API_KEY`. Grok uses whatever the
 `grok` CLI is configured with on that host. Cursor Agent uses `cursor-agent
 login` or `CURSOR_API_KEY`. GitHub Copilot uses the seat `copilot login`
 signed in with; the Usage sheet shows that seat's monthly premium-request
-allowance.
+allowance. CodeBuddy Code uses `codebuddy` sign-in, or `CODEBUDDY_API_KEY` /
+`CODEBUDDY_AUTH_TOKEN`. The Usage sheet does not scrape a CodeBuddy quota.
 
 ## Official Claude Remote Control vs Agent Remote
 

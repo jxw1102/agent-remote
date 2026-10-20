@@ -112,6 +112,7 @@ function applyAccent(provider) {
     : (p === "deepseek" || p === "dsh") ? "#4d6bfe"
     : (p === "cursor" || p === "cursor-agent") ? "#d946ef"
     : (p === "copilot" || p === "github-copilot") ? "#8957e5"
+    : (p === "codebuddy" || p === "cbc") ? "#58c08b"
     : "#9aa4b2";
   document.documentElement.style.setProperty("--accent", accent);
 }

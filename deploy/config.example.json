@@ -1,7 +1,7 @@
 {
   "bind": "0.0.0.0",
   "port": 8473,
-  "providers": ["claude", "grok", "codex", "deepseek", "cursor", "copilot"],
+  "providers": ["claude", "grok", "codex", "deepseek", "cursor", "copilot", "codebuddy"],
 
   "claude_bin": "claude",
   "permission_mode": "bypassPermissions",
@@ -35,6 +35,12 @@
   "copilot_home": "~/.copilot",
   "copilot_flags": "",
   "copilot_env": {},
+
+  "codebuddy_bin": "codebuddy",
+  "codebuddy_home": "~/.codebuddy",
+  "codebuddy_flags": "",
+  "codebuddy_default_cwd": "",
+  "codebuddy_env": {},
 
   "turn_timeout": 1800
 }

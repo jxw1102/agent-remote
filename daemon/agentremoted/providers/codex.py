@@ -1592,7 +1592,17 @@ class CodexRunner:
                 "detail": ("ChatGPT / Codex login looks valid"
                            + ("" if on_path else "; `codex` not on PATH")),
             }
-        if access or refresh:
+        if refresh:
+            # Short-lived access token; `codex` refreshes it on the next turn.
+            return {
+                "cli": "codex",
+                "cli_on_path": on_path,
+                "mode": "subscription",
+                "status": "ok" if on_path else "warning",
+                "detail": ("ChatGPT / Codex login (access token refreshes on next use)"
+                           + ("" if on_path else "; `codex` not on PATH")),
+            }
+        if access:
             return {
                 "cli": "codex",
                 "cli_on_path": on_path,
