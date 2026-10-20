@@ -145,6 +145,15 @@ _PERM_FOOTER_RE = re.compile(
     re.I)
 
 
+def _blocks(text: str) -> list:
+    """Rich blocks for a question body (the clients paint those)."""
+    from ..render_blocks import markdown_to_blocks
+    try:
+        return markdown_to_blocks(text or "")
+    except Exception:
+        return []
+
+
 def _unbox(line: str) -> str:
     """Strip tmux box drawing / gutter so a dialog line reads as plain text."""
     return line.strip().strip(_PERM_BOX).strip()
@@ -1472,8 +1481,10 @@ class InteractiveManager:
         """Answer the published panel from the phone, then close the job."""
         try:
             if kind == "ask":
+                _qtext = panel.get("question") or ""
                 questions = [{
-                    "question": panel.get("question") or "",
+                    "question": _qtext,
+                    "blocks": _blocks(_qtext),
                     "header": panel.get("header") or "Question",
                     "options": panel.get("options") or [],
                     "multi_select": bool(panel.get("multi_select")),
@@ -1509,8 +1520,13 @@ class InteractiveManager:
                        if isinstance(o, dict) and o.get("label")]
             if not options:
                 continue
+            _qtext = str(q.get("question") or "")
             questions.append({
-                "question": str(q.get("question") or ""),
+                "question": _qtext,
+                # The body is painted from blocks (the BlackBerry sheet
+                # renders those, not the plain string) - without them the
+                # sheet showed a header and options but no question.
+                "blocks": _blocks(_qtext),
                 "header": str(q.get("header") or ""),
                 "options": options,
                 "multi_select": bool(q.get("multiSelect") or q.get("multi_select")),
@@ -1668,7 +1684,9 @@ class InteractiveManager:
             label = text if len(text) <= 60 else text[:57] + "..."
             opts.append({"label": label,
                          "description": text if label != text else ""})
-        return {"question": question[:_PERM_TEXT_CAP], "header": "Permission",
+        return {"question": question[:_PERM_TEXT_CAP],
+                "blocks": _blocks(question[:_PERM_TEXT_CAP]),
+                "header": "Permission",
                 "options": opts, "multi_select": False}
 
     def _perm_open(self, tui: _Tui) -> bool:

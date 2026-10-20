@@ -3169,10 +3169,10 @@ void ApiClient::flushTuiText()
     m_tuiTypeBuf.clear();
     if (!m_tuiOpen || m_currentSessionId.isEmpty())
         return;
-    QVariantMap body;
-    body["text"] = text;
     const QString path = QString("/api/sessions/%1/tui/keys")
             .arg(QString::fromUtf8(QUrl::toPercentEncoding(m_currentSessionId)));
+    QVariantMap body;
+    body["text"] = text;
     post(path, body, "tui_keys");
 }
 
@@ -3252,13 +3252,29 @@ void ApiClient::sendTuiLine(const QString &text)
     const QString t = text; // allow trailing spaces; trim only all-empty
     if (t.trimmed().isEmpty())
         return;
+    const QString path = QString("/api/sessions/%1/tui/keys")
+            .arg(QString::fromUtf8(QUrl::toPercentEncoding(m_currentSessionId)));
+    // A held Ctrl turns a single typed character into that chord (Ctrl+C),
+    // so the phone needs no physical keyboard for it. A chord is one key, so
+    // longer text stays literal - and the hold ends either way.
+    if (m_tuiCtrlLatch) {
+        m_tuiCtrlLatch = false;
+        m_tuiRev++;
+        emit tuiChanged();
+        if (t.size() == 1) {
+            QVariantMap chord;
+            QVariantList chordKeys;
+            chordKeys.append(QLatin1String("Ctrl+") + t);
+            chord["keys"] = chordKeys;
+            post(path, chord, "tui_keys");
+            return;
+        }
+    }
     QVariantMap body;
     body["text"] = t;
     QVariantList keys;
     keys.append(QLatin1String("Enter"));
     body["keys"] = keys;
-    const QString path = QString("/api/sessions/%1/tui/keys")
-            .arg(QString::fromUtf8(QUrl::toPercentEncoding(m_currentSessionId)));
     post(path, body, "tui_keys");
 }
 

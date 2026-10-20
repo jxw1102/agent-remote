@@ -19,6 +19,12 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.18.4** Questions show their body. The clients paint a question body
+from its rich blocks, and the daemon sent only the plain string, so the
+BlackBerry sheet showed a header and the options but no question. Every
+question payload (Claude/CodeBuddy asks, CodeBuddy permission panels, Cursor
+asks) now carries blocks. Grok's already did.
+
 **2.18.3** Questions in panes the daemon is not driving reach the phone.
 A question or permission dialog can appear in a TUI the daemon only adopted -
 the human typed in a terminal, or the turn ended while the panel was up - and

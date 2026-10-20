@@ -63,6 +63,15 @@ _Q_OPT_RE = re.compile(r"^([\u203a>])?\s*\[\s*[xX]?\s*\]\s*(.+)$")
 _Q_FOOTER_RE = re.compile(r"Space select|Enter next/submit|Esc to skip")
 
 
+def _blocks(text: str) -> list:
+    """Rich blocks for a question body (the clients paint those)."""
+    from ..render_blocks import markdown_to_blocks
+    try:
+        return markdown_to_blocks(text or "")
+    except Exception:
+        return []
+
+
 def _pane_ready(text: str) -> bool:
     """Cursor's input row starts with a right arrow near the pane bottom."""
     if not text or not text.strip():
@@ -415,6 +424,9 @@ class CursorInteractiveManager(CodexInteractiveManager):
             return {}
         return {
             "question": prompt,
+            # The body is painted from blocks; without them the phone shows
+            # the header and the options but no question.
+            "blocks": _blocks(prompt),
             "header": "Question",
             "options": [{
                 "label": o if len(o) <= 60 else o[:57] + "...",

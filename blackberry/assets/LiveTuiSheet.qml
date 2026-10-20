@@ -126,11 +126,15 @@ Sheet {
                 }
 
                 // BB10 keyboards have no Ctrl key of their own, so this one
-                // latches: tap it, then press a letter. Brackets rather than a
-                // tint say it is armed - plain ASCII, and no theme to fight.
+                // HOLDS Ctrl: tap it, then press a key (or type one letter)
+                // and it arrives as Ctrl+<key>; the hold ends with that key.
+                // The label and the colour say whether it is armed - the
+                // state has to be readable at a glance, on a small screen.
                 Button {
-                    text: (liveTuiSheet.api && liveTuiSheet.api.tuiCtrlLatch)
-                          ? "[Ctrl]" : "Ctrl"
+                    readonly property bool armed:
+                        liveTuiSheet.api && liveTuiSheet.api.tuiCtrlLatch
+                    text: armed ? "Ctrl \u25CF" : "Ctrl"
+                    textColor: armed ? "#4ad06a" : "white"
                     layoutProperties: StackLayoutProperties { spaceQuota: 1 }
                     preferredHeight: liveTuiSheet.api
                               ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
@@ -205,17 +209,6 @@ Sheet {
                     maxHeight: liveTuiSheet.api
                               ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
                     onClicked: liveTuiSheet.softKey("Right")
-                }
-                Button {
-                    text: "^C"
-                    layoutProperties: StackLayoutProperties { spaceQuota: 1 }
-                    preferredHeight: liveTuiSheet.api
-                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
-                    minHeight: liveTuiSheet.api
-                              ? Math.round(48 * liveTuiSheet.api.uiScalePct / 100) : 48
-                    maxHeight: liveTuiSheet.api
-                              ? Math.round(52 * liveTuiSheet.api.uiScalePct / 100) : 52
-                    onClicked: liveTuiSheet.softKey("Ctrl+C")
                 }
                 Button {
                     text: "\u21B5"   // ↵ Enter

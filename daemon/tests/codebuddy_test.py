@@ -321,6 +321,20 @@ check("ptc AskUserQuestion options survive",
       [o.get("label") for o in _qtool["input"]["questions"][0]["options"]]
       == ["Scaffold only", "Full decoder"], _qtool["input"])
 
+# The phone paints a question body from blocks; without them the sheet
+# showed a header and options but no question.
+from agentremoted.providers.claude_interactive import (   # noqa: E402
+    InteractiveManager, _blocks)
+_permission_panel = InteractiveManager._permission_panel
+_perm = _permission_panel("\u2502 Do you want to proceed?\n"
+                           "\u2502 \u276f 1. Yes\n"
+                           "\u2502   2. No\n"
+                           "\u2570\u2500 Esc to cancel\n")
+check("permission panel carries a body", bool(_perm.get("blocks")), _perm)
+check("blocks render the body text",
+      "proceed" in json.dumps(_perm.get("blocks") or []), _perm.get("blocks"))
+check("blocks helper survives empty text", _blocks("") == [])
+
 check("codebuddy palette",
       palette_mod.palette_for("codebuddy").get("accent") == "#58c08b"
       and palette_mod.palette_for("codebuddy").get("heading") == "#7fd4a8")
