@@ -545,7 +545,8 @@ Page {
                         Label {
                             text: ListItemData.text
                             textFormat: TextFormat.Plain
-                            textStyle.fontSize: FontSize.XSmall
+                            textStyle.fontSize: FontSize.PointValue
+                            textStyle.fontSizeValue: ListItemData.fDim
                             textStyle.color: ListItemData.stepErr
                                              ? Color.create("#e0806c")
                                              : Color.create("#8a92a4")
@@ -590,7 +591,8 @@ Page {
                                 text: ListItemData.text
                                 textFormat: TextFormat.Plain
                                 multiline: true
-                                textStyle.fontSize: FontSize.XSmall
+                                textStyle.fontSize: FontSize.PointValue
+                                textStyle.fontSizeValue: ListItemData.fMono
                                 textStyle.color: Color.create("#9aa4b2")
                             }
                         }
@@ -703,7 +705,8 @@ Page {
                             // Chevron - brand accent, kept as-is.
                             Label {
                                 text: ">"
-                                textStyle.fontSize: FontSize.Small
+                                textStyle.fontSize: FontSize.PointValue
+                                textStyle.fontSizeValue: ListItemData.fMono
                                 textStyle.fontWeight: FontWeight.Bold
                                 textStyle.color: Color.create(ListItem.view.accent)
                                 verticalAlignment: VerticalAlignment.Top
@@ -724,7 +727,8 @@ Page {
                                 // back to the default face if the device
                                 // lacks this family (size still applies).
                                 textStyle.fontFamily: "Andale Mono WT"
-                                textStyle.fontSize: FontSize.XSmall
+                                textStyle.fontSize: FontSize.PointValue
+                                textStyle.fontSizeValue: ListItemData.fMono
                                 textStyle.color: Color.create("#e4e4e4")
                                 verticalAlignment: VerticalAlignment.Top
                                 layoutProperties: StackLayoutProperties {
@@ -751,7 +755,8 @@ Page {
                             textStyle.color: ListItemData.metaKind == "thought"
                                              ? Color.create(ListItem.view.metaThought)
                                              : Color.create("#6b7280")
-                            textStyle.fontSize: FontSize.XXSmall
+                            textStyle.fontSize: FontSize.PointValue
+                            textStyle.fontSizeValue: ListItemData.fDim
                             textStyle.fontStyle: FontStyle.Italic
                         }
                     }
@@ -842,13 +847,15 @@ Page {
                             text: ListItemData.rich
                             textFormat: TextFormat.Html
                             multiline: true
-                            textStyle.fontSize: FontSize.Medium
+                            textStyle.fontSize: FontSize.PointValue
+                            textStyle.fontSizeValue: ListItemData.fHead
                         }
                         Label {
                             visible: ListItemData.rich == ""
                             text: ListItemData.text
                             multiline: true
-                            textStyle.fontSize: FontSize.Medium
+                            textStyle.fontSize: FontSize.PointValue
+                            textStyle.fontSizeValue: ListItemData.fHead
                             textStyle.color: Color.create(ListItem.view.heading)
                             textStyle.fontWeight: FontWeight.Bold
                         }
@@ -884,13 +891,15 @@ Page {
                             text: ListItemData.rich
                             textFormat: TextFormat.Html
                             multiline: true
-                            textStyle.fontSize: FontSize.Small
+                            textStyle.fontSize: FontSize.PointValue
+                            textStyle.fontSizeValue: ListItemData.fText
                         }
                         Label {
                             visible: ListItemData.rich == ""
                             text: ListItemData.text
                             multiline: true
-                            textStyle.fontSize: FontSize.Small
+                            textStyle.fontSize: FontSize.PointValue
+                            textStyle.fontSizeValue: ListItemData.fText
                             textStyle.color: Color.create("#d0d0d0")
                         }
                     }
@@ -929,7 +938,8 @@ Page {
                                 text: ListItemData.prefix ? ListItemData.prefix : "*"
                                 multiline: false
                                 minWidth: 36
-                                textStyle.fontSize: FontSize.Small
+                                textStyle.fontSize: FontSize.PointValue
+                                textStyle.fontSizeValue: ListItemData.fText
                                 textStyle.color: Color.create("#9a9a9a")
                                 verticalAlignment: VerticalAlignment.Top
                             }
@@ -940,13 +950,15 @@ Page {
                                     text: ListItemData.rich
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.Small
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fText
                                 }
                                 Label {
                                     visible: ListItemData.rich == ""
                                     text: ListItemData.text
                                     multiline: true
-                                    textStyle.fontSize: FontSize.Small
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fText
                                     textStyle.color: Color.create("#d0d0d0")
                                 }
                             }
@@ -990,7 +1002,8 @@ Page {
                                 text: ListItemData.lang ? ListItemData.lang : ""
                                 textFormat: TextFormat.Plain
                                 textStyle.color: Color.create("#7ec87e")
-                                textStyle.fontSize: FontSize.XXSmall
+                                textStyle.fontSize: FontSize.PointValue
+                                textStyle.fontSizeValue: ListItemData.fDim
                                 bottomMargin: 2
                             }
                             Label {
@@ -998,13 +1011,15 @@ Page {
                                 text: ListItemData.rich
                                 textFormat: TextFormat.Html
                                 multiline: true
-                                textStyle.fontSize: FontSize.XSmall
+                                textStyle.fontSize: FontSize.PointValue
+                                textStyle.fontSizeValue: ListItemData.fMono
                             }
                             Label {
                                 visible: ListItemData.rich == ""
                                 text: ListItemData.text
                                 multiline: true
-                                textStyle.fontSize: FontSize.XSmall
+                                textStyle.fontSize: FontSize.PointValue
+                                textStyle.fontSizeValue: ListItemData.fMono
                                 textStyle.color: Color.create("#7ec87e")
                             }
                         }
@@ -1035,7 +1050,8 @@ Page {
                                           : (ListItemData.c0 ? ListItemData.c0 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                     textStyle.fontWeight: FontWeight.Bold
                                 }
                             }
@@ -1051,7 +1067,8 @@ Page {
                                           : (ListItemData.c1 ? ListItemData.c1 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                     textStyle.fontWeight: FontWeight.Bold
                                 }
                             }
@@ -1067,7 +1084,8 @@ Page {
                                           : (ListItemData.c2 ? ListItemData.c2 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                     textStyle.fontWeight: FontWeight.Bold
                                 }
                             }
@@ -1083,7 +1101,8 @@ Page {
                                           : (ListItemData.c3 ? ListItemData.c3 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                     textStyle.fontWeight: FontWeight.Bold
                                 }
                             }
@@ -1099,7 +1118,8 @@ Page {
                                           : (ListItemData.c4 ? ListItemData.c4 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                     textStyle.fontWeight: FontWeight.Bold
                                 }
                             }
@@ -1114,7 +1134,8 @@ Page {
                                           : (ListItemData.c5 ? ListItemData.c5 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                     textStyle.fontWeight: FontWeight.Bold
                                 }
                             }
@@ -1161,7 +1182,8 @@ Page {
                                           : (ListItemData.c0 ? ListItemData.c0 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                 }
                             }
                             Container {
@@ -1176,7 +1198,8 @@ Page {
                                           : (ListItemData.c1 ? ListItemData.c1 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                 }
                             }
                             Container {
@@ -1191,7 +1214,8 @@ Page {
                                           : (ListItemData.c2 ? ListItemData.c2 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                 }
                             }
                             Container {
@@ -1206,7 +1230,8 @@ Page {
                                           : (ListItemData.c3 ? ListItemData.c3 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                 }
                             }
                             Container {
@@ -1221,7 +1246,8 @@ Page {
                                           : (ListItemData.c4 ? ListItemData.c4 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                 }
                             }
                             Container {
@@ -1235,7 +1261,8 @@ Page {
                                           : (ListItemData.c5 ? ListItemData.c5 : " ")
                                     textFormat: TextFormat.Html
                                     multiline: true
-                                    textStyle.fontSize: FontSize.XXSmall
+                                    textStyle.fontSize: FontSize.PointValue
+                                    textStyle.fontSizeValue: ListItemData.fDim
                                 }
                             }
                         }

@@ -232,6 +232,96 @@ Sheet {
                     textStyle.color: Color.create("#666666")
                 }
 
+                // ---- Text size (app-wide) ------------------------------
+                // One scale for the whole transcript: the painted blocks are
+                // re-rasterized at the new pixel size and the Label rows carry
+                // the matching point size. The Live TUI is a fixed character
+                // grid and keeps its own size.
+                Label {
+                    text: qsTr("Text size")
+                    topMargin: 24
+                    textStyle.fontSize: FontSize.XSmall
+                    textStyle.color: Color.create("#888888")
+                }
+                Container {
+                    horizontalAlignment: HorizontalAlignment.Fill
+                    layout: StackLayout { orientation: LayoutOrientation.LeftToRight }
+                    Button {
+                        text: qsTr("A-")
+                        enabled: sessionSheet.api
+                                 ? sessionSheet.api.textScale > 0.8 : false
+                        layoutProperties: StackLayoutProperties { spaceQuota: 1 }
+                        onClicked: {
+                            if (sessionSheet.api)
+                                sessionSheet.api.setTextScale(
+                                    sessionSheet.api.textScale - 0.1);
+                        }
+                    }
+                    Button {
+                        text: qsTr("Reset")
+                        leftMargin: 8
+                        enabled: sessionSheet.api
+                                 ? Math.abs(sessionSheet.api.textScale - 1.0) > 0.001
+                                 : false
+                        layoutProperties: StackLayoutProperties { spaceQuota: 1 }
+                        onClicked: {
+                            if (sessionSheet.api)
+                                sessionSheet.api.setTextScale(1.0);
+                        }
+                    }
+                    Button {
+                        text: qsTr("A+")
+                        leftMargin: 8
+                        enabled: sessionSheet.api
+                                 ? sessionSheet.api.textScale < 1.6 : false
+                        layoutProperties: StackLayoutProperties { spaceQuota: 1 }
+                        onClicked: {
+                            if (sessionSheet.api)
+                                sessionSheet.api.setTextScale(
+                                    sessionSheet.api.textScale + 0.1);
+                        }
+                    }
+                }
+                // The sample is drawn at the size the transcript will use, so
+                // the choice can be made here instead of by closing the sheet
+                // and squinting.
+                Container {
+                    horizontalAlignment: HorizontalAlignment.Fill
+                    background: Color.create("#1a1a1a")
+                    topMargin: 10
+                    leftPadding: 12
+                    rightPadding: 12
+                    topPadding: 8
+                    bottomPadding: 8
+                    Label {
+                        text: sessionSheet.api
+                              ? qsTr("%1% - the transcript reads like this.")
+                                .arg(Math.round(sessionSheet.api.textScale * 100))
+                              : ""
+                        multiline: true
+                        textStyle.fontSize: FontSize.PointValue
+                        textStyle.fontSizeValue: sessionSheet.api
+                                                 ? sessionSheet.api.fontBodyPt : 7
+                        textStyle.color: Color.create("#d0d0d0")
+                    }
+                    Label {
+                        text: qsTr("> and your own messages like this")
+                        multiline: true
+                        textStyle.fontFamily: "Andale Mono WT"
+                        textStyle.fontSize: FontSize.PointValue
+                        textStyle.fontSizeValue: sessionSheet.api
+                                                 ? sessionSheet.api.fontMonoPt : 6
+                        textStyle.color: Color.create("#e4e4e4")
+                    }
+                }
+                Label {
+                    text: qsTr("Applies to every session's transcript - replies, your own messages, code and tables. The live TUI keeps the host's own grid.")
+                    multiline: true
+                    topMargin: 6
+                    textStyle.fontSize: FontSize.XXSmall
+                    textStyle.color: Color.create("#666666")
+                }
+
                 // ---- Share (open session, daemon ≥ 2.7) ----------------
                 Label {
                     text: qsTr("Share")

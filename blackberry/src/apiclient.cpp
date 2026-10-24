@@ -127,6 +127,22 @@ static QString wireExecMode(const QString &mode)
             : QLatin1String("bypassPermissions");
 }
 
+// The model / effort override is ONE persisted setting, but each harness has
+// its own catalogue: a model picked on a Claude session must not ride along
+// to CodeBuddy or Cursor (which reject it and the turn never starts). Send it
+// only when this harness can take it and lists it; otherwise the harness's
+// first entry, which is what its picker shows. Web modelOf() / Android
+// takeIf { it in models } do the same.
+static QString overrideFor(const QString &value, bool canSet,
+                           const QStringList &allowed)
+{
+    if (!canSet)
+        return QLatin1String("default");
+    if (allowed.isEmpty() || allowed.contains(value))
+        return value;
+    return allowed.first();
+}
+
 QDateTime parseIso(const QString &iso)
 {
     // "2026-07-19T10:00:05.123Z" - Qt 4.8's ISODate chokes on the
@@ -321,8 +337,17 @@ QVariantMap blockItem(const QString &kind, const QString &text,
     item["liveWell"] = s_modelApi
             ? static_cast<ApiClient *>(s_modelApi)->themeLiveWell()
             : QString::fromLatin1(BRAND_LIVE_WELL);
-    if (s_modelApi)
+    if (s_modelApi) {
         item["api"] = QVariant::fromValue<QObject *>(s_modelApi);
+        // The reader's text size, baked per row like liveWell: a Label bound
+        // to the client through ListItem.view would size itself before the
+        // view attaches. Rows are rebuilt whenever the size changes.
+        ApiClient *client = static_cast<ApiClient *>(s_modelApi);
+        item["fText"] = client->fontBodyPt();
+        item["fHead"] = client->fontHeadPt();
+        item["fMono"] = client->fontMonoPt();
+        item["fDim"] = client->fontDimPt();
+    }
     return item;
 }
 } // namespace
@@ -382,6 +407,15 @@ ApiClient::ApiClient(QObject *parent)
     , m_fontBodyPx(27)
     , m_fontCodePx(24)
     , m_fontHeadingPx(33)
+    , m_fontBodyBasePx(27)
+    , m_fontCodeBasePx(24)
+    , m_fontHeadingBasePx(33)
+    , m_textScale(1.0)
+    , m_pxPerPt(294.0 / 72.0)
+    , m_fontBodyPt(0.0)
+    , m_fontHeadPt(0.0)
+    , m_fontMonoPt(0.0)
+    , m_fontDimPt(0.0)
     , m_dropRev(0)
     , m_richPaint(0)
     , m_chime(new Chime(this))
@@ -422,14 +456,27 @@ ApiClient::ApiClient(QObject *parent)
         // ~65% of the linear ratio -> Passport ≈ 1.65× (45/40/54).
         const double widthRatio = m_screenWidth / double(REF_SCREEN_W);
         const double fontScale = 1.0 + (widthRatio - 1.0) * 0.65;
-        m_fontBodyPx = qRound(27 * fontScale);
-        m_fontCodePx = qRound(24 * fontScale);
-        m_fontHeadingPx = qRound(33 * fontScale);
+        m_fontBodyBasePx = qRound(27 * fontScale);
+        m_fontCodeBasePx = qRound(24 * fontScale);
+        m_fontHeadingBasePx = qRound(33 * fontScale);
         // Icon buttons follow the same damped curve. A flat 44 is ~3.8 mm on
         // the Classic but only ~2.5 mm on the denser Passport, which is why
         // every icon looked like a speck there. Classic 44 -> Passport 73.
         m_iconButtonPx = qRound(44 * fontScale);
         m_uiScalePct = qRound(fontScale * 100);
+        // Cascades Labels are sized in POINTS, the painter in pixels. Take
+        // the dot pitch from the display itself so the two agree and a user's
+        // own message comes out the size of the agent's painted reply beside
+        // it (Classic ~294 ppi, Passport ~453). physicalSize() is millimetres;
+        // a device that will not answer falls back to its class's figure.
+        double ppi = 0.0;
+        const QSizeF physMm = di.physicalSize();
+        if (physMm.width() > 0.0)
+            ppi = m_screenWidth * 25.4 / double(physMm.width());
+        if (ppi < 150.0 || ppi > 700.0)
+            ppi = m_largeDisplay ? 453.0 : 294.0;
+        m_pxPerPt = ppi / 72.0;
+        applyTextScale();
     }
     m_dropLocalDir = dropDownloadDir();
     loadProfiles();
@@ -450,6 +497,12 @@ ApiClient::ApiClient(QObject *parent)
     }
     m_permissionMode = normalizeExecMode(settings.value(
         "permissionMode", BRAND_DEFAULT_PERMISSION_MODE).toString());
+    // The reader's text size. Out-of-range (an older build, a hand-edited
+    // file) reads as "never set".
+    m_textScale = settings.value("textScale", 1.0).toDouble();
+    if (m_textScale < 0.8 || m_textScale > 1.6)
+        m_textScale = 1.0;
+    applyTextScale();
     // "" / "default" -> let the daemon (CLI) pick the model / effort.
     m_modelOverride = settings.value("modelOverride", "default").toString();
     m_effortOverride = settings.value("effortOverride", "default").toString();
@@ -2066,15 +2119,9 @@ void ApiClient::appendRenderedBlocks(QVariantList &out, const QVariantList &bloc
 // A just-typed prompt, echoed live in the transcript.
 static QVariantMap userLiveItem(const QString &text)
 {
-    QVariantMap item;
-    item["kind"] = "user";
-    item["text"] = text;
-    item["rich"] = QString();
-    item["live"] = true;
-    item["rowId"] = ++s_userRowSeq;
-    if (s_modelApi)
-        item["api"] = QVariant::fromValue<QObject *>(s_modelApi);
-    return item;
+    // Same factory as every other row - it stamps the row id, the api handle
+    // and the reader's font sizes, which a hand-built map kept missing.
+    return blockItem(QLatin1String("user"), text, QString(), true);
 }
 
 // A gap separates messages; the user prompt stands out via the QML chevron
@@ -2892,8 +2939,10 @@ void ApiClient::postPrompt(const QString &prompt)
     QVariantMap body;
     body["prompt"] = prompt;
     body["permission_mode"] = wireExecMode(m_permissionMode);
-    body["model"] = m_modelOverride;
-    body["effort"] = m_effortOverride;
+    body["model"] = overrideFor(m_modelOverride, sessionCapSetModel(),
+                                sessionModels());
+    body["effort"] = overrideFor(m_effortOverride, sessionCapSetEffort(),
+                                 sessionEfforts());
     QNetworkReply *reply = post(
             QString("/api/sessions/%1/continue").arg(m_currentSessionId),
             body, "continue");
@@ -3010,8 +3059,10 @@ void ApiClient::startNewSession(const QString &cwd, const QString &prompt,
     body["cwd"] = cwd;
     body["prompt"] = prompt;
     body["permission_mode"] = wireExecMode(m_permissionMode);
-    body["model"] = m_modelOverride;
-    body["effort"] = m_effortOverride;
+    body["model"] = overrideFor(m_modelOverride, sessionCapSetModel(),
+                                sessionModels());
+    body["effort"] = overrideFor(m_effortOverride, sessionCapSetEffort(),
+                                 sessionEfforts());
     // Multi-harness root routes by provider; single-provider daemons ignore it.
     if (!harness.isEmpty())
         body["provider"] = harness;
@@ -3939,6 +3990,48 @@ void ApiClient::shareCurrentSession()
     post(QString("/api/sessions/%1/share")
              .arg(QString::fromUtf8(QUrl::toPercentEncoding(m_currentSessionId))),
          QVariantMap(), QLatin1String("share"));
+}
+
+// ------------------------------------------------------------- text size
+
+// One scale drives both halves of the transcript: the pixel sizes the
+// painter rasterizes with, and the point sizes the Label rows carry.
+void ApiClient::applyTextScale()
+{
+    m_fontBodyPx = qRound(m_fontBodyBasePx * m_textScale);
+    m_fontCodePx = qRound(m_fontCodeBasePx * m_textScale);
+    m_fontHeadingPx = qRound(m_fontHeadingBasePx * m_textScale);
+    // Pixels the painter will use -> the points a Cascades Label wants.
+    m_fontBodyPt = m_fontBodyPx / m_pxPerPt;
+    m_fontHeadPt = m_fontHeadingPx / m_pxPerPt;
+    m_fontMonoPt = m_fontCodePx / m_pxPerPt;
+    // Timing lines, table cells, the language tag over a code well: the
+    // quiet text, a fifth smaller than the body, as the enum sizes had it.
+    m_fontDimPt = m_fontBodyPt * 0.8;
+}
+
+void ApiClient::setTextScale(qreal scale)
+{
+    // RichPaint refuses a glyph over 72 px, which a Passport body (45 px)
+    // reaches at 1.6 - so that is the ceiling rather than an arbitrary one.
+    if (scale < 0.8)
+        scale = 0.8;
+    if (scale > 1.6)
+        scale = 1.6;
+    // A- / A+ step by 0.1; snapping keeps repeated taps off 1.0000000002.
+    scale = qRound(scale * 20.0) / 20.0;
+    if (qAbs(scale - m_textScale) < 0.001)
+        return;
+    m_textScale = scale;
+    QSettings settings(BRAND_SETTINGS_ORG, BRAND_SETTINGS_APP);
+    settings.setValue("textScale", m_textScale);
+    applyTextScale();
+    emit textScaleChanged();
+    // Every row carries the size it was built with (and a painted block is
+    // cached per pixel size), so an open transcript only changes when it is
+    // rebuilt. Same refetch the process-view switch uses.
+    if (!m_currentSessionId.isEmpty())
+        fetchMessages(-1, INITIAL_PAGE_SIZE, false);
 }
 
 // ---------------------------------------------------------- process view

@@ -120,6 +120,16 @@ class ApiClient : public QObject
     // Classic 44; Passport scales up so the target keeps its physical size
     // instead of shrinking to a 2.5 mm speck on a denser, wider screen.
     Q_PROPERTY(int iconButtonPx READ iconButtonPx CONSTANT)
+    // The reader's own text size, 0.8 - 1.6 of what this device's metrics
+    // give (1.0 = as before). It multiplies the PAINTED transcript fonts and
+    // the point sizes baked into the Label rows together, so a user's own
+    // message keeps pace with the agent's painted reply. Persisted. The Live
+    // TUI is a fixed character grid and deliberately stays out of it.
+    Q_PROPERTY(qreal textScale READ textScale NOTIFY textScaleChanged)
+    // The body / monospace point sizes that scale gives, so the settings
+    // sheet can show a sample at the size the transcript will use.
+    Q_PROPERTY(qreal fontBodyPt READ fontBodyPt NOTIFY textScaleChanged)
+    Q_PROPERTY(qreal fontMonoPt READ fontMonoPt NOTIFY textScaleChanged)
     // Connection profiles: [{name, baseUrl, token}], one active at a time.
     Q_PROPERTY(QVariantList profiles READ profiles NOTIFY profilesChanged)
     Q_PROPERTY(int activeProfileIndex READ activeProfileIndex NOTIFY profilesChanged)
@@ -330,6 +340,15 @@ public:
     bool largeDisplay() const { return m_largeDisplay; }
     int iconButtonPx() const { return m_iconButtonPx; }
     int uiScalePct() const { return m_uiScalePct; }
+    qreal textScale() const { return m_textScale; }
+    // Point sizes for the Label rows, converted from the painter's pixel
+    // sizes through this screen's real dot pitch. Baked into every row by
+    // blockItem(); QML reads them as ListItemData.fText / fHead / fMono /
+    // fDim (a binding to the client would evaluate before the view attaches).
+    qreal fontBodyPt() const { return m_fontBodyPt; }
+    qreal fontHeadPt() const { return m_fontHeadPt; }
+    qreal fontMonoPt() const { return m_fontMonoPt; }
+    qreal fontDimPt() const { return m_fontDimPt; }
 
     QVariantList profiles() const { return m_profiles; }
     int activeProfileIndex() const { return m_activeProfile; }
@@ -505,6 +524,7 @@ public:
     Q_INVOKABLE void setSoundCues(bool on);
     Q_INVOKABLE void setFocusMode(bool on);
     Q_INVOKABLE void setLedCues(bool on);
+    Q_INVOKABLE void setTextScale(qreal scale);
     Q_INVOKABLE void setAutoOpenDownloads(bool on);
     /// Hand a downloaded Inbox file to whatever app the OS registered for it.
     Q_INVOKABLE void openDownloadedFile(const QString &path);
@@ -644,6 +664,7 @@ Q_SIGNALS:
     void questionChanged();
     void queueChanged();
     void processViewChanged();
+    void textScaleChanged();
     void prependChanged();
     void stepEditChanged();
     void newSessionRequestChanged();
@@ -982,6 +1003,17 @@ private:
     int m_fontBodyPx;
     int m_fontCodePx;
     int m_fontHeadingPx;
+    // What this device alone asks for, before the reader's own scale.
+    int m_fontBodyBasePx;
+    int m_fontCodeBasePx;
+    int m_fontHeadingBasePx;
+    qreal m_textScale;
+    qreal m_pxPerPt;
+    qreal m_fontBodyPt;
+    qreal m_fontHeadPt;
+    qreal m_fontMonoPt;
+    qreal m_fontDimPt;
+    void applyTextScale();
 
     int m_dropRev;
     QVariantList m_dropFiles;

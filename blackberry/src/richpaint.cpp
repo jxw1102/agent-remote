@@ -855,8 +855,11 @@ QVariantMap RichPaint::render(const QString &markup, int widthPx, int fontPx,
         widthPx = 1600;
     if (fontPx < 14)
         fontPx = 14;
-    if (fontPx > 72)
-        fontPx = 72;
+    // Headroom for the reader's text size: a Passport heading is 54 px at
+    // 100%, so a 72 cap stopped headings growing a third of the way up the
+    // range. 96 covers the whole of it (1.6 x 54 = 86).
+    if (fontPx > 96)
+        fontPx = 96;
 
     // ---- cache lookup ----
     const QString cacheKey = QString::number(widthPx) + QLatin1Char('|')
