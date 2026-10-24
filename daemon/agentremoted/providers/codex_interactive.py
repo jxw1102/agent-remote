@@ -112,6 +112,40 @@ class _Tui:
         self.rollout_offset = 0
 
 
+# Newest turn marker in a rollout, read from the end. A turn can be
+# megabytes of reasoning and tool output, so scan backwards in chunks and
+# stop at the first chunk that carries a marker; give up rather than read a
+# whole multi-megabyte file on a status poll.
+_BUSY_CHUNK = 256 * 1024
+# The TUI's own "esc to interrupt" line, lower-cased for a sloppy match.
+_INTERRUPT_HINT = "to interrupt"
+# How long an open turn may go unwritten before we stop calling it busy.
+_BUSY_STALE_S = 15 * 60
+_BUSY_SCAN_MAX = 16 * 1024 * 1024
+
+
+def _tail_mid_turn(path: str, size: int) -> bool:
+    """True when the last marker in the rollout is a start, not a finish."""
+    pos = int(size)
+    tail = b""
+    try:
+        with open(path, "rb") as fh:
+            while pos > 0 and (size - pos) <= _BUSY_SCAN_MAX:
+                step = min(_BUSY_CHUNK, pos)
+                pos -= step
+                fh.seek(pos)
+                tail = fh.read(step) + tail
+                # Drop the partial first line unless we reached the start.
+                block = tail if pos == 0 else tail[tail.find(b"\n") + 1:]
+                started = block.rfind(b'"task_started"')
+                done = block.rfind(b'"task_complete"')
+                if started >= 0 or done >= 0:
+                    return started > done
+    except OSError:
+        return False
+    return False
+
+
 class CodexInteractiveManager:
     """Owns tmux Codex TUIs and runs interactive jobs against them."""
 
@@ -120,6 +154,8 @@ class CodexInteractiveManager:
         self.runner = runner  # CodexRunner (store for sqlite/rollout)
         self._tuis = {}
         self._lock = threading.Lock()
+        # tui name -> ((path, size, mtime), busy) for active_tui_status().
+        self._busy_cache = {}
         self._adopt_or_reap()
 
     # -- registry ----------------------------------------------------------
@@ -225,6 +261,7 @@ class CodexInteractiveManager:
         return str(getattr(self.config, "codex_bin", "codex") or "codex")
 
     def _launch(self, tui: _Tui, resume_sid: str, model: str,
+                effort: str = "",
                 timeout_s: float = _START_TIMEOUT_S) -> str:
         """Start the TUI in a fresh tmux session. Returns \"\" or an error."""
         bin_path = self._codex_bin()
@@ -238,6 +275,11 @@ class CodexInteractiveManager:
         ]
         if model and model not in ("", "default"):
             parts += ["-m", model]
+        # The TUI takes the reasoning level the same way exec does: a config
+        # override, clamped to what this model accepts.
+        level = self.runner._effort_for(model, effort) if self.runner else ""
+        if level:
+            parts += ["-c", "model_reasoning_effort=%s" % level]
 
         env = dict(os.environ)
         home = str(self.config.codex_home_path)
@@ -307,7 +349,7 @@ class CodexInteractiveManager:
         return ""
 
     def _ensure_tui(self, cwd: str, session_id: str, model: str,
-                    isolate_root: str = ""):
+                    effort: str = "", isolate_root: str = ""):
         iso = (isolate_root or "").strip()
         with self._lock:
             dead = [n for n, t in self._tuis.items()
@@ -338,7 +380,7 @@ class CodexInteractiveManager:
                 self._save_state()
             tui = _Tui(self._tui_name(cwd), cwd, isolate_root=iso)
             self._tuis[tui.name] = tui
-        err = self._launch(tui, session_id, model)
+        err = self._launch(tui, session_id, model, effort)
         if err:
             with self._lock:
                 self._tuis.pop(tui.name, None)
@@ -675,6 +717,100 @@ class CodexInteractiveManager:
         from ..live_tui import send_to_session
         return send_to_session(self, session_id, keys=keys, text=text)
 
+    # -- busy TUIs with no job of ours ------------------------------------
+
+    def _tui_busy(self, tui: _Tui) -> bool:
+        """Is this TUI inside a turn right now?
+
+        Codex starts turns nobody submitted: a thread with an active goal
+        picks itself back up after each one, and a user can type straight
+        into the tmux pane. Our job ended with OUR turn, so the job is not
+        the answer - the rollout is. The newest turn marker wins: a
+        task_started with no task_complete after it means a turn is open.
+
+        An open turn is not proof it is still being worked, though - an
+        interrupted one never gets its task_complete. Two ways to tell:
+        the pane prints the interrupt hint for as long as a turn runs (the
+        composer stays on screen the whole time, so the prompt itself says
+        nothing), and a live turn keeps writing to the rollout.
+        """
+        path = tui.rollout_path or self._rollout_for(tui.session_id)
+        if not path:
+            return False
+        if path != tui.rollout_path:
+            tui.rollout_path = path
+        try:
+            st = os.stat(path)
+        except OSError:
+            return False
+        key = (path, st.st_size, int(st.st_mtime))
+        cached = self._busy_cache.get(tui.name)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        busy = _tail_mid_turn(path, st.st_size)
+        if busy:
+            tail = ""
+            try:
+                tail = self._pane_tail(tui.name, 12) or ""
+            except Exception:
+                tail = ""
+            if _INTERRUPT_HINT not in tail.lower():
+                # No hint to read: trust the open turn only while the
+                # rollout is still growing, so an interrupted turn stops
+                # reading as busy instead of pulsing for ever.
+                busy = (time.time() - st.st_mtime) <= _BUSY_STALE_S
+        self._busy_cache[tui.name] = (key, busy)
+        return busy
+
+    def active_tui_status(self) -> list:
+        """Busy host TUIs for /ws/status when no job of ours is running.
+
+        Without this a goal-driven codex reads as "turn finished" on the
+        phone while it is still working (the claude manager has had the same
+        row since the turn_timeout case).
+        """
+        out = []
+        with self._lock:
+            items = list(self._tuis.values())
+        now = time.time()
+        for t in items:
+            if not t.spawned:
+                continue
+            sid = (t.session_id or "").strip()
+            if not sid:
+                continue
+            if not self._tmux_alive(t.name):
+                continue
+            job = t.job
+            if job is not None:
+                with job.lock:
+                    if job.status in ("starting", "running"):
+                        continue  # a real job row already covers this session
+            if not self._tui_busy(t):
+                continue
+            acct = str(getattr(job, "account", "") or "") if job else ""
+            iso = str(getattr(job, "isolate_root", "") or "") if job else ""
+            out.append({
+                "job_id": "tui-%s" % (sid.replace("-", "")[:12]),
+                "session_id": sid,
+                "new_session_id": sid,
+                "status": "running",
+                "prompt": "(live TUI)",
+                "cwd": getattr(t, "cwd", "") or "",
+                "account": acct,
+                "isolate_root": iso,
+                "elapsed_s": max(0, int(now - float(t.last_used or now))),
+                "queued_count": 0,
+                "tool": "",
+                "tool_detail": "",
+                "phase": "working",
+                "phase_detail": "host interactive TUI",
+                "pending_permission": False,
+                "pending_question": False,
+                "next_seq": 0,
+            })
+        return out
+
     # -- rollout tail → job events -----------------------------------------
 
     def _poll_rollout(self, job, tui: _Tui) -> bool:
@@ -787,7 +923,8 @@ class CodexInteractiveManager:
         launched_at = time.time()
         iso = str(getattr(job, "isolate_root", "") or "")
         tui, err = self._ensure_tui(
-            cwd, job.session_id, job.model, isolate_root=iso)
+            cwd, job.session_id, job.model, getattr(job, "effort", ""),
+            isolate_root=iso)
         if err:
             self._fail(job, err)
             return
@@ -819,7 +956,8 @@ class CodexInteractiveManager:
             if not cwd or not os.path.isdir(cwd):
                 self._fail(job, "interrupted by daemon restart: cwd missing")
                 return
-            tui, err = self._ensure_tui(cwd, sid, job.model)
+            tui, err = self._ensure_tui(cwd, sid, job.model,
+                                        getattr(job, "effort", ""))
             if err:
                 self._fail(job, "interrupted by daemon restart: %s" % err)
                 return
@@ -1032,10 +1170,28 @@ class CodexInteractiveManager:
 
             if deadline and time.time() > deadline:
                 # Don't fail while the hosted TUI is still producing events.
-                still_going = bool(state.get("full") or state.get("parts"))
-                if not still_going and self._tmux_alive(tui.name):
-                    # No completion yet and pane still up — likely still working.
-                    still_going = True
+                # "The pane is alive" is not evidence of work, though: this
+                # job tails the rollout from EOF, so a turn that finished
+                # before it resumed never shows us its task_complete and the
+                # job then ran for hours. Ask the rollout; keep the old
+                # assumption only when there is no rollout to ask.
+                still_going = self._tui_busy(tui)
+                if not still_going and not (tui.rollout_path or "").strip():
+                    still_going = bool(state.get("full") or state.get("parts")
+                                       or self._tmux_alive(tui.name))
+                elif not still_going:
+                    # The thread is idle: our turn is over, we just never saw
+                    # it end. Finish with what we have - and never Escape,
+                    # which would interrupt whatever codex has started since
+                    # (a thread with a goal starts its own turns).
+                    self._try_bind_session(tui, launched_at)
+                    text = "".join(state.get("full") or state.get("parts") or [])
+                    with job.lock:
+                        job.new_session_id = tui.session_id or job.new_session_id
+                    log.info("TUI %s: rollout says the turn is over; finishing "
+                             "job %s instead of extending", tui.name, job.id)
+                    self._done(job, text)
+                    return
                 if still_going and timeout_s > 0 and self._tmux_alive(tui.name):
                     deadline = time.time() + timeout_s
                     log.info("TUI %s: extending turn deadline by %ss (still busy)",

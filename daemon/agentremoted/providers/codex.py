@@ -34,7 +34,7 @@ from pathlib import Path
 from .. import procutil
 from .. import providers
 from .. import steps as steps_mod
-from ..render_blocks import inline_to_rich, markdown_to_blocks
+from ..render_blocks import COLOR_META, inline_to_rich, markdown_to_blocks
 from .. import search_util
 from .. import titles
 
@@ -1265,6 +1265,28 @@ class CodexStore:
         return None
 
 
+def _goal_continuation(ev: dict) -> bool:
+    """True for the context block codex injects when it resumes its goal.
+
+    A thread with an active goal starts its own turns, and each one opens
+    with ``<codex_internal_context source="goal">`` carried as a user
+    message. The phone must not show it as something the user typed - but
+    the turns it starts are why a goal-driven transcript reads as the same
+    progress report over and over, so the transcript marks the boundary
+    instead of swallowing it.
+    """
+    if not isinstance(ev, dict) or ev.get("type") != "response_item":
+        return False
+    payload = ev.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "message":
+        return False
+    if payload.get("role") != "user":
+        return False
+    head = _item_text(payload)[:200].lstrip()
+    return (head.startswith("<codex_internal_context")
+            and 'source="goal"' in head)
+
+
 def _build_transcript(path: Path | None, want_steps: bool = False):
     """Coalesce rollout JSONL into [{role, text, ts}] for the phone.
 
@@ -1289,6 +1311,17 @@ def _build_transcript(path: Path | None, want_steps: bool = False):
                     st = _codex_step(ev, ln, tool_meta)
                     if st is not None:
                         step_rows.append((ln, st))
+                if _goal_continuation(ev):
+                    msg = {
+                        "uuid": "g%d" % len(messages),
+                        "role": "meta",
+                        "ts": str(ev.get("timestamp") or ""),
+                        "text": "Goal continuation - codex started this turn",
+                    }
+                    if want_steps:
+                        msg["_pos"] = ln
+                    messages.append(msg)
+                    continue
                 hit = _event_chat_message(ev)
                 if not hit:
                     continue
@@ -1405,6 +1438,17 @@ def _render_codex_message(msg: dict) -> None:
     role = msg.get("role") or ""
     if role in ("status", "notice", "tool"):
         # Web/Android render status as plain text; no markdown blocks needed.
+        return
+    if role == "meta":
+        msg["blocks"] = [{
+            "k": "meta",
+            "role": "status",
+            "metaKind": "goal",
+            "text": text,
+            "rich": '<font color="%s"><i>%s</i></font>' % (COLOR_META, text),
+            "fmt": "rich",
+            "accent": 0,
+        }]
         return
     if not text or role not in ("assistant", "user"):
         return
@@ -1542,7 +1586,7 @@ class CodexRunner:
             "permission_modes": False,
             "requires_cwd": True,
             "can_set_model": True,
-            "can_set_effort": False,
+            "can_set_effort": True,
             # ChatGPT-plan rate limits via backend-api/codex/usage (OAuth).
             "can_show_usage": True,
             "turns": True,
@@ -1630,6 +1674,9 @@ class CodexRunner:
                        + ("" if on_path else "; `codex` not on PATH")),
         }
 
+    # Sorts after every model that carries a priority.
+    _NO_PRIORITY = 1 << 30
+
     # Verified in codex's own TUI command list: /compact, /exit and /fork
     # (codex.thread.fork) are there. /rewind is served by the DAEMON
     # (rollout truncation in jobs.py), so it works on headless turns too.
@@ -1643,34 +1690,123 @@ class CodexRunner:
                 out.append(extra.strip())
         return sorted(set(out))
 
-    def models(self):
-        extras = list(getattr(self.config, "models", None) or [])
-        # models_cache.json is optional flavour; extras always win for the picker.
-        cached = []
+    def _catalogue(self):
+        """Codex's own model catalogue, in its own picker order.
+
+        Each entry is {slug, hidden, efforts}: `visibility` says whether the
+        model is a choice at all, `priority` is the order the TUI lists them
+        in, and `supported_reasoning_levels` is what that model will accept
+        for model_reasoning_effort (they differ - only some take "ultra").
+        A cache that is missing, corrupt or a plain list of names degrades to
+        the best it can rather than emptying the picker.
+        """
+        rows = []
         try:
             path = self.config.codex_home_path / "models_cache.json"
             data = json.loads(path.read_text(encoding="utf-8"))
             models = data.get("models") if isinstance(data, dict) else None
             if isinstance(models, list):
-                for m in models:
+                for index, m in enumerate(models):
                     if isinstance(m, str) and m.strip():
-                        cached.append(m.strip())
-                    elif isinstance(m, dict):
-                        mid = m.get("id") or m.get("slug") or m.get("name")
-                        if mid:
-                            cached.append(str(mid))
+                        rows.append((self._NO_PRIORITY, index,
+                                     {"slug": m.strip(), "hidden": False,
+                                      "efforts": []}))
+                        continue
+                    if not isinstance(m, dict):
+                        continue
+                    mid = m.get("id") or m.get("slug") or m.get("name")
+                    if not mid:
+                        continue
+                    try:
+                        priority = int(m.get("priority"))
+                    except (TypeError, ValueError):
+                        priority = self._NO_PRIORITY
+                    levels = []
+                    for lv in (m.get("supported_reasoning_levels") or []):
+                        name = lv.get("effort") if isinstance(lv, dict) else lv
+                        if isinstance(name, str) and name.strip():
+                            levels.append(name.strip())
+                    rows.append((priority, index, {
+                        "slug": str(mid),
+                        # Absent visibility means listed: a future cache that
+                        # drops the field should not empty the picker.
+                        "hidden": str(m.get("visibility", "list")).lower() == "hide",
+                        "efforts": levels,
+                    }))
         except (OSError, ValueError, TypeError):
-            pass
-        seen = set()
-        out = []
-        for m in extras + cached:
-            if m and m not in seen:
-                seen.add(m)
+            return []
+        rows.sort(key=lambda row: (row[0], row[1]))
+        return [row[2] for row in rows]
+
+    def models(self):
+        """What the picker offers, read the way Codex's own picker reads it.
+
+        models_cache.json is the CLI's catalogue, and two of its fields say
+        what belongs in a list of choices: `visibility` ("list" / "hide") and
+        `priority` (the order the TUI shows them in). We used to ignore both,
+        so the phone offered `gpt-reserve` (a fallback) and `codex-auto-review`
+        (what `codex review` runs) as if they were chat models.
+
+        "default" leads, as on every other harness: it means "let codex
+        choose", and prepare() sends no -m for it.
+        """
+        extras = [str(m).strip() for m in
+                  (getattr(self.config, "models", None) or []) if str(m).strip()]
+        listed = [row["slug"] for row in self._catalogue() if not row["hidden"]]
+        # Config extras still win the top of the list - that is the escape
+        # hatch for a model Codex hides or has not published yet.
+        out = ["default"]
+        for m in extras + listed:
+            if m and m not in out:
                 out.append(m)
         return out
 
     def efforts(self):
-        return list(getattr(self.config, "efforts", None) or [])
+        """Reasoning levels for model_reasoning_effort.
+
+        The union over the models the picker offers, in the order the
+        catalogue lists them (low -> ultra); models differ, so a level the
+        chosen model does not take is clamped per turn in _effort_for().
+        "default" leads and sends no override, leaving the model on its own
+        default_reasoning_level.
+        """
+        out = ["default"]
+        for row in self._catalogue():
+            if row["hidden"]:
+                continue
+            for level in row["efforts"]:
+                if level not in out:
+                    out.append(level)
+        for extra in (getattr(self.config, "efforts", None) or []):
+            name = str(extra).strip()
+            if name and name not in out:
+                out.append(name)
+        # Nothing but "default" is not a picker; let the client hide it.
+        return out if len(out) > 1 else []
+
+    def _effort_for(self, model, effort):
+        """The level to actually send, or "" for none.
+
+        Only some models take "ultra" (and a hidden one may take less still),
+        so a level this model does not list is clamped DOWN to the highest it
+        does - picking "ultra" on a Luna model asks for the best that model
+        has rather than failing the turn.
+        """
+        level = str(effort or "").strip()
+        if not level or level == "default":
+            return ""
+        name = str(model or "").strip()
+        if not name or name == "default":
+            # No explicit model: codex picks, so send the level as asked.
+            return level
+        for row in self._catalogue():
+            if row["slug"] != name:
+                continue
+            levels = row["efforts"]
+            if not levels or level in levels:
+                return level
+            return levels[-1]
+        return level
 
     def title_for(self, text: str) -> str:
         """Name a Codex session using Codex itself.
@@ -1727,6 +1863,11 @@ class CodexRunner:
 
         if job.model and job.model not in ("", "default"):
             cmd += ["-m", job.model]
+
+        # codex exec has no --effort; the level is a config override.
+        level = self._effort_for(job.model, getattr(job, "effort", ""))
+        if level:
+            cmd += ["-c", "model_reasoning_effort=%s" % level]
 
         # Extra flags from config (whitespace-split), e.g. "--profile work".
         extra = str(getattr(self.config, "codex_exec_flags", "") or "").split()
