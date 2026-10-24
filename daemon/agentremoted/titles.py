@@ -39,6 +39,7 @@ import json
 import os
 import queue
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -55,6 +56,11 @@ SYSTEM = (
     "topic title of at most 5 words. No markdown, no quotes, no trailing "
     "punctuation, no leading 'Title:'."
 )
+
+# After a failed generation (quota spent, CLI down) leave that session alone
+# this long. Without it every listing retries, and a CLI titler spawns one
+# more throwaway session per retry.
+FAIL_BACKOFF_S = 3600.0
 
 # Titles a CLI writes that carry no information — treat as "no title at all".
 BLANK = ("", "new session", "untitled", "untitled session", "session")
@@ -209,6 +215,7 @@ class TitleCache:
         self._map = {}
         self._queue = queue.Queue()
         self._pending = set()
+        self._failed = {}  # session_id -> (sig, monotonic time)
         self._worker = None
         self._load()
 
@@ -253,6 +260,10 @@ class TitleCache:
                 return
             if session_id in self._pending:
                 return
+            failed = self._failed.get(session_id)
+            if failed and failed[0] == sig and (
+                    time.monotonic() - failed[1] < FAIL_BACKOFF_S):
+                return
             self._pending.add(session_id)
             if self._worker is None:
                 self._worker = threading.Thread(target=self._run, daemon=True)
@@ -270,10 +281,13 @@ class TitleCache:
                         title = ""
                 else:
                     title = summarize(self._config, text, self._token_fn)
-                if title:
-                    with self._lock:
+                with self._lock:
+                    if title:
                         self._map[session_id] = {"title": title, "sig": sig}
+                        self._failed.pop(session_id, None)
                         self._save()
+                    else:
+                        self._failed[session_id] = (sig, time.monotonic())
             finally:
                 with self._lock:
                     self._pending.discard(session_id)

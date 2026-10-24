@@ -1902,8 +1902,11 @@ class ClaudeStore:
             tail_title or ai_title or summary_text or first_user_text or path.stem)
         base_title = _preview(prose_fallback, _MAX_TITLE) or path.stem
         title = base_title
-        if light:
+        if light or titles.is_titler_cwd(cwd):
             # Any cached title for this id — never queue Haiku from search.
+            # Titler scratch sessions never get titled either: a CLI titler
+            # (CodeBuddy) runs in that cwd, so titling one creates another
+            # and the store fills with tens of thousands of them.
             with self._titles._lock:
                 entry = self._titles._map.get(path.stem)
                 if entry and entry.get("title"):
