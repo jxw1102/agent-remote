@@ -31,6 +31,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from .. import goalwatch
 from .. import procutil
 from .. import providers
 from .. import steps as steps_mod
@@ -43,6 +44,8 @@ log = logging.getLogger(__name__)
 _MAX_TITLE = 80
 _MAX_PREVIEW = 160
 _STATE_GLOB = "state_*.sqlite"
+# Codex keeps thread goals in their own database beside the thread index.
+_GOALS_GLOB = "goals_*.sqlite"
 
 # ------------------------------------------------------------------ usage
 #
@@ -882,6 +885,13 @@ def _event_tool(ev: dict):
     return None
 
 
+def _as_float(v) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class CodexStore:
     """Read Codex threads from the on-disk SQLite index + rollout JSONL."""
 
@@ -903,6 +913,47 @@ class CodexStore:
                 return path
         legacy = self.home / "state.sqlite"
         return legacy if legacy.is_file() else None
+
+    def goals(self) -> dict:
+        """thread id -> its goal, straight out of Codex's goals database.
+
+        A goal is what makes a thread restart itself after each turn, so it
+        is also the only honest answer to "is this thread supposed to still
+        be working". Missing database, older CLI, no goals: {}.
+        """
+        candidates = sorted(self.home.glob(_GOALS_GLOB), reverse=True)
+        db = next((p for p in candidates if p.is_file()), None)
+        if db is None:
+            return {}
+        out = {}
+        try:
+            con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+            con.row_factory = sqlite3.Row
+        except sqlite3.Error:
+            return {}
+        try:
+            rows = con.execute(
+                "SELECT thread_id, goal_id, objective, status, tokens_used, "
+                "time_used_seconds, created_at_ms, updated_at_ms "
+                "FROM thread_goals").fetchall()
+        except sqlite3.Error:
+            return {}
+        finally:
+            con.close()
+        for r in rows:
+            sid = str(r["thread_id"] or "")
+            if not sid:
+                continue
+            out[sid] = {
+                "goal_id": str(r["goal_id"] or ""),
+                "objective": str(r["objective"] or ""),
+                "status": str(r["status"] or ""),
+                "tokens_used": _as_float(r["tokens_used"]),
+                "time_used_s": _as_float(r["time_used_seconds"]),
+                "created_at": _as_float(r["created_at_ms"]) / 1000.0,
+                "updated_at": _as_float(r["updated_at_ms"]) / 1000.0,
+            }
+        return out
 
     def _connect(self):
         db = self._state_db()
@@ -1560,6 +1611,54 @@ class CodexRunner:
         preview = " ".join(text.split())[:120]
         return steps, preview
 
+    # ---- goals ---------------------------------------------------------
+
+    def goal_row(self, session_id: str, goal: dict = None) -> dict:
+        """One goal as the clients see it: the objective, and whether anyone
+        (codex itself, or this daemon) is still moving it."""
+        sid = (session_id or "").strip()
+        if goal is None:
+            goal = (self.store.goals() or {}).get(sid) or {}
+        watched = goalwatch.shared().get(sid)
+        state = self._interactive_mgr().goal_state(sid)
+        return {
+            "session_id": sid,
+            "objective": str(goal.get("objective") or ""),
+            "status": str(goal.get("status") or ""),
+            "tokens_used": float(goal.get("tokens_used") or 0.0),
+            "time_used_s": float(goal.get("time_used_s") or 0.0),
+            "updated_at": float(goal.get("updated_at") or 0.0),
+            # What the daemon was asked to do, and what it has done.
+            "watching": bool(watched.get("on")) and not watched.get("stopped_why"),
+            "resumes": int(watched.get("resumes") or 0),
+            "last_resume_at": float(watched.get("last_resume_at") or 0.0),
+            "stopped_why": str(watched.get("stopped_why") or ""),
+            # What it looks like right now.
+            "live_tui": bool(state.get("tui")),
+            "working": bool(state.get("busy") or state.get("job")),
+            "idle_s": round(float(state.get("idle_s") or 0.0), 1),
+            "idle_threshold_s": goalwatch.DEFAULT_IDLE_S,
+        }
+
+    def goals(self) -> list:
+        """Every thread with a goal, active ones first."""
+        rows = [self.goal_row(sid, goal)
+                for sid, goal in (self.store.goals() or {}).items()]
+        rows.sort(key=lambda r: (r["status"] != "active", -r["updated_at"]))
+        return rows
+
+    def set_goal_watch(self, session_id: str, on: bool) -> dict:
+        """Ask the daemon to keep this goal moving (or stop asking).
+
+        Switching it on again also clears a give-up, which is how a user
+        retries after the daemon decided its nudges were not landing.
+        """
+        sid = (session_id or "").strip()
+        if not sid:
+            raise providers.RunnerError("session id is required")
+        goalwatch.shared().set(sid, bool(on))
+        return self.goal_row(sid)
+
     def type_into_tui(self, session_id: str, text: str) -> str:
         """Type a message into a session's live interactive TUI (\"\" or err)."""
         return self._interactive_mgr().type_text(session_id, text)
@@ -1599,6 +1698,9 @@ class CodexRunner:
             # from there. Works in BOTH exec modes — codex's own TUI has no
             # rewind, but the daemon does not need one.
             "rewind": True,
+            # The daemon can watch a thread goal and type /goal resume when
+            # codex stops restarting itself. Needs a host TUI to type into.
+            "goal_watch": has_tmux,
         }
 
     def auth_health(self) -> dict:

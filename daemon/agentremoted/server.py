@@ -98,6 +98,7 @@ from . import __version__
 from . import palette
 from . import accounts
 from . import focus as focus_store
+from . import linked_files
 from . import shares as share_store
 from . import ssestream
 from . import wstream
@@ -110,6 +111,7 @@ _SESSION_MSGS = re.compile(r"^/api/sessions/([^/]+)/messages$")
 _SESSION_STEP = re.compile(r"^/api/sessions/([^/]+)/steps/([^/]+)$")
 _SESSION_CONT = re.compile(r"^/api/sessions/([^/]+)/continue$")
 _SESSION_TUI = re.compile(r"^/api/sessions/([^/]+)/tui$")
+_SESSION_FILE = re.compile(r"^/api/sessions/([^/]+)/file$")
 _SESSION_TUI_KEYS = re.compile(r"^/api/sessions/([^/]+)/tui/keys$")
 _SESSION_ONE = re.compile(r"^/api/sessions/([^/]+)$")
 _JOB_ONE = re.compile(r"^/api/jobs/([^/]+)$")
@@ -1999,6 +2001,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 payload["focus"] = self.focus is not None
                 payload["focus_states"] = list(focus_store.STATES)
                 payload["share"] = self.shares is not None
+                # GET /api/sessions/<id>/file: open a host path the agent linked.
+                payload["linked_files"] = True
                 self._stamp_tui_caps(payload)
                 self._stamp_upload_caps(payload)
                 self._send_json(payload)
@@ -2050,6 +2054,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             payload["focus"] = self.focus is not None
             payload["focus_states"] = list(focus_store.STATES)
             payload["share"] = self.shares is not None
+            # GET /api/sessions/<id>/file: open a host path the agent linked.
+            payload["linked_files"] = True
             self._stamp_tui_caps(payload)
             self._stamp_upload_caps(payload)
             self._send_json(payload)
@@ -2099,6 +2105,15 @@ class ApiHandler(BaseHTTPRequestHandler):
                     data = dict(data)
                     data["provider"] = getattr(self.runner, "name", "") or ""
                 self._send_json(data)
+            return
+
+        if path == "/api/goals":
+            goals_fn = getattr(self.runner, "goals", None)
+            if goals_fn is None:
+                self._send_json({"goals": [], "supported": False})
+            else:
+                self._send_json({"goals": goals_fn(), "supported": True,
+                                 "provider": getattr(self.runner, "name", "")})
             return
 
         if path == "/api/projects":
@@ -2160,6 +2175,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_session_step(m.group(1), m.group(2))
             return
 
+        m = _SESSION_FILE.match(path)
+        if m:
+            self._send_session_file(m.group(1), query)
+            return
+
         m = _SESSION_TUI.match(path)
         if m:
             self._handle_tui_capture(m.group(1), query)
@@ -2214,6 +2234,22 @@ class ApiHandler(BaseHTTPRequestHandler):
             ssestream.serve_status(
                 self, None, active_fn=self._merged_active_status_scoped)
             return
+        if path == "/api/goals":
+            out = []
+            for name, b in self._allowed_bundle_items():
+                goals_fn = getattr(b.runner, "goals", None)
+                if goals_fn is None:
+                    continue
+                try:
+                    for row in goals_fn() or []:
+                        row = dict(row)
+                        row["provider"] = name
+                        out.append(row)
+                except Exception:
+                    log.exception("goal list failed for %s", name)
+            self._send_json({"goals": out, "supported": True})
+            return
+
         if path == "/api/usage":
             # One profile, every harness: return per-provider sections plus a
             # flat buckets list (titles tagged "Claude · …") for older clients
@@ -2224,14 +2260,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 label = str(name or "").strip().capitalize() or "Agent"
                 usage_fn = getattr(b.runner, "usage", None)
                 if usage_fn is None:
-                    sections.append({
-                        "provider": name,
-                        "account": "",
-                        "account_id": "",
-                        "ok": False,
-                        "error": "not supported",
-                        "buckets": [],
-                    })
+                    # DeepSeek and CodeBuddy publish no quota anywhere a
+                    # daemon can read it. A section saying "not supported"
+                    # is a row every client has to draw and every reader has
+                    # to skip, so leave the harness out of the sheet.
                     continue
                 try:
                     data = usage_fn() or {}
@@ -2377,6 +2409,15 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._bind_bundle(name)
             self._send_session_step(m.group(1), m.group(2))
             return
+        m = _SESSION_FILE.match(path)
+        if m:
+            name, b, session = self._find_session(m.group(1))
+            if b is None or not self._session_in_scope(session or {}):
+                self._error(404, "file not found")
+                return
+            self._bind_bundle(name)
+            self._send_session_file(m.group(1), query)
+            return
         m = _SESSION_TUI.match(path)
         if m:
             name, b, session = self._find_session(m.group(1))
@@ -2453,6 +2494,79 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(404, "step not found")
             return
         self._send_json(result)
+
+    def _linked_in_transcript(self, session_id, path) -> bool:
+        """True when an assistant message of the session links *path*.
+
+        Pages through the rendered transcript (the store caches the parse,
+        so this is the same work as opening the session).
+        """
+        offset, page = 0, 500
+        while True:
+            try:
+                res = self.store.get_messages(session_id, offset, page)
+            except Exception:
+                log.exception("file link: transcript read failed")
+                return False
+            msgs = (res or {}).get("messages") or []
+            texts = (str(m.get("text") or "") for m in msgs
+                     if isinstance(m, dict) and m.get("role") == "assistant")
+            if linked_files.mentioned(path, texts):
+                return True
+            total = int((res or {}).get("total") or 0)
+            offset += len(msgs)
+            if not msgs or offset >= total:
+                return False
+
+    def _send_session_file(self, session_id, query):
+        """A file the session's agent linked, read-only. See linked_files."""
+        session_id = self._canonical_session_id(session_id)
+        session = None
+        if self.store is not None:
+            session = self.store.get_session(session_id)
+        if session is None:
+            _n, _b, session = self._find_session(session_id)
+        # One answer for every refusal, so the endpoint cannot be used to
+        # probe which paths exist on the host.
+        missing = "file not found"
+        if session is None or not self._session_in_scope(session):
+            self._error(404, missing)
+            return
+        session_id = str(session.get("id") or session_id)
+        path = linked_files.normalize((query.get("path") or [""])[0])
+        real = linked_files.resolve(path, str(session.get("cwd") or ""))
+        if not real or not self._linked_in_transcript(session_id, path):
+            log.info("file link refused: session %s", session_id[:8])
+            self._error(404, missing)
+            return
+        try:
+            fh = open(real, "rb")
+        except OSError:
+            self._error(404, missing)
+            return
+        with fh:
+            size = os.fstat(fh.fileno()).st_size
+            if size > linked_files.MAX_BYTES:
+                self._error(413, "file too large (max %d MB)"
+                            % (linked_files.MAX_BYTES // (1024 * 1024)))
+                return
+            body = fh.read(linked_files.MAX_BYTES)
+        ctype, inline = linked_files.content_type(real, body[:4096])
+        name = os.path.basename(real)
+        ascii_name = name.encode("ascii", "replace").decode().replace('"', "_")
+        disp = "inline" if inline else "attachment"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", '%s; filename="%s"; '
+                         "filename*=UTF-8''%s" % (disp, ascii_name, quote(name)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "sandbox; default-src 'none'")
+        self.send_header("Cache-Control", "no-store")
+        self._cors_headers()
+        self.send_header("Access-Control-Expose-Headers", "Content-Disposition")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _send_session_messages(self, session_id, query):
         session_id = self._canonical_session_id(session_id)
@@ -2560,6 +2674,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
 
 
+        if path == "/api/goals/watch":
+            self._handle_goal_watch(body)
+            return
+
         if path == "/api/shell":
             self._handle_shell(body)
             return
@@ -2623,6 +2741,11 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _route_post_multi(self, path, query, body):
         """Root POST routes when one profile owns every harness."""
+        if path == "/api/goals/watch":
+            # Goals belong to one harness (codex); the handler finds it.
+            self._handle_goal_watch(body, runner=None)
+            return
+
         if path == "/api/shell":
             # Resolve store via session_id so cwd lookup still works.
             sid = ""
@@ -2752,6 +2875,34 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._error(404, "not found")
 
     # -- handlers ----------------------------------------------------------
+
+    def _handle_goal_watch(self, body, runner=None):
+        """Turn the daemon's goal watchdog on or off for one session."""
+        if not isinstance(body, dict):
+            self._error(400, "expected a JSON object")
+            return
+        sid = str(body.get("session_id") or "").strip()
+        if not sid:
+            self._error(400, "session_id is required")
+            return
+        on = bool(body.get("on", True))
+        target = runner if runner is not None else self.runner
+        if target is None or not hasattr(target, "set_goal_watch"):
+            # Multi-root: whichever harness owns goals (codex today).
+            target = None
+            for _name, b in (self.bundles or {}).items():
+                if hasattr(b.runner, "set_goal_watch"):
+                    target = b.runner
+                    break
+        if target is None:
+            self._error(404, "this harness has no goals")
+            return
+        try:
+            row = target.set_goal_watch(sid, on)
+        except providers.RunnerError as e:
+            self._error(400, str(e))
+            return
+        self._send_json({"ok": True, "goal": row})
 
     def _handle_shell(self, body):
         if not isinstance(body, dict) or not isinstance(body.get("command"), str) \

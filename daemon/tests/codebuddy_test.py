@@ -272,32 +272,13 @@ _tcwd = str(titles_mod.titler_cwd())
 }) + "\n", encoding="utf-8")
 _ids = [s["id"] for s in store.list_sessions()]
 check("titler session not listed", "TITLER" not in _ids, _ids)
-# Usage: no quota endpoint, so the runner sums providerData.usage from the
-# transcripts. A session stamped "now" keeps the today/7d windows stable.
-S5 = "55555555-5555-4555-8555-555555555555"
-_now_ms = int(time.time() * 1000)
-write_jsonl(S5, [
-    {"type": "session-meta", "id": "u0", "sessionId": S5,
-     "timestamp": _now_ms, "meta": {"codebuddy.ai/mainAgent": "ptc"}},
-    {"id": "u1", "parentId": None, "type": "message", "role": "user",
-     "timestamp": _now_ms, "cwd": CWD,
-     "content": [{"type": "input_text", "text": "do a thing"}]},
-    {"id": "u2", "parentId": "u1", "type": "function_call", "callId": "c9",
-     "name": "REPL", "arguments": "{}", "timestamp": _now_ms,
-     "providerData": {"model": "test-model",
-                      "usage": {"totalTokens": 1234}}},
-])
-from agentremoted.providers import codebuddy as codebuddy_mod     # noqa: E402
-codebuddy_mod._usage_cache = (0.0, None)
-_usage = runner.usage()
-_ub = _usage.get("buckets") or []
-check("codebuddy usage ok", _usage.get("ok") is True, _usage)
-check("codebuddy usage today bucket",
-      bool(_ub) and _ub[0].get("title") == "Today"
-      and "1.2k tokens" in _ub[0].get("resets_text", ""), _ub)
-check("codebuddy usage models",
-      any("test-model" in (b.get("resets_text") or "") for b in _ub), _ub)
-check("codebuddy advertises usage", runner.capabilities().get("can_show_usage") is True)
+# Usage: CodeBuddy publishes no quota (no /usage command, no limits endpoint),
+# so it reports no usage at all rather than a sheet of local token tallies —
+# and the runner must not grow a usage() that the server would then call.
+check("codebuddy does not advertise usage",
+      runner.capabilities().get("can_show_usage") is False,
+      runner.capabilities().get("can_show_usage"))
+check("codebuddy has no usage probe", getattr(runner, "usage", None) is None)
 
 # Provider colours come from the daemon, not from each client.
 from agentremoted import palette as palette_mod            # noqa: E402

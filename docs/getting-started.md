@@ -114,6 +114,24 @@ shared screen, and do not post it.
 
 Test connection should show host name, version, harness list, and (daemon ≥ 2.5.3) auth summary.
 
+### Keeping a Codex goal moving
+
+A Codex thread can carry a **goal**: an objective the CLI pursues over many
+turns, restarting itself after each one. Sometimes it stops restarting, and
+the thread then sits at an idle prompt with work left - which on a phone
+looks exactly like a finished turn.
+
+Open the session, then **Turn options** (web and Android) or **Session**
+(BlackBerry). A thread with a goal shows its objective and a **Keep it
+moving** switch. With it on, the daemon types `/goal resume` once the thread
+has been quiet for five minutes with its goal still active and a live TUI to
+type into. It waits three minutes between nudges, and if three in a row move
+the goal's own counters by nothing it stops and says why; switching the
+watch off and on again starts it over.
+
+The switch is per session and the daemon never turns it on by itself -
+resuming a goal spends tokens. The LILYGO pager has no goals screen.
+
 ## 5. Start a session from the phone
 
 1. **New session**

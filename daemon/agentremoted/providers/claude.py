@@ -1731,6 +1731,9 @@ class ClaudeStore:
         # chain threads through system / file-history-snapshot lines, so a
         # message's parent is usually not another message.
         parent_of = {}
+        # uuid -> line number, so a chain that dead-ends at a compaction root
+        # can be stitched to the history written before it.
+        pos_of = {}
         pos = 0
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -1739,6 +1742,7 @@ class ClaudeStore:
                     uid = obj.get("uuid")
                     if uid:
                         parent_of[uid] = obj.get("parentUuid")
+                        pos_of[uid] = pos
                 msg = self._parse_line(line, obj)
                 if msg:
                     msg["_pos"] = pos
@@ -1750,8 +1754,8 @@ class ClaudeStore:
                         step_rows.append((pos, obj.get("uuid", ""), st))
                 pos += 1
         # Computed before the filter: _active_branch replaces the list.
-        branch = _branch_uuids(messages, parent_of) if steps else None
-        messages = _active_branch(messages, parent_of)
+        branch = _branch_uuids(messages, parent_of, pos_of) if steps else None
+        messages = _active_branch(messages, parent_of, pos_of)
         t1 = time.perf_counter()
 
         total = len(messages)
@@ -1981,7 +1985,53 @@ class ClaudeStore:
         }
 
 
-def _branch_uuids(messages: list, parent_of: dict):
+def _message_before(messages: list, pos, seen: set):
+    """The newest message written before record `pos`, ignoring `seen`.
+
+    Used to cross a compaction boundary: the record on the far side is the
+    tail of the conversation that /compact summarized.
+    """
+    if pos is None:
+        return None
+    best = None
+    for m in messages:
+        mp = m.get("_pos")
+        if mp is None or mp >= pos or m.get("uuid") in seen:
+            continue
+        if best is None or mp > best["_pos"]:
+            best = m
+    return best.get("uuid") if best else None
+
+
+def _lineage(messages: list, parent_of: dict, pos_of: dict = None) -> set:
+    """Every record uuid behind the newest message, across compactions.
+
+    The walk is parentUuid, newest first, and it dead-ends at a record with
+    no parent. Mid-file that means a new root: /compact writes its summary
+    as a fresh tree, so a session compacted three times holds four
+    unconnected trees in one file. Stopping at the first of them showed only
+    the turns since the last compaction — five messages out of 224 on a 13 MB
+    session — and the client offers "load earlier messages" only when there
+    is an earlier page, so the rest of the conversation was unreachable.
+
+    A dead end mid-file is therefore stitched to the last message written
+    before it, and the walk continues into the pre-compaction history. This
+    does not resurrect what /rewind abandoned: rewind reparents onto a node
+    that is still in the file, so its chain never dead-ends.
+    """
+    keep, seen = set(), set()
+    uid = messages[-1].get("uuid") if messages else None
+    while uid and uid not in seen:
+        seen.add(uid)
+        keep.add(uid)
+        nxt = parent_of.get(uid)
+        if nxt is None:
+            nxt = _message_before(messages, (pos_of or {}).get(uid), seen)
+        uid = nxt
+    return keep
+
+
+def _branch_uuids(messages: list, parent_of: dict, pos_of: dict = None):
     """Every record uuid reachable from the newest message, or None when the
     chain cannot be trusted.
 
@@ -1992,12 +2042,7 @@ def _branch_uuids(messages: list, parent_of: dict):
     """
     if len(messages) < 2:
         return None
-    keep, seen = set(), set()
-    uid = messages[-1].get("uuid")
-    while uid and uid not in seen:
-        seen.add(uid)
-        keep.add(uid)
-        uid = parent_of.get(uid)
+    keep = _lineage(messages, parent_of, pos_of)
     if not keep:
         return None
     branch = [m for m in messages if m.get("uuid") in keep]
@@ -2006,7 +2051,7 @@ def _branch_uuids(messages: list, parent_of: dict):
     return keep
 
 
-def _active_branch(messages: list, parent_of: dict) -> list:
+def _active_branch(messages: list, parent_of: dict, pos_of: dict = None) -> list:
     """The messages still on the conversation's live branch.
 
     A Claude Code transcript is a TREE, not a log: every record carries
@@ -2018,18 +2063,14 @@ def _active_branch(messages: list, parent_of: dict) -> list:
     reads ONE, TWO, THREE, FOUR while the live branch is ONE -> FOUR).
 
     So walk from the newest message up through parentUuid and keep only what
-    is reachable. Falls back to the full list whenever the chain cannot be
-    trusted (no uuids, or a broken link losing the earlier turns), since
-    showing too much beats showing an empty transcript.
+    is reachable — across compaction boundaries, which start a new tree in
+    the same file (see _lineage). Falls back to the full list whenever the
+    chain cannot be trusted (no uuids, or a broken link losing the earlier
+    turns), since showing too much beats showing an empty transcript.
     """
     if len(messages) < 2:
         return messages
-    keep, seen = set(), set()
-    uid = messages[-1].get("uuid")
-    while uid and uid not in seen:
-        seen.add(uid)
-        keep.add(uid)
-        uid = parent_of.get(uid)
+    keep = _lineage(messages, parent_of, pos_of)
     if not keep:
         return messages
     branch = [m for m in messages if m.get("uuid") in keep]

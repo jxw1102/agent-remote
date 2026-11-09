@@ -19,6 +19,94 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.20.0** Links to host files open. Codex answers with links to bare
+absolute paths - `[findings.txt](/Users/me/proj/out/findings.txt:12)` - and a
+client resolved them against its own origin, so on the hosted web client the
+link pointed at the static web host and 404'd, and on Android it went to a
+browser that had no such file. `GET /api/sessions/<id>/file?path=<abs path>`
+now serves the file, read-only, and is deliberately not a file browser: the
+path must be linked in one of the session's assistant messages, must resolve
+(symlinks included) inside the session's working folder, must cross no
+credential folder (`.ssh`, `.agentremoted`, `.aws`, `.gnupg`, ...) or name
+(`.env`, `.netrc`, `id_*` keys), and must be a regular file of at most 10 MB.
+Every refusal is the same 404, so the endpoint cannot be used to probe what
+exists on the host. HTML and SVG go out as `text/plain` with `nosniff` and a
+sandbox CSP, so nothing opened from a link can run script in the client's
+origin. Ping advertises `linked_files: true`. Web opens text in a viewer
+with the linked line marked, images inline, PDFs in a tab and anything else
+as a download; Android 1.7.1 shows text and images in a dialog. BlackBerry
+paints links without making them tappable and the pager draws no links, so
+neither has a dead link to fix. Public share pages still do not serve files.
+
+**2.19.4** A session waiting on background agents reads as working
+again. Claude now pins a manager view to the bottom of the pane - the status
+bar, `⏺ main`, and one row per background agent - and the daemon decided
+"still working" by scanning a fixed tail of that pane. The chrome grew with
+the agent count and pushed the turn-state line out of the window: with three
+agents, "Waiting for 3 background agents to finish" sat nine rows up and was
+never seen, so no synthetic row reached /ws/status and clients showed the
+session as finished while it worked. A tall agent list hid "esc to interrupt"
+the same way, so a session actively generating could read as idle too. The
+input box is now the anchor - everything from its opening rule down is
+chrome, the turn line sits just above it - which also keeps a stale wait line
+in the scrollback from pinning the pulse on. The crash watchdog read the
+same kind of fixed window and had the same hole, with worse consequences:
+seven agents push the input box and the status bar out of its 8 rows, so a
+healthy session one quiet moment from a transcript write looked crashed, and
+the watchdog kills a crashed TUI and fails the turn. It is anchored now too.
+Underneath all of it was a duplicate method: `_pane_tail` was defined twice
+in one class, so the 20-row window added in August to fix the first version
+of this never ran, shadowed by the 6-row diagnostics helper below it. The
+test suite now fails on any method defined twice in a class.
+
+**2.19.3** The Usage sheet drops CodeBuddy and DeepSeek. Neither
+harness publishes a subscription quota - no `/usage` command, no limits
+endpoint, nothing on disk - so DeepSeek only ever contributed a section
+reading "not supported" and CodeBuddy contributed token counts summed out of
+its own transcripts, which answer a different question than "how much of my
+plan is left". Both were rows the reader had to scroll past to reach the
+harnesses that do report. CodeBuddy's `can_show_usage` is now false and its
+`usage()` is gone; `/api/usage` leaves out any harness that reports none, so
+no client draws a row for it. Clients need no rebuild: web, Android,
+BlackBerry and the pager all render whatever sections the daemon sends.
+
+**2.19.2** A compacted session shows its whole history again. A Claude
+Code transcript is a tree walked from the newest message up through
+`parentUuid`, which is how /rewind's abandoned turns stay hidden - but
+/compact writes its summary as a NEW ROOT, so one file holds several
+unconnected trees. The walk dead-ended at the newest root and everything
+before the last compaction became unreachable: a 13 MB session with 224
+messages arrived as 5, and since clients offer "load earlier messages" only
+when an earlier page exists, there was no way to ask for the rest. The walk
+now stitches a mid-file dead end to the last message written before it and
+carries on. Rewind is unaffected (it reparents onto a node still in the
+file, so its chain never dead-ends). Measured over the 40 most recent
+sessions: 17 were truncated, none lost a message, and every one that gained
+had been compacted.
+
+**2.19.1** A line typed into Live TUI reaches Codex as a line. The text
+field sends `{text, keys:["Enter"]}` in one request, and Codex decides what
+is a paste by timing: the Enter arrived in the same input burst as the text,
+so it was read as part of the pasted block and became a newline in the
+composer. The message sat there fully typed and unsent, waiting for a human
+to press Enter - on Codex only; Claude submits it either way. The keys now
+wait `live_tui.TEXT_SETTLE_S` behind the text so they arrive as keys. Fixed
+for every client at once, since they all post the same request.
+
+**2.19.0** A stalled Codex goal can be nudged. A codex thread with a goal
+restarts itself after every turn - until it does not, and then it sits at an
+idle prompt with work left, which from a phone looks exactly like finished.
+`GET /api/goals` lists every thread with a goal (objective, status, the
+counters, and what the daemon has done about it); `POST /api/goals/watch`
+{session_id, on} enrols one. A watched thread whose goal is still active,
+whose TUI is alive and idle, and whose rollout has gone quiet for five
+minutes gets `/goal resume` typed into it. Guards: a three-minute cooldown,
+and three resumes that move the goal's own token counter by nothing make the
+daemon stop and say so (switching the watch off and on again clears that).
+Enrolment is always a human act - resuming spends the user's tokens.
+Advertised as the `goal_watch` capability; web, Android and BlackBerry each
+show the objective and the switch.
+
 **2.18.5** BlackBerry: the Ctrl hold button no longer stops the app from
 starting. The first version declared a `readonly property` on the Button,
 which the BB10 QML engine rejects ("Readonly not yet supported") - the whole
@@ -606,6 +694,7 @@ GET  /api/sessions/search?q=<text>&project=&limit=
 GET  /api/sessions/<id>
 GET  /api/sessions/<id>/messages?offset=&limit=[&detail=steps]
 GET  /api/sessions/<id>/steps/<ref>             full text behind a truncated step
+GET  /api/sessions/<id>/file?path=<abs>         a host file the session linked (2.20+)
 POST /api/sessions/new {cwd?, prompt, provider?, permission_mode?, …}
 POST /api/sessions/<id>/continue {prompt, permission_mode?, …}
 GET  /api/jobs

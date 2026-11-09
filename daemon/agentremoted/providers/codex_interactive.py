@@ -36,6 +36,7 @@ import uuid
 from pathlib import Path
 
 from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
+from .. import goalwatch
 from ..live_tui import TUI_COLS, TUI_ROWS, idle_eviction_victim
 from ..render_blocks import markdown_to_blocks
 from .codex import (
@@ -121,6 +122,10 @@ _BUSY_CHUNK = 256 * 1024
 _INTERRUPT_HINT = "to interrupt"
 # How long an open turn may go unwritten before we stop calling it busy.
 _BUSY_STALE_S = 15 * 60
+# How often the goal watcher looks. A stalled goal is measured in minutes,
+# so this only has to be fast enough that the idle threshold means what it
+# says; a tick with nothing enrolled is one list lookup.
+_GOAL_TICK_S = 30
 _BUSY_SCAN_MAX = 16 * 1024 * 1024
 
 
@@ -156,7 +161,9 @@ class CodexInteractiveManager:
         self._lock = threading.Lock()
         # tui name -> ((path, size, mtime), busy) for active_tui_status().
         self._busy_cache = {}
+        self._goal_thread = None
         self._adopt_or_reap()
+        self._start_goal_watch()
 
     # -- registry ----------------------------------------------------------
 
@@ -716,6 +723,113 @@ class CodexInteractiveManager:
     def send_tui_keys(self, session_id: str, keys=None, text: str = "") -> str:
         from ..live_tui import send_to_session
         return send_to_session(self, session_id, keys=keys, text=text)
+
+    # -- keeping a goal moving --------------------------------------------
+
+    def _start_goal_watch(self) -> None:
+        """One watcher thread per manager, started with the daemon."""
+        with self._lock:
+            if self._goal_thread is not None:
+                return
+            t = threading.Thread(target=self._goal_loop, daemon=True,
+                                 name="codex-goalwatch")
+            self._goal_thread = t
+        t.start()
+
+    def _goal_loop(self) -> None:
+        while True:
+            time.sleep(_GOAL_TICK_S)
+            try:
+                self.goal_tick()
+            except Exception:  # noqa: BLE001 - a watchdog must not die
+                log.exception("codex goal watch tick failed")
+
+    def goal_state(self, session_id: str) -> dict:
+        """What the watcher can see of one session right now."""
+        sid = (session_id or "").strip()
+        out = {"tui": False, "busy": False, "job": False, "idle_s": 0.0}
+        if not sid:
+            return out
+        with self._lock:
+            tui = next((t for t in self._tuis.values()
+                        if (t.session_id or "") == sid), None)
+        if tui is None:
+            return out
+        out["tui"] = bool(tui.spawned and self._tmux_alive(tui.name))
+        job = tui.job
+        if job is not None:
+            with job.lock:
+                out["job"] = job.status in ("starting", "running")
+        if out["tui"]:
+            out["busy"] = self._tui_busy(tui)
+        path = tui.rollout_path or self._rollout_for(sid)
+        if path:
+            try:
+                out["idle_s"] = max(0.0, time.time() - os.stat(path).st_mtime)
+            except OSError:
+                pass
+        return out
+
+    def goal_tick(self) -> list:
+        """Nudge every watched thread that has stalled. Returns what it did.
+
+        A thread stalls when its goal is still active but codex did not
+        restart itself: no turn open, nothing written to the rollout for a
+        while, and no job of ours running. The cure is the same line a human
+        would type.
+        """
+        watch = goalwatch.shared()
+        sessions = watch.watching()
+        if not sessions:
+            return []
+        goals = {}
+        runner = self.runner
+        store = getattr(runner, "store", None) if runner else None
+        if store is not None:
+            try:
+                goals = store.goals() or {}
+            except Exception:  # noqa: BLE001
+                goals = {}
+        now = time.time()
+        acted = []
+        for sid in sessions:
+            goal = goals.get(sid) or {}
+            if not goal:
+                watch.give_up(sid, "codex has no goal on this thread any more")
+                continue
+            if str(goal.get("status") or "") != "active":
+                watch.give_up(sid, "the goal is %s" % (goal.get("status") or "gone"))
+                continue
+            row = watch.get(sid)
+            if int(row.get("stale_resumes") or 0) >= goalwatch.DEFAULT_MAX_STALE_RESUMES:
+                watch.give_up(sid, "%d resumes in a row moved nothing"
+                              % goalwatch.DEFAULT_MAX_STALE_RESUMES)
+                continue
+            if now - float(row.get("last_resume_at") or 0) < goalwatch.DEFAULT_COOLDOWN_S:
+                continue
+            state = self.goal_state(sid)
+            if not state["tui"] or state["busy"] or state["job"]:
+                continue
+            if state["idle_s"] < goalwatch.DEFAULT_IDLE_S:
+                continue
+            with self._lock:
+                tui = next((t for t in self._tuis.values()
+                            if (t.session_id or "") == sid), None)
+            if tui is None:
+                continue
+            # Straight to _send_prompt, not type_text: typed_ahead is job
+            # bookkeeping and no job is running - leaving it set would make
+            # the next turn wait for a second completion.
+            err = self._send_prompt(tui, goalwatch.RESUME_COMMAND)
+            if err:
+                log.warning("goal watch: could not resume %s: %s", sid[:12], err)
+                continue
+            watch.note_resume(sid, float(goal.get("tokens_used") or 0.0))
+            self._busy_cache.pop(tui.name, None)
+            log.info("goal watch: typed %s into %s (idle %ds)",
+                     goalwatch.RESUME_COMMAND, sid[:12], int(state["idle_s"]))
+            acted.append(sid)
+        return acted
 
     # -- busy TUIs with no job of ours ------------------------------------
 

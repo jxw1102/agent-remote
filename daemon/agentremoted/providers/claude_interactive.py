@@ -118,6 +118,10 @@ _STOP_CONFIRM_S = 8.0     # window for a queued message to take the pane
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
+# The rules that draw the input box. _pane_bottom anchors on them to tell the
+# live bottom of the pane from the scrollback above it.
+_RULE_CHARS = set("─━═-_")
+
 # tmux session name prefix: `tmux ls` should read as "claude" at a glance
 # (grok's fleet is grk-*). Legacy bb10i-* sessions are still adopted/reaped.
 _PREFIX = "cld-"
@@ -577,29 +581,53 @@ class InteractiveManager:
         except (OSError, subprocess.TimeoutExpired):
             return ""
 
-    def _pane_tail(self, name: str, n: int = 20) -> str:
-        """Bottom of the pane only — scrollback must not drive busy state.
+    def _pane_bottom(self, name: str, above: int = 3) -> str:
+        """The live bottom of the pane, lowercased: the turn-state line and
+        the chrome under it.
 
-        Older turns leave lines like "Waiting for 1 background agent to finish"
-        in the buffer long after the session is idle at ❯; scanning the full
-        capture kept active_tui_status (and the phone "working" pulse) stuck.
+        Busy state must be read from what the TUI is drawing *now*, never
+        from scrollback: a finished turn leaves its "Waiting for 1 background
+        agent to finish" line in the buffer, and matching that pinned the
+        phone's "working" pulse on forever.
+
+        A fixed tail cannot do it. The input box is the anchor instead:
+        everything from its opening rule down is chrome (the box, the status
+        bar, and — since the multi-agent manager view — `⏺ main` plus one row
+        per background agent), and the turn-state line sits directly above
+        it. The chrome grows with the number of agents, so a tail short
+        enough to exclude stale scrollback is exactly the one that loses the
+        wait line when it matters most: three agents push it nine rows up.
+        `above` covers the turn line wrapping or a `⎿ Tip:` landing under it.
         """
-        rows = [l for l in self._pane_text(name).splitlines() if l.strip()]
-        return "\n".join(rows[-n:]) if rows else ""
+        rows = [l.rstrip() for l in self._pane_text(name).splitlines()
+                if l.strip()]
+        if not rows:
+            return ""
+        rules = [i for i, line in enumerate(rows)
+                 if len(line.strip()) >= 10 and set(line.strip()) <= _RULE_CHARS]
+        if len(rules) >= 2:
+            # The last two rules are the input box; start just above it.
+            window = rows[max(0, rules[-2] - above):]
+        else:
+            # No box on screen (login prompt, crash trace, a pane mid-redraw).
+            window = rows[-10:]
+        return "\n".join(window).lower()
 
     def _pane_busy(self, name: str) -> bool:
         """A model turn / subagent is still in flight on the host TUI.
 
-        Classic chat turns show "esc to interrupt". Multi-agent work often
-        leaves the main input idle while a background agent runs — the chrome
-        then says "Waiting for N background agent(s)" without Esc. Treat both
-        as busy so turn_timeout does not drop the session from clients'
-        working list and active_tui_status still reports them.
+        Classic chat turns show "esc to interrupt" in the status bar. Multi-
+        agent work often leaves the main input idle while a background agent
+        runs — the line above the box then says "Waiting for N background
+        agent(s)" without Esc. Treat both as busy so turn_timeout does not
+        drop the session from clients' working list and active_tui_status
+        still reports them.
 
-        Only the tail is inspected (see _pane_tail). Do not match bare
-        "agent" in the status bar ("· ← 1 agent") or historical transcript.
+        Only the live bottom is inspected (see _pane_bottom). Do not match
+        bare "agent" in the status bar ("· ← 1 agent") or historical
+        transcript.
         """
-        t = self._pane_tail(name).lower()
+        t = self._pane_bottom(name)
         if "esc to interrupt" in t:
             return True
         # Live multi-agent wait chrome (current turn), not old scrollback.
@@ -618,7 +646,7 @@ class InteractiveManager:
 
     def _pane_queued(self, name: str) -> bool:
         """Typed-ahead messages are still waiting in the TUI's own queue."""
-        return "queued message" in self._pane_tail(name).lower()
+        return "queued message" in self._pane_bottom(name)
 
     def active_tui_status(self) -> list:
         """Busy host TUIs for /ws/status even when no remote job is running.
@@ -709,11 +737,16 @@ class InteractiveManager:
         return False
 
     def _pane_healthy(self, name: str) -> bool:
-        """True while the TUI's chrome is on screen. Checks only the bottom
-        lines: a crash backtrace may scroll old ❯ lines into view above."""
-        rows = [l for l in self._pane_text(name).splitlines() if l.strip()][-8:]
-        t = "\n".join(rows)
-        return ("esc to interrupt" in t.lower()) or "⏵⏵" in t or "❯" in t
+        """True while the TUI's chrome is on screen.
+
+        Only the live bottom counts: a crash backtrace may scroll old ❯ lines
+        into view above it. This used to read a fixed 8 rows, which the
+        multi-agent manager view overflows — seven background agents push the
+        input box and the status bar out of the window, and a healthy session
+        then looks like a crashed one to the watchdog that kills TUIs.
+        """
+        t = self._pane_bottom(name, above=0)
+        return "esc to interrupt" in t or "⏵⏵" in t or "❯" in t
 
     def _save_crash(self, tui: _Tui) -> str:
         """Preserve a crashed TUI's full scrollback (the error line sits far

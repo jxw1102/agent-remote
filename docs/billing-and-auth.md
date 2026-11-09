@@ -29,7 +29,8 @@ Codex is similar: ChatGPT login vs `OPENAI_API_KEY`. Grok uses whatever the
 login` or `CURSOR_API_KEY`. GitHub Copilot uses the seat `copilot login`
 signed in with; the Usage sheet shows that seat's monthly premium-request
 allowance. CodeBuddy Code uses `codebuddy` sign-in, or `CODEBUDDY_API_KEY` /
-`CODEBUDDY_AUTH_TOKEN`. The Usage sheet does not scrape a CodeBuddy quota.
+`CODEBUDDY_AUTH_TOKEN`. CodeBuddy and DeepSeek publish no quota anywhere a
+daemon can read it, so neither appears in the Usage sheet at all.
 
 ## Official Claude Remote Control vs Agent Remote
 

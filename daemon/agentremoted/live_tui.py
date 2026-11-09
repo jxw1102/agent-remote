@@ -19,6 +19,17 @@ import time
 TUI_COLS = 120
 TUI_ROWS = 50
 
+# How long keys wait behind literal text in the same request.
+#
+# A line sent from a client's text field arrives as {text, keys:["Enter"]}.
+# Codex decides what counts as a paste by timing, so a CR a millisecond
+# behind the text was read as part of the pasted block: it put a newline in
+# the composer and the line sat there unsent, waiting for a human to press
+# Enter. Claude submits it either way, but nothing about the API says which
+# harness reads input which way, so the gap is the rule and a manager can
+# opt out with tui_text_settle_s = 0.
+TEXT_SETTLE_S = 0.3
+
 # Base key names (case-insensitive) → tmux send-keys tokens. Modifiers are
 # parsed separately, so this table holds bare keys only.
 _BASE_KEYS = {
@@ -345,7 +356,11 @@ def capture_session(mgr, session_id: str, *, ansi: bool = False) -> dict:
 
 
 def send_to_session(mgr, session_id: str, keys=None, text: str = "") -> str:
-    """Send keys and/or literal text into the session TUI. Returns \"\" or error."""
+    """Send keys and/or literal text into the session TUI. Returns \"\" or error.
+
+    Text followed by keys is one line being sent, not typing, and the keys
+    wait TEXT_SETTLE_S behind the text so they arrive as keys.
+    """
     tui = _find_tui(mgr, session_id)
     if tui is None:
         return "no interactive TUI for this session"
@@ -366,6 +381,10 @@ def send_to_session(mgr, session_id: str, keys=None, text: str = "") -> str:
                 if getattr(r, "stderr", None):
                     err = r.stderr.decode("utf-8", errors="replace")[:200]
                 return "tmux send-keys failed: %s" % (err or "error")
+            if tokens:
+                settle = getattr(mgr, "tui_text_settle_s", TEXT_SETTLE_S)
+                if float(settle or 0.0) > 0:
+                    time.sleep(float(settle))
         for tok in tokens:
             # A bare character is content, not a key name: -l keeps tmux from
             # reading it as one (and keeps '-'/';' out of argument parsing).
