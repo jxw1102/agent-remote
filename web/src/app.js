@@ -606,6 +606,98 @@ function runProcessRefresh() {
   });
 }
 
+// ---- codex goals --------------------------------------------------------
+
+/** "4m" / "2h 10m" — short enough for a status line. */
+function shortSpan(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  return h + "h " + (m % 60) + "m";
+}
+
+/**
+ * The daemon's goal watchdog for one session.
+ *
+ * A codex thread can carry a goal it restarts itself for after every turn —
+ * until it doesn't, and then it sits idle with work left. The daemon can
+ * watch for that and type `/goal resume`; this is the switch, and the
+ * answer to "what is it doing right now".
+ */
+async function paintGoal(box, profile, sessionId) {
+  box.textContent = "";
+  box.appendChild(el("div", "help", "Looking for a goal…"));
+  let row = null;
+  let failed = "";
+  try {
+    const data = await call(profile, "/api/goals", { timeout: 15000 });
+    const rows = (data && data.goals) || [];
+    row = rows.find((g) => String(g.session_id || "") === sessionId) || null;
+  } catch (e) {
+    failed = e && e.message ? e.message : "could not read the goals";
+  }
+  box.textContent = "";
+  if (failed) { box.appendChild(el("div", "help", failed)); return; }
+  // No goal on this thread: say nothing rather than explain an absence.
+  if (!row) { box.remove(); return; }
+
+  box.appendChild(el("label", null, "Goal"));
+  box.appendChild(el("div", "goalobj", row.objective || "(no objective)"));
+
+  const cb = el("label");
+  const check = el("input");
+  check.type = "checkbox";
+  check.style.width = "auto";
+  check.checked = !!row.watching;
+  check.disabled = String(row.status || "") !== "active";
+  check.addEventListener("change", async () => {
+    check.disabled = true;
+    try {
+      await call(profile, "/api/goals/watch",
+                 { method: "POST", body: { session_id: sessionId, on: check.checked } });
+    } catch (e) {
+      toast(e && e.message ? e.message : "could not change the watch");
+    }
+    paintGoal(box, profile, sessionId);
+  });
+  cb.appendChild(check);
+  cb.appendChild(document.createTextNode(
+    " Keep it moving — type /goal resume when it stalls"));
+  box.appendChild(cb);
+
+  box.appendChild(el("div", "help", goalStatusLine(row)));
+}
+
+/** One line of plain truth about a goal's state. */
+function goalStatusLine(row) {
+  const status = String(row.status || "");
+  if (status !== "active") return "This goal is " + (status || "gone") + ".";
+  if (row.stopped_why) {
+    return "The daemon stopped: " + row.stopped_why
+      + ". Switch it back on to try again.";
+  }
+  const bits = [];
+  if (row.working) bits.push("Working now.");
+  else if (!row.live_tui) bits.push("No live TUI on the host — send this session a message first, so there is a prompt to type into.");
+  else {
+    bits.push("Idle for " + shortSpan(row.idle_s) + ".");
+    if (row.watching) {
+      bits.push("A resume follows " + shortSpan(row.idle_threshold_s) + " of quiet.");
+    }
+  }
+  if (row.resumes) {
+    bits.push("Resumed " + row.resumes + (row.resumes === 1 ? " time" : " times")
+      + (row.last_resume_at
+        ? ", last " + shortSpan(Date.now() / 1000 - row.last_resume_at) + " ago." : "."));
+  }
+  if (!row.watching && !row.stopped_why) {
+    bits.push("Codex restarts a goal itself; this is for when it does not.");
+  }
+  return bits.join(" ");
+}
+
 // ---- process view -------------------------------------------------------
 //
 // The default transcript is the result: what was asked, what was answered.
@@ -1010,6 +1102,8 @@ async function pingProfile(profile) {
     profile.focus = !!ping.focus;
     // Session share (agentremoted ≥ 2.7): hosted read-only /share/<token>.
     profile.share = !!ping.share;
+    // Linked host files (agentremoted ≥ 2.20): /api/sessions/<id>/file.
+    profile.linkedFiles = !!ping.linked_files;
     profile.chunkedUpload = !!ping.chunked_upload
       || !!(ping.caps && ping.caps.chunked_upload);
     if (typeof ping.max_upload_mb === "number" && ping.max_upload_mb > 0) {
@@ -2978,6 +3072,127 @@ function renderMessage(item) {
   wrap.appendChild(renderMarkdown(item.text));
   wrap.appendChild(messageToolsRow(item));
   return wrap;
+}
+
+// ------------------------------------------------------- linked host files
+//
+// Agents (Codex above all) answer with links to bare host paths:
+// [findings.txt](/Users/me/proj/out/findings.txt:12). Left alone the browser
+// resolves that against THIS page's origin — the static web host — and 404s.
+// The daemon (2.20.0+) serves such a file at /api/sessions/<id>/file, but
+// only when the session's own transcript links it and it sits inside the
+// session's working folder; anything else is a plain 404.
+
+const LINK_LOC = /(?::(\d+)(?::\d+)?|#L(\d+)(?:-L?\d+)?)$/;
+
+function hostPathLink(a) {
+  const href = a.getAttribute("href") || "";
+  // "/x" but not "//host/x" (protocol-relative) — a host path, not a URL.
+  if (!href.startsWith("/") || href.startsWith("//")) return null;
+  let path = href;
+  try { path = decodeURIComponent(href); } catch { /* keep it raw */ }
+  const m = path.match(LINK_LOC);
+  const line = m ? Number(m[1] || m[2]) || 0 : 0;
+  return { href, path, line, name: path.replace(LINK_LOC, "").split("/").pop() };
+}
+
+async function openHostFile(link) {
+  const open = state.open;
+  const profile = open && profileById(open.profileId);
+  if (!profile) return;
+  if (!profile.linkedFiles) {
+    toast(`Opening host files needs agentremoted 2.20.0 or newer (this daemon is ${profile.version || "older"})`);
+    return;
+  }
+  toast(`Opening ${link.name}…`);
+  let blob;
+  try {
+    blob = await call(profile,
+      `/api/sessions/${encodeURIComponent(open.sessionId)}/file?path=${encodeURIComponent(link.path)}`,
+      { raw: true, timeout: 60000 });
+  } catch (e) {
+    toast(e.status === 404
+      ? `${link.name} is not available: the daemon only opens files this session linked inside its working folder`
+      : e.status === 413 ? `${link.name} is too large to open (over 10 MB)`
+      : `Could not open ${link.name}: ${e.message}`);
+    return;
+  }
+  const type = (blob.type || "").toLowerCase();
+  if (type.startsWith("image/") || type === "application/pdf") {
+    // Images and PDFs only: the daemon never labels HTML or SVG as such, so
+    // nothing opened here can run script in this page's origin.
+    const url = URL.createObjectURL(blob);
+    if (type === "application/pdf") {
+      window.open(url, "_blank", "noopener");
+    } else {
+      modal({
+        title: link.name, wide: true,
+        build(body) {
+          const img = el("img", "host-file-img");
+          img.src = url;
+          img.alt = link.name;
+          body.appendChild(img);
+        },
+        actions: [{ label: "Close", primary: true }],
+      });
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+    return;
+  }
+  if (!type.startsWith("text/")) {
+    saveBlob(blob, link.name);
+    return;
+  }
+  const text = await blob.text();
+  modal({
+    title: link.name, wide: true,
+    build(body) {
+      body.appendChild(el("div", "host-file-path", link.path.replace(LINK_LOC, "")));
+      const pre = el("pre", "host-file");
+      const lines = text.split("\n");
+      if (link.line > 0 && link.line <= lines.length) {
+        pre.appendChild(document.createTextNode(lines.slice(0, link.line - 1).join("\n")
+          + (link.line > 1 ? "\n" : "")));
+        const mark = el("mark", "host-file-line", lines[link.line - 1] || " ");
+        pre.appendChild(mark);
+        pre.appendChild(document.createTextNode(
+          (link.line < lines.length ? "\n" : "") + lines.slice(link.line).join("\n")));
+        requestAnimationFrame(() => mark.scrollIntoView({ block: "center" }));
+      } else {
+        pre.textContent = text;
+      }
+      body.appendChild(pre);
+    },
+    actions: [
+      { label: "Copy", close: false, run: async () => {
+        try { await copyText(text); toast("Copied"); } catch { toast("Copy failed"); }
+      } },
+      { label: "Download", close: false, run: () => saveBlob(blob, link.name) },
+      { label: "Close", primary: true },
+    ],
+  });
+}
+
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name || "file";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+function wireHostFileLinks(host) {
+  host.addEventListener("click", (ev) => {
+    const a = ev.target && ev.target.closest && ev.target.closest("a[href]");
+    if (!a || !host.contains(a)) return;
+    const link = hostPathLink(a);
+    if (!link) return;
+    ev.preventDefault();
+    openHostFile(link);
+  });
 }
 
 function copyButton(text) {
@@ -5304,6 +5519,13 @@ function openOptions() {
           "This session only. Adds the agent's working steps under each "
           + "message; the transcript is larger to load."));
       }
+      // Codex goals. The panel removes itself when this thread has none.
+      if (state.open.sessionId
+          && capOf(profile, "goal_watch", false, harness || null)) {
+        const goalBox = el("div", "field goalbox");
+        body.appendChild(goalBox);
+        paintGoal(goalBox, profile, state.open.sessionId);
+      }
     },
     actions: [{ label: "Done", close: true }],
   });
@@ -5322,6 +5544,7 @@ function wire() {
   $("btn-sound").addEventListener("click", () => setSoundCues(!soundCuesOn()));
   syncSoundButton();
 
+  wireHostFileLinks($("transcript"));
   $("btn-profiles").addEventListener("click", openProfiles);
   $("btn-new").addEventListener("click", openNewSession);
   $("btn-inbox").addEventListener("click", openInbox);
