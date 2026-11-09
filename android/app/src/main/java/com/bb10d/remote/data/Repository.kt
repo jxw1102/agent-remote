@@ -4,6 +4,7 @@ import android.content.Context
 import com.bb10d.remote.audio.Chime
 import com.bb10d.remote.net.DaemonClient
 import com.bb10d.remote.net.DaemonException
+import com.bb10d.remote.net.LinkedFile
 import com.bb10d.remote.net.StatusStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -311,6 +312,21 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
                 else -> throw IllegalStateException("Daemon did not return a share link")
             }
         }
+    }
+
+    /** A host file the session's agent linked; see [DaemonClient.linkedFile]. */
+    suspend fun linkedFile(ref: SessionRef, path: String): Result<LinkedFile> {
+        val profile = profile(ref.profileId) ?: return Result.failure(
+            IllegalStateException("unknown daemon"),
+        )
+        if (!profile.linkedFiles) {
+            return Result.failure(
+                IllegalStateException(
+                    "Opening host files needs agentremoted 2.20.0 or newer",
+                ),
+            )
+        }
+        return runCatching { client(profile).linkedFile(ref.sessionId, path) }
     }
 
     /** Ask the daemon to derive a fresh title from the transcript. */

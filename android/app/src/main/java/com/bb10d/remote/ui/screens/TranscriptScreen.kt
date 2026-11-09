@@ -59,6 +59,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -68,6 +70,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -92,6 +95,7 @@ import com.bb10d.remote.ui.components.Hairline
 import com.bb10d.remote.ui.components.MetaPill
 import com.bb10d.remote.ui.components.rememberClip
 import com.bb10d.remote.ui.components.WorkingPulse
+import com.bb10d.remote.ui.markdown.LocalHostLinkHandler
 import com.bb10d.remote.ui.markdown.MarkdownText
 import com.bb10d.remote.ui.theme.Accent
 import com.bb10d.remote.ui.theme.AgentRemoteTheme
@@ -174,6 +178,7 @@ private fun TranscriptScreenBody(
     val processView by vm.processView.collectAsStateWithLifecycle()
     val openSteps by vm.openSteps.collectAsStateWithLifecycle()
     val share by vm.share.collectAsStateWithLifecycle()
+    val hostFile by vm.hostFile.collectAsStateWithLifecycle()
     var menuOpen by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showOptions by remember { mutableStateOf(false) }
@@ -397,7 +402,9 @@ private fun TranscriptScreenBody(
                         })
                     }
 
-                    else -> LazyColumn(
+                    else -> CompositionLocalProvider(
+                        LocalHostLinkHandler provides vm::openHostFile,
+                    ) { LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(
@@ -423,7 +430,7 @@ private fun TranscriptScreenBody(
                                 onToggleStep = vm::toggleStep,
                             )
                         }
-                    }
+                    } }
                 }
             }
 
@@ -563,6 +570,14 @@ private fun TranscriptScreenBody(
             dismissButton = {
                 TextButton(onClick = { confirmRewind = null }) { Text("Cancel") }
             },
+        )
+    }
+
+    if (hostFile.open) {
+        HostFileDialog(
+            file = hostFile,
+            onCopy = { clipboard.copy(it) },
+            onDismiss = { vm.dismissHostFile() },
         )
     }
 
@@ -1424,6 +1439,9 @@ private fun TurnOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.remote.
                 onSelect = { vm.setEffort(it) },
             )
         }
+        if (caps.goalWatchFor(h)) {
+            GoalBlock(vm)
+        }
         if (caps.rewindFor(h)) {
             Spacer(Modifier.height(16.dp))
             Text(
@@ -1439,6 +1457,95 @@ private fun TurnOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.remote.
             if (caps.host.isNotEmpty()) MetaPill(caps.host)
         }
     }
+}
+
+/**
+ * The Codex goal on this thread, and the daemon's watchdog for it.
+ *
+ * A goal makes codex restart itself after every turn - until it doesn't,
+ * and then the thread sits idle with work left. The switch asks the daemon
+ * to type `/goal resume` when that happens. Nothing is drawn for a thread
+ * without a goal.
+ */
+@Composable
+private fun GoalBlock(vm: TranscriptViewModel) {
+    val goal by vm.goal.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { vm.loadGoal() }
+    val row = goal ?: return
+    Spacer(Modifier.height(20.dp))
+    Text("Goal", style = MaterialTheme.typography.labelLarge, color = palette.dim)
+    Spacer(Modifier.height(6.dp))
+    Surface(
+        color = palette.codeBg,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            row.objective.ifBlank { "(no objective)" },
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "Keep it moving",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f),
+        )
+        Switch(
+            checked = row.watching,
+            enabled = row.status == "active",
+            onCheckedChange = { vm.setGoalWatch(it) },
+        )
+    }
+    Text(
+        goalStatusLine(row),
+        style = MaterialTheme.typography.bodySmall,
+        color = palette.dim,
+    )
+}
+
+/** "4m" / "2h 10m" - short enough for a status line. */
+private fun shortSpan(seconds: Double): String {
+    val s = seconds.toLong().coerceAtLeast(0L)
+    if (s < 60) return "${s}s"
+    val m = s / 60
+    if (m < 60) return "${m}m"
+    return "${m / 60}h ${m % 60}m"
+}
+
+/** One line of plain truth about a goal's state (same words as web). */
+private fun goalStatusLine(row: com.bb10d.remote.data.GoalDto): String {
+    if (row.status != "active") {
+        return "This goal is ${row.status.ifBlank { "gone" }}."
+    }
+    if (row.stoppedWhy.isNotBlank()) {
+        return "The daemon stopped: ${row.stoppedWhy}. Switch it back on to try again."
+    }
+    val bits = mutableListOf<String>()
+    when {
+        row.working -> bits += "Working now."
+        !row.liveTui -> bits += "No live TUI on the host \u2014 send this session a " +
+            "message first, so there is a prompt to type into."
+        else -> {
+            bits += "Idle for ${shortSpan(row.idleS)}."
+            if (row.watching) {
+                bits += "A resume follows ${shortSpan(row.idleThresholdS)} of quiet."
+            }
+        }
+    }
+    if (row.resumes > 0) {
+        val last = if (row.lastResumeAt > 0) {
+            val ago = System.currentTimeMillis() / 1000.0 - row.lastResumeAt
+            ", last ${shortSpan(ago)} ago."
+        } else "."
+        bits += "Resumed ${row.resumes} " + (if (row.resumes == 1) "time" else "times") + last
+    }
+    if (!row.watching && row.stoppedWhy.isBlank()) {
+        bits += "Codex restarts a goal itself; this is for when it does not."
+    }
+    return bits.joinToString(" ")
 }
 
 private fun queryFileName(context: android.content.Context, uri: android.net.Uri): String {

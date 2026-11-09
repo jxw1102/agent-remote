@@ -139,6 +139,8 @@ data class PingDto(
     val focus: Boolean = false,
     /** Session share (agentremoted ≥ 2.7); gates the share-link action. */
     val share: Boolean = false,
+    /** GET /api/sessions/<id>/file — host files the agent linked (≥ 2.20). */
+    @SerialName("linked_files") val linkedFiles: Boolean = false,
     /** Chunked POST /api/attachments (agentremoted ≥ 2.8.6). */
     @SerialName("chunked_upload") val chunkedUpload: Boolean = false,
     @SerialName("max_upload_mb") val maxUploadMb: Int = 16,
@@ -500,6 +502,32 @@ data class ShellResultDto(
 data class ErrorDto(val error: String = "")
 
 /** Capability keys /api/ping reports. Read through [Caps]. */
+/**
+ * One Codex goal: what the thread is working toward, and whether anything
+ * is still moving it. `watching` is this daemon's own watchdog, which types
+ * `/goal resume` when codex stops restarting itself.
+ */
+@Serializable
+data class GoalDto(
+    @SerialName("session_id") val sessionId: String = "",
+    val objective: String = "",
+    val status: String = "",
+    val watching: Boolean = false,
+    val resumes: Int = 0,
+    @SerialName("last_resume_at") val lastResumeAt: Double = 0.0,
+    @SerialName("stopped_why") val stoppedWhy: String = "",
+    @SerialName("live_tui") val liveTui: Boolean = false,
+    val working: Boolean = false,
+    @SerialName("idle_s") val idleS: Double = 0.0,
+    @SerialName("idle_threshold_s") val idleThresholdS: Double = 0.0,
+)
+
+@Serializable
+data class GoalsDto(val goals: List<GoalDto> = emptyList())
+
+@Serializable
+data class GoalWatchReplyDto(val ok: Boolean = false, val goal: GoalDto? = null)
+
 object Cap {
     const val QUEUE = "queue"
     const val STOP = "stop"
@@ -513,6 +541,7 @@ object Cap {
     const val INTERACTIVE = "interactive"
     const val LIVE_TUI = "live_tui"
     const val REWIND = "rewind"
+    const val GOAL_WATCH = "goal_watch"
 }
 
 /**
@@ -535,6 +564,8 @@ data class Caps(
     val focus: Boolean = false,
     /** Session share (agentremoted >= 2.7). */
     val share: Boolean = false,
+    /** Host files the agent linked (agentremoted >= 2.20). */
+    val linkedFiles: Boolean = false,
     /** Chunked attachments (agentremoted >= 2.8.6). */
     val chunkedUpload: Boolean = false,
     /** Largest attachment the daemon accepts (ping max_upload_mb). */
@@ -560,6 +591,19 @@ data class Caps(
     val interactive: Boolean get() = this[Cap.INTERACTIVE]
     val liveTui: Boolean get() = this[Cap.LIVE_TUI] || interactive
     val rewind: Boolean get() = this[Cap.REWIND]
+
+    /**
+     * Can the daemon keep a Codex goal moving for THIS harness? Only codex
+     * has goals, so a multi-host root flag says nothing about the session
+     * on screen - ask the harness.
+     */
+    fun goalWatchFor(harness: String?): Boolean {
+        val h = harness?.lowercase().orEmpty()
+        val detail = if (h.isNotEmpty()) providerDetails[h] else null
+        val flag = detail?.caps?.get(Cap.GOAL_WATCH)
+        if (flag != null) return flag
+        return if (isMulti) false else this[Cap.GOAL_WATCH]
+    }
 
     fun liveTuiFor(harness: String?): Boolean {
         val h = harness?.lowercase().orEmpty()
@@ -664,6 +708,7 @@ data class Caps(
             multi = ping.multi,
             focus = ping.focus,
             share = ping.share,
+            linkedFiles = ping.linkedFiles,
             chunkedUpload = ping.chunkedUpload || ping.caps["chunked_upload"] == true,
             maxUploadMb = ping.maxUploadMb.takeIf { it > 0 } ?: 16,
             providers = ping.providers,

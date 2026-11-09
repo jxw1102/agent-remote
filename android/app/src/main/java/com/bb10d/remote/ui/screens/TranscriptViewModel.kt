@@ -46,6 +46,22 @@ data class TranscriptItem(
     val steps: List<StepDto> = emptyList(),
 )
 
+/** A host file the agent linked, opened through the daemon. */
+data class HostFileUi(
+    val name: String = "",
+    val path: String = "",
+    val line: Int = 0,
+    val busy: Boolean = false,
+    val text: String? = null,
+    val image: ByteArray? = null,
+    val error: String? = null,
+) {
+    val open: Boolean get() = name.isNotEmpty()
+}
+
+/** ":12", ":12:3", "#L12", "#L12-L20" — the location an agent appends. */
+private val HOST_LINK_LOC = Regex("""(?::(\d+)(?::\d+)?|#L(\d+)(?:-L?\d+)?)$""")
+
 data class ShareUi(
     val busy: Boolean = false,
     val url: String = "",
@@ -149,6 +165,13 @@ class TranscriptViewModel(
         SharingStarted.Eagerly,
         initialRef.sessionId in repo.settings.value.processViewSessions,
     )
+
+    /**
+     * The Codex goal on this thread, if it has one. Null until the options
+     * sheet asks for it: a session list does not need the round trip.
+     */
+    private val _goal = MutableStateFlow<com.bb10d.remote.data.GoalDto?>(null)
+    val goal: StateFlow<com.bb10d.remote.data.GoalDto?> = _goal.asStateFlow()
 
     /** Expanded step bodies (ref → full text once fetched; "" = preview only). */
     private val _openSteps = MutableStateFlow<Map<String, String>>(emptyMap())
@@ -360,6 +383,29 @@ class TranscriptViewModel(
     }
 
     /** Turn the working-steps strip on/off for this session (persisted). */
+    /** Read this session's goal (and what the daemon's watchdog is doing). */
+    fun loadGoal() {
+        val id = _ref.value.sessionId
+        if (id.isEmpty()) return
+        viewModelScope.launch {
+            val row = runCatching { client?.goals()?.goals }.getOrNull()
+                ?.firstOrNull { it.sessionId == id }
+            _goal.value = row
+        }
+    }
+
+    /** Ask the daemon to keep this goal moving, or to stop. */
+    fun setGoalWatch(on: Boolean) {
+        val id = _ref.value.sessionId
+        if (id.isEmpty()) return
+        // Paint the new state at once; the reply confirms (or corrects) it.
+        _goal.value = _goal.value?.copy(watching = on, stoppedWhy = "")
+        viewModelScope.launch {
+            val reply = runCatching { client?.setGoalWatch(id, on) }.getOrNull()
+            if (reply?.goal != null) _goal.value = reply.goal else loadGoal()
+        }
+    }
+
     fun setProcessView(on: Boolean) {
         val id = _ref.value.sessionId
         if (id.isEmpty()) return
@@ -932,6 +978,59 @@ class TranscriptViewModel(
 
     fun dismissShare() {
         _share.value = ShareUi()
+    }
+
+    private val _hostFile = MutableStateFlow(HostFileUi())
+    val hostFile: StateFlow<HostFileUi> = _hostFile.asStateFlow()
+
+    /**
+     * Open a link to a bare host path ("/Users/me/proj/out.txt:12") — what
+     * Codex writes for files it produced. The phone cannot open that path,
+     * so the bytes come from the daemon, which only serves files the
+     * session itself linked inside its working folder.
+     */
+    fun openHostFile(href: String) {
+        val decoded = runCatching { java.net.URLDecoder.decode(href.replace("+", "%2B"), "UTF-8") }
+            .getOrDefault(href)
+        val loc = HOST_LINK_LOC.find(decoded)
+        val line = loc?.let { (it.groupValues[1].ifEmpty { it.groupValues[2] }).toIntOrNull() } ?: 0
+        val bare = if (loc != null) decoded.substring(0, loc.range.first) else decoded
+        val name = bare.substringAfterLast('/').ifEmpty { bare }
+        _hostFile.value = HostFileUi(name = name, path = bare, line = line, busy = true)
+        viewModelScope.launch {
+            repo.linkedFile(_ref.value, decoded).fold(
+                onSuccess = { file ->
+                    val type = file.contentType.lowercase()
+                    _hostFile.value = when {
+                        type.startsWith("image/") ->
+                            _hostFile.value.copy(busy = false, image = file.bytes)
+                        type.startsWith("text/") ->
+                            _hostFile.value.copy(busy = false, text = file.bytes.decodeToString())
+                        else -> _hostFile.value.copy(
+                            busy = false,
+                            error = "$name is not text or an image, so the phone cannot show it " +
+                                "(${file.bytes.size / 1024} KB)",
+                        )
+                    }
+                },
+                onFailure = { e ->
+                    val code = (e as? com.bb10d.remote.net.DaemonException)?.status ?: 0
+                    _hostFile.value = _hostFile.value.copy(
+                        busy = false,
+                        error = when (code) {
+                            404 -> "$name is not available. The daemon only opens files " +
+                                "this session linked inside its working folder."
+                            413 -> "$name is too large to open on the phone (over 10 MB)."
+                            else -> repo.reason(e)
+                        },
+                    )
+                },
+            )
+        }
+    }
+
+    fun dismissHostFile() {
+        _hostFile.value = HostFileUi()
     }
 
     fun rewindTo(itemId: String) {

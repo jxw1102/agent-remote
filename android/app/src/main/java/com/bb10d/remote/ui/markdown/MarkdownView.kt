@@ -20,6 +20,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -90,7 +91,7 @@ private fun RenderBlock(block: MdBlock, baseStyle: TextStyle, color: Color) {
     val pal = palette
     when (block) {
         is MdBlock.Heading -> Text(
-            text = annotate(block.spans, pal.inlineCode, pal.accent),
+            text = annotate(block.spans, pal.inlineCode, pal.accent, LocalHostLinkHandler.current),
             style = baseStyle.copy(
                 fontSize = when (block.level) {
                     1 -> 19.sp
@@ -105,7 +106,7 @@ private fun RenderBlock(block: MdBlock, baseStyle: TextStyle, color: Color) {
         )
 
         is MdBlock.Paragraph -> Text(
-            text = annotate(block.spans, pal.inlineCode, pal.accent),
+            text = annotate(block.spans, pal.inlineCode, pal.accent, LocalHostLinkHandler.current),
             style = baseStyle,
             color = color,
         )
@@ -121,7 +122,7 @@ private fun RenderBlock(block: MdBlock, baseStyle: TextStyle, color: Color) {
                 modifier = Modifier.width(if (block.marker.length > 2) 26.dp else 16.dp),
             )
             Text(
-                text = annotate(block.spans, pal.inlineCode, pal.accent),
+                text = annotate(block.spans, pal.inlineCode, pal.accent, LocalHostLinkHandler.current),
                 style = baseStyle,
                 color = color,
             )
@@ -199,7 +200,7 @@ private fun TableBlock(block: MdBlock.Table, baseStyle: TextStyle) {
         Row(Modifier.background(pal.codeBg)) {
             block.header.forEach { cell ->
                 Text(
-                    text = annotate(cell, pal.inlineCode, pal.accent),
+                    text = annotate(cell, pal.inlineCode, pal.accent, LocalHostLinkHandler.current),
                     style = cellStyle.copy(fontWeight = FontWeight.SemiBold),
                     color = pal.heading,
                     modifier = Modifier
@@ -217,7 +218,7 @@ private fun TableBlock(block: MdBlock.Table, baseStyle: TextStyle) {
             ) {
                 row.forEach { cell ->
                     Text(
-                        text = annotate(cell, pal.inlineCode, pal.accent),
+                        text = annotate(cell, pal.inlineCode, pal.accent, LocalHostLinkHandler.current),
                         style = cellStyle,
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier
@@ -232,8 +233,26 @@ private fun TableBlock(block: MdBlock.Table, baseStyle: TextStyle) {
 
 private val TABLE_CELL_WIDTH = 150.dp
 
+/**
+ * Who opens a link to a bare host path ("/Users/me/proj/out.txt:12").
+ *
+ * Agents — Codex above all — link files they wrote by absolute path. Handed
+ * to the system as a URL that is a dead link (there is no such file on the
+ * phone), so the transcript provides a handler that fetches it through the
+ * daemon instead. Where none is provided the link stays styled but inert.
+ */
+val LocalHostLinkHandler = staticCompositionLocalOf<((String) -> Unit)?> { null }
+
+/** "/x" but not "//host/x": a path on the agent's machine, not a URL. */
+fun isHostPathLink(href: String): Boolean = href.startsWith("/") && !href.startsWith("//")
+
 /** Spans -> AnnotatedString, with links carrying a real [LinkAnnotation.Url]. */
-fun annotate(spans: List<MdSpan>, codeColor: Color, linkColor: Color): AnnotatedString =
+fun annotate(
+    spans: List<MdSpan>,
+    codeColor: Color,
+    linkColor: Color,
+    onHostLink: ((String) -> Unit)? = null,
+): AnnotatedString =
     buildAnnotatedString {
         spans.forEach { span ->
             when (span) {
@@ -246,17 +265,29 @@ fun annotate(spans: List<MdSpan>, codeColor: Color, linkColor: Color): Annotated
                     ),
                 ) { append(span.text) }
 
-                is MdSpan.Link -> withLink(
-                    LinkAnnotation.Url(
-                        url = span.href,
-                        styles = TextLinkStyles(
-                            style = SpanStyle(
-                                color = linkColor,
-                                textDecoration = TextDecoration.Underline,
-                            ),
+                is MdSpan.Link -> {
+                    val linkStyle = TextLinkStyles(
+                        style = SpanStyle(
+                            color = linkColor,
+                            textDecoration = TextDecoration.Underline,
                         ),
-                    ),
-                ) { append(span.text) }
+                    )
+                    when {
+                        !isHostPathLink(span.href) -> withLink(
+                            LinkAnnotation.Url(url = span.href, styles = linkStyle),
+                        ) { append(span.text) }
+
+                        onHostLink != null -> withLink(
+                            LinkAnnotation.Clickable(
+                                tag = span.href,
+                                styles = linkStyle,
+                                linkInteractionListener = { onHostLink(span.href) },
+                            ),
+                        ) { append(span.text) }
+
+                        else -> withStyle(linkStyle.style!!) { append(span.text) }
+                    }
+                }
             }
         }
     }

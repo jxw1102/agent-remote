@@ -40,6 +40,8 @@ data class Profile(
     val focus: Boolean get() = caps.focus
     /** Session share, cached from the last ping (daemon ≥ 2.7). */
     val share: Boolean get() = caps.share
+    /** Opening host files the agent linked (daemon ≥ 2.20). */
+    val linkedFiles: Boolean get() = caps.linkedFiles
     val displayName: String get() = name.ifBlank { hostLabel }
 
     /** "192.168.1.5:8473" — what the user recognises a daemon by. */

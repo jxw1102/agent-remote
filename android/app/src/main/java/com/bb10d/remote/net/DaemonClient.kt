@@ -2,6 +2,8 @@ package com.bb10d.remote.net
 
 import com.bb10d.remote.data.AttachmentDto
 import com.bb10d.remote.data.FocusActionDto
+import com.bb10d.remote.data.GoalWatchReplyDto
+import com.bb10d.remote.data.GoalsDto
 import com.bb10d.remote.data.FocusDto
 import com.bb10d.remote.data.DropListDto
 import com.bb10d.remote.data.ErrorDto
@@ -59,6 +61,9 @@ class DaemonException(
 
 /** One finished drop download: the name the daemon served it as, and its size. */
 class DropSaved(val name: String, val bytes: Long)
+
+/** Body of GET /api/sessions/<id>/file. */
+class LinkedFile(val contentType: String, val bytes: ByteArray)
 
 /**
  * HTTP access to one agentremoted host.
@@ -294,6 +299,23 @@ class DaemonClient(
     suspend fun projects(): ProjectsDto =
         call(request(url("api/projects")).get().build(), ProjectsDto.serializer())
 
+    // -- codex goals -------------------------------------------------------
+
+    /** Every thread the host has a goal for (codex only; empty elsewhere). */
+    suspend fun goals(): GoalsDto =
+        call(request(url("api/goals")).get().build(), GoalsDto.serializer())
+
+    /** Ask the daemon to keep a goal moving, or to stop. */
+    suspend fun setGoalWatch(sessionId: String, on: Boolean): GoalWatchReplyDto = call(
+        request(url("api/goals/watch")).post(
+            jsonBody(buildJsonObject {
+                put("session_id", sessionId)
+                put("on", on)
+            }),
+        ).build(),
+        GoalWatchReplyDto.serializer(),
+    )
+
     // -- sessions ----------------------------------------------------------
 
     suspend fun sessions(projectId: String = "", limit: Int = 40, all: Boolean = false):
@@ -396,6 +418,20 @@ class DaemonClient(
         MessagesDto.serializer(),
         timeoutSeconds = 60,
     )
+
+    /**
+     * A host file the session's agent linked (agentremoted ≥ 2.20). The
+     * daemon serves it only when the transcript links it and it sits inside
+     * the session's working folder; anything else is 404.
+     */
+    suspend fun linkedFile(sessionId: String, path: String): LinkedFile {
+        val (headers, bytes) = rawResponse(
+            request(url("api/sessions/$sessionId/file", mapOf("path" to path)))
+                .header("Accept", "*/*").get().build(),
+            timeoutSeconds = 60,
+        )
+        return LinkedFile(headers["Content-Type"].orEmpty(), bytes)
+    }
 
     /** Full text behind a truncated process step — fetched only on expand. */
     suspend fun stepText(sessionId: String, ref: String): StepTextDto = call(
