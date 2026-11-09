@@ -410,6 +410,7 @@ ApiClient::ApiClient(QObject *parent)
     , m_fontBodyBasePx(27)
     , m_fontCodeBasePx(24)
     , m_fontHeadingBasePx(33)
+    , m_goalWatching(false)
     , m_textScale(1.0)
     , m_pxPerPt(294.0 / 72.0)
     , m_fontBodyPt(0.0)
@@ -1917,6 +1918,18 @@ QVariant ApiClient::parseBody(const QByteArray &body, bool *ok) const
     QVariant data = jda.loadFromBuffer(QString::fromUtf8(body));
     *ok = !jda.hasError();
     return data;
+}
+
+// "45s" / "4m" / "2h 10m" - a span short enough for one status line.
+static QString shortSpan(double seconds)
+{
+    const qint64 s = seconds > 0 ? static_cast<qint64>(seconds + 0.5) : 0;
+    if (s < 60)
+        return QString("%1s").arg(s);
+    const qint64 m = s / 60;
+    if (m < 60)
+        return QString("%1m").arg(m);
+    return QString("%1h %2m").arg(m / 60).arg(m % 60);
 }
 
 QString ApiClient::httpErrorText(int httpStatus, const QVariant &data, bool parseOk,
@@ -3975,6 +3988,87 @@ void ApiClient::onRenamePromptFinished(bb::system::SystemUiResult::Type result)
                     m_renamePrompt->inputFieldTextEntry());
 }
 
+// ---------------------------------------------------------------- goals
+
+void ApiClient::fetchGoal()
+{
+    if (m_currentSessionId.isEmpty()) {
+        applyGoalRow(QVariantMap());
+        return;
+    }
+    get(QLatin1String("/api/goals"), QLatin1String("goals"));
+}
+
+void ApiClient::setGoalWatch(bool on)
+{
+    if (m_currentSessionId.isEmpty())
+        return;
+    // Paint the new state at once; the reply confirms (or corrects) it.
+    m_goalWatching = on;
+    m_goalLine = on ? tr("Asking the daemon...") : tr("Stopping...");
+    emit goalChanged();
+    QVariantMap body;
+    body["session_id"] = m_currentSessionId;
+    body["on"] = on;
+    post(QLatin1String("/api/goals/watch"), body, QLatin1String("goalwatch"));
+}
+
+// One goal row -> the four things QML shows. An empty row means this
+// session has no goal, and the sheet hides the whole section.
+void ApiClient::applyGoalRow(const QVariantMap &row)
+{
+    m_goalObjective = row.value("objective").toString();
+    m_goalStatus = row.value("status").toString();
+    m_goalWatching = row.value("watching").toBool();
+
+    QStringList bits;
+    if (m_goalObjective.isEmpty()) {
+        m_goalLine.clear();
+        emit goalChanged();
+        return;
+    }
+    if (m_goalStatus != QLatin1String("active")) {
+        bits << tr("This goal is %1.").arg(
+                    m_goalStatus.isEmpty() ? tr("gone") : m_goalStatus);
+    } else {
+        const QString stopped = row.value("stopped_why").toString();
+        if (!stopped.isEmpty()) {
+            bits << tr("The daemon stopped: %1. Switch it back on to try "
+                       "again.").arg(stopped);
+        } else if (row.value("working").toBool()) {
+            bits << tr("Working now.");
+        } else if (!row.value("live_tui").toBool()) {
+            bits << tr("No live TUI on the host - send this session a message "
+                       "first, so there is a prompt to type into.");
+        } else {
+            bits << tr("Idle for %1.").arg(
+                        shortSpan(row.value("idle_s").toDouble()));
+            if (m_goalWatching) {
+                bits << tr("A resume follows %1 of quiet.").arg(
+                            shortSpan(row.value("idle_threshold_s").toDouble()));
+            }
+        }
+        const int resumes = row.value("resumes").toInt();
+        if (resumes > 0) {
+            const double last = row.value("last_resume_at").toDouble();
+            QString tail = QLatin1String(".");
+            if (last > 0) {
+                const double ago = QDateTime::currentMSecsSinceEpoch() / 1000.0 - last;
+                tail = tr(", last %1 ago.").arg(shortSpan(ago));
+            }
+            bits << (resumes == 1
+                     ? tr("Resumed once%1").arg(tail)
+                     : tr("Resumed %1 times%2").arg(resumes).arg(tail));
+        }
+        if (!m_goalWatching && stopped.isEmpty()) {
+            bits << tr("Codex restarts a goal itself; this is for when it "
+                       "does not.");
+        }
+    }
+    m_goalLine = bits.join(QLatin1String(" "));
+    emit goalChanged();
+}
+
 void ApiClient::shareCurrentSession()
 {
     if (m_currentSessionId.isEmpty() || !m_capShare) {
@@ -5011,6 +5105,32 @@ void ApiClient::onFinished(QNetworkReply *reply)
             return;
         }
         refreshSessions();
+        return;
+    }
+    if (kind == "goals") {
+        if (!ok) {
+            applyGoalRow(QVariantMap());
+            return;
+        }
+        const QVariantList rows = data.toMap().value("goals").toList();
+        QVariantMap mine;
+        for (int i = 0; i < rows.size(); ++i) {
+            const QVariantMap row = rows.at(i).toMap();
+            if (row.value("session_id").toString() == m_currentSessionId) {
+                mine = row;
+                break;
+            }
+        }
+        applyGoalRow(mine);
+        return;
+    }
+    if (kind == "goalwatch") {
+        if (!ok) {
+            m_goalLine = httpErrorText(httpStatus, data, parseOk, networkError);
+            emit goalChanged();
+            return;
+        }
+        applyGoalRow(data.toMap().value("goal").toMap());
         return;
     }
     if (kind == "share") {

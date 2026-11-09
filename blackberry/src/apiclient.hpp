@@ -125,6 +125,14 @@ class ApiClient : public QObject
     // the point sizes baked into the Label rows together, so a user's own
     // message keeps pace with the agent's painted reply. Persisted. The Live
     // TUI is a fixed character grid and deliberately stays out of it.
+    // The Codex goal on the open session, and the daemon's watchdog for it.
+    // A goal makes codex restart itself after every turn - until it does
+    // not, and then the thread sits idle with work left to do.
+    Q_PROPERTY(QString goalObjective READ goalObjective NOTIFY goalChanged)
+    Q_PROPERTY(QString goalStatus READ goalStatus NOTIFY goalChanged)
+    Q_PROPERTY(bool goalWatching READ goalWatching NOTIFY goalChanged)
+    Q_PROPERTY(bool goalActive READ goalActive NOTIFY goalChanged)
+    Q_PROPERTY(QString goalLine READ goalLine NOTIFY goalChanged)
     Q_PROPERTY(qreal textScale READ textScale NOTIFY textScaleChanged)
     // The body / monospace point sizes that scale gives, so the settings
     // sheet can show a sample at the size the transcript will use.
@@ -340,6 +348,11 @@ public:
     bool largeDisplay() const { return m_largeDisplay; }
     int iconButtonPx() const { return m_iconButtonPx; }
     int uiScalePct() const { return m_uiScalePct; }
+    QString goalObjective() const { return m_goalObjective; }
+    QString goalStatus() const { return m_goalStatus; }
+    bool goalWatching() const { return m_goalWatching; }
+    bool goalActive() const { return m_goalStatus == QLatin1String("active"); }
+    QString goalLine() const { return m_goalLine; }
     qreal textScale() const { return m_textScale; }
     // Point sizes for the Label rows, converted from the painter's pixel
     // sizes through this screen's real dot pitch. Baked into every row by
@@ -525,6 +538,10 @@ public:
     Q_INVOKABLE void setFocusMode(bool on);
     Q_INVOKABLE void setLedCues(bool on);
     Q_INVOKABLE void setTextScale(qreal scale);
+    /// Read the open session's goal (no-op when the daemon has none).
+    Q_INVOKABLE void fetchGoal();
+    /// Ask the daemon to keep that goal moving, or to stop.
+    Q_INVOKABLE void setGoalWatch(bool on);
     Q_INVOKABLE void setAutoOpenDownloads(bool on);
     /// Hand a downloaded Inbox file to whatever app the OS registered for it.
     Q_INVOKABLE void openDownloadedFile(const QString &path);
@@ -665,6 +682,7 @@ Q_SIGNALS:
     void queueChanged();
     void processViewChanged();
     void textScaleChanged();
+    void goalChanged();
     void prependChanged();
     void stepEditChanged();
     void newSessionRequestChanged();
@@ -1007,6 +1025,11 @@ private:
     int m_fontBodyBasePx;
     int m_fontCodeBasePx;
     int m_fontHeadingBasePx;
+    QString m_goalObjective;
+    QString m_goalStatus;
+    QString m_goalLine;
+    bool m_goalWatching;
+    void applyGoalRow(const QVariantMap &row);
     qreal m_textScale;
     qreal m_pxPerPt;
     qreal m_fontBodyPt;

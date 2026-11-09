@@ -69,6 +69,8 @@ Sheet {
             if (efforts.length > 0)
                 fillDropdown(effortDrop, efforts, eo == "" ? "default" : eo);
 
+            goalToggle.checked = sessionSheet.api.goalWatching;
+            sessionSheet.api.fetchGoal();
             soundToggle.checked = sessionSheet.api.soundCues;
             ledToggle.checked = sessionSheet.api.ledCues;
             processToggle.checked = sessionSheet.api.processView;
@@ -226,6 +228,68 @@ Sheet {
                     visible: sessionSheet.api
                              ? sessionSheet.api.currentSessionId != "" : false
                     text: qsTr("Adds the agent's tool calls, results and thinking under each message. This session only; tap a step to expand it.")
+                    multiline: true
+                    topMargin: 0
+                    textStyle.fontSize: FontSize.XXSmall
+                    textStyle.color: Color.create("#666666")
+                }
+
+                // ---- Goal (codex threads that carry one) ---------------
+                // A goal makes codex restart itself after every turn - until
+                // it does not. The switch asks the daemon to type
+                // /goal resume when the thread goes quiet with work left.
+                Label {
+                    text: qsTr("Goal")
+                    visible: sessionSheet.api
+                             ? sessionSheet.api.goalObjective != "" : false
+                    topMargin: 24
+                    textStyle.fontSize: FontSize.XSmall
+                    textStyle.color: Color.create("#888888")
+                }
+                Container {
+                    visible: sessionSheet.api
+                             ? sessionSheet.api.goalObjective != "" : false
+                    horizontalAlignment: HorizontalAlignment.Fill
+                    background: Color.create("#1a1a1a")
+                    leftPadding: 10
+                    rightPadding: 10
+                    topPadding: 8
+                    bottomPadding: 8
+                    Label {
+                        text: sessionSheet.api ? sessionSheet.api.goalObjective : ""
+                        multiline: true
+                        textStyle.fontSize: FontSize.XSmall
+                        textStyle.color: Color.create("#d0d0d0")
+                    }
+                }
+                Container {
+                    visible: sessionSheet.api
+                             ? sessionSheet.api.goalObjective != "" : false
+                    horizontalAlignment: HorizontalAlignment.Fill
+                    topMargin: 8
+                    layout: StackLayout { orientation: LayoutOrientation.LeftToRight }
+                    Label {
+                        text: qsTr("Keep it moving")
+                        verticalAlignment: VerticalAlignment.Center
+                        layoutProperties: StackLayoutProperties { spaceQuota: 1 }
+                    }
+                    ToggleButton {
+                        id: goalToggle
+                        enabled: sessionSheet.api ? sessionSheet.api.goalActive : false
+                        checked: sessionSheet.api ? sessionSheet.api.goalWatching : false
+                        verticalAlignment: VerticalAlignment.Center
+                        onCheckedChanged: {
+                            if (sessionSheet.ready && sessionSheet.api
+                                    && sessionSheet.api.goalWatching != checked)
+                                sessionSheet.api.setGoalWatch(checked);
+                        }
+                    }
+                }
+                Label {
+                    visible: sessionSheet.api
+                             ? (sessionSheet.api.goalObjective != ""
+                                && sessionSheet.api.goalLine != "") : false
+                    text: sessionSheet.api ? sessionSheet.api.goalLine : ""
                     multiline: true
                     topMargin: 0
                     textStyle.fontSize: FontSize.XXSmall
