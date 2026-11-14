@@ -113,6 +113,8 @@ _SESSION_CONT = re.compile(r"^/api/sessions/([^/]+)/continue$")
 _SESSION_TUI = re.compile(r"^/api/sessions/([^/]+)/tui$")
 _SESSION_FILE = re.compile(r"^/api/sessions/([^/]+)/file$")
 _SESSION_TUI_KEYS = re.compile(r"^/api/sessions/([^/]+)/tui/keys$")
+# Same shape jobs.py runs as a daemon rewind.
+_TUI_REWIND_LINE = re.compile(r"^/rewind(?:\s+\d+)?$")
 _SESSION_ONE = re.compile(r"^/api/sessions/([^/]+)$")
 _JOB_ONE = re.compile(r"^/api/jobs/([^/]+)$")
 _JOB_STOP = re.compile(r"^/api/jobs/([^/]+)/stop$")
@@ -3264,6 +3266,18 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(404, "session not found")
             return
         runner = self._tui_runner_for_session(session_id)
+        # A whole "/rewind [N]" line sent into a TUI whose harness has no
+        # /rewind of its own (Codex) is the daemon's rewind, the same job the
+        # composer's /rewind starts (queued behind a running turn). Typed into
+        # the pane it only earned "Unrecognized command '/rewind'".
+        if (runner is not None and keys == ["Enter"]
+                and _TUI_REWIND_LINE.match(text.strip())
+                and hasattr(runner, "rewind_session")
+                and not getattr(runner, "tui_native_rewind", True)):
+            log.info("tui/keys %s: %r is the daemon's rewind",
+                     session_id[:8], text.strip())
+            self._handle_continue(session_id, {"prompt": text.strip()})
+            return
         if runner is None or not hasattr(runner, "send_tui_keys"):
             # Multi probe
             if self.bundles:

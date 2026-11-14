@@ -19,6 +19,36 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.20.4** A new Codex session whose TUI dies at startup is retried. A
+fresh codex TUI can exit about a second after it starts (its handshake with
+codex's shared app server fails), after it has already drawn its input box,
+so the prompt went to a pane that was gone: no thread, nothing in the
+session list, and only "exited mid-turn" on the job. When the TUI dies
+before the prompt reached codex, the daemon now starts a new TUI and sends
+the prompt once more.
+
+**2.20.3** A Codex, Cursor or Copilot turn that you typed into no longer
+shows "working" after it ends. Each message typed into a running turn made
+the job wait for one more turn, but Codex steers some of those messages into
+the turn already running, so no extra turn ever came. Now, when a turn ends,
+the daemon waits up to 10 s for a follow-up turn to start, and ends the job
+if none does.
+
+**2.20.2** `/rewind` works from a Codex Live TUI. Codex's own TUI has no
+`/rewind` and answered "Unrecognized command", so a `/rewind [N]` line sent
+from the Live TUI line box (web, Android, BlackBerry) now runs the daemon's
+rewind, the same job the composer's `/rewind` starts, queued behind a running
+turn. Claude and Grok TUIs keep their own `/rewind`.
+
+**2.20.1** A new Codex session binds to the thread it created. A fresh
+Codex TUI does not say which thread it made, so the daemon finds it on disk;
+it used to take the most recently modified rollout in the folder and read
+`session_meta.session_id`, which for a subagent is its parent's id. A new
+session started next to a busy one was bound to that older session: clients
+showed its frozen transcript while the live TUI wrote somewhere else. Binding
+now takes only a top-level thread created after the launch, by its own `id`,
+and never one another TUI already owns.
+
 **2.20.0** Links to host files open. Codex answers with links to bare
 absolute paths - `[findings.txt](/Users/me/proj/out/findings.txt:12)` - and a
 client resolved them against its own origin, so on the hosted web client the

@@ -1518,6 +1518,10 @@ def _render_codex_message(msg: dict) -> None:
 
 class CodexRunner:
     name = "codex"
+    # Codex's own TUI has no /rewind ("Unrecognized command"), so a
+    # "/rewind N" line typed into the Live TUI box is the daemon's rewind,
+    # not keystrokes for the pane (server._handle_tui_keys).
+    tui_native_rewind = False
 
     def __init__(self, config):
         self.config = config

@@ -58,6 +58,12 @@ _SUBMIT_RETRIES = 2
 # keeps probing forever until the turn ends — never fail for missing id).
 _DISCOVER_SID_S = 8.0
 _LOCAL_QUIET_S = 2.5
+# After a turn ends with messages typed into it: how long the next turn has
+# to show up before the job is over. Codex queues some typed messages as a
+# new turn (task_started lands well under a second after task_complete) but
+# steers others into the turn already running, so one completion may answer
+# several messages - the count is a hint, not a contract.
+_TYPED_GRACE_S = 10.0
 # How many recent rollout files to inspect when sqlite lags the disk.
 _ROLLOUT_SCAN = 40
 
@@ -500,8 +506,46 @@ class CodexInteractiveManager:
             return {}
         return {}
 
-    def _newest_rollout_for_cwd(self, cwd: str, after_ts: float = 0):
-        """(id, path) from on-disk rollouts — often earlier than sqlite index."""
+    @staticmethod
+    def _iso_ts(raw) -> float:
+        """Epoch seconds from a session_meta timestamp, or 0."""
+        text = str(raw or "").strip()
+        if not text:
+            return 0.0
+        try:
+            from datetime import datetime
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return 0.0
+
+    @staticmethod
+    def _is_child_thread(meta: dict) -> bool:
+        """A subagent or fork: never what a freshly launched TUI creates.
+
+        A subagent's session_meta carries its PARENT's id in ``session_id``
+        (``id`` is its own). Binding a new TUI to one of these is how a new
+        session once landed on the parent: the pane wrote one thread while
+        the daemon read another.
+        """
+        src = meta.get("source")
+        if isinstance(src, dict) and ("subagent" in src or "thread_spawn" in src):
+            return True
+        return bool(meta.get("parent_thread_id") or meta.get("forked_from_id"))
+
+    def _bound_elsewhere(self, tui: _Tui) -> set:
+        """Thread ids other TUIs already own — never a new launch's thread."""
+        with self._lock:
+            return {t.session_id for t in self._tuis.values()
+                    if t is not tui and t.session_id}
+
+    def _newest_rollout_for_cwd(self, cwd: str, after_ts: float = 0,
+                                exclude=()):
+        """(id, path) of the thread CREATED after *after_ts* in *cwd*.
+
+        On-disk rollouts are often there before the sqlite index. Creation
+        time comes from session_meta, not mtime: a busy neighbour in the same
+        folder is modified every second but was created long ago.
+        """
         root = self.config.codex_home_path / "sessions"
         if not root.is_dir():
             return None
@@ -522,59 +566,63 @@ class CodexInteractiveManager:
         except OSError:
             return None
         ranked.sort(key=lambda t: t[0], reverse=True)
+        best = None
         for _, path in ranked[:_ROLLOUT_SCAN]:
             meta = self._session_meta_from_rollout(path)
-            sid = str(meta.get("session_id") or meta.get("id") or "").strip()
-            if not sid:
-                # Filename fallback: rollout-…-<uuid>.jsonl
-                stem = path.stem  # rollout-…-uuid
-                if "-" in stem:
-                    maybe = stem.split("-")
-                    # uuid-ish last 5 segments of UUID form
-                    for i in range(len(maybe)):
-                        cand = "-".join(maybe[i:])
-                        if len(cand) >= 32 and cand.count("-") >= 4:
-                            sid = cand
-                            break
-            if not sid:
+            if not meta or self._is_child_thread(meta):
+                continue
+            # The thread's own id. session_id names the root session, which
+            # is a different thread for subagents.
+            sid = str(meta.get("id") or meta.get("session_id") or "").strip()
+            if not sid or sid in exclude:
                 continue
             mcwd = str(meta.get("cwd") or "")
-            if meta and not self._cwd_match(want, mcwd, mcwd, cwd):
+            if not self._cwd_match(want, mcwd, mcwd, cwd):
                 continue
-            # No meta cwd: still accept very new files for this launch window.
-            if not meta.get("cwd") and after_ts and path.stat().st_mtime + 5 < after_ts:
+            created = self._iso_ts(meta.get("timestamp"))
+            if after_ts and (not created or created + 2 < after_ts):
                 continue
-            return sid, str(path)
-        return None
+            # Several new threads in one folder: the first one created after
+            # the launch is this TUI's.
+            if best is None or created < best[0]:
+                best = (created, sid, str(path))
+        return (best[1], best[2]) if best else None
 
-    def _newest_thread_for_cwd(self, cwd: str, after_ts: float = 0):
-        """Return (id, rollout_path) for the newest thread in cwd, or None."""
+    def _newest_thread_for_cwd(self, cwd: str, after_ts: float = 0,
+                               exclude=()):
+        """(id, rollout_path) of the first top-level thread created in cwd
+        after *after_ts*, or None. Same rules as the on-disk scan."""
         con = self._connect()
         if con is None:
             return None
         try:
             rows = con.execute(
-                "SELECT id, cwd, rollout_path, created_at, updated_at "
-                "FROM threads ORDER BY COALESCE(updated_at, created_at) DESC "
-                "LIMIT 80"
+                "SELECT id, cwd, rollout_path, created_at, updated_at, source "
+                "FROM threads ORDER BY created_at DESC LIMIT 80"
             ).fetchall()
         except sqlite3.Error:
             return None
         finally:
             con.close()
         want = os.path.realpath(os.path.expanduser(cwd or ""))
+        hit = None
         for row in rows:
+            tid = str(row["id"] or "")
+            if not tid or tid in exclude:
+                continue
+            if "subagent" in str(row["source"] or ""):
+                continue
             raw = str(row["cwd"] or "")
             rcwd = os.path.realpath(raw) if raw else ""
             if not self._cwd_match(want, rcwd, raw, cwd):
                 continue
-            ts = int(row["updated_at"] or row["created_at"] or 0)
+            ts = int(row["created_at"] or 0)
             if ts > 10_000_000_000:
                 ts = ts // 1000
-            if after_ts and ts + 5 < after_ts:
+            if after_ts and ts + 2 < after_ts:
                 continue
-            return str(row["id"] or ""), str(row["rollout_path"] or "")
-        return None
+            hit = (tid, str(row["rollout_path"] or ""))  # rows are newest first
+        return hit
 
     def _count_user_messages(self, path: str) -> int:
         """Count human user turns in a rollout (legacy + item_completed)."""
@@ -603,10 +651,21 @@ class CodexInteractiveManager:
         """
         if tui.session_id and tui.rollout_path and Path(tui.rollout_path).is_file():
             return True
-        after = (launched_at - 30) if launched_at else 0
-        hit = self._newest_rollout_for_cwd(tui.cwd, after_ts=after)
+        if tui.session_id:
+            # Known thread (resume, or bound earlier): only its own file will do.
+            path = self._rollout_for(tui.session_id)
+            if path:
+                tui.rollout_path = path
+                self._save_state()
+                return True
+        # The thread must be CREATED after the launch began (launched_at is
+        # taken before tmux starts). A 30 s look-back used to let an older
+        # neighbour in the same folder win.
+        after = launched_at if launched_at else 0
+        taken = self._bound_elsewhere(tui)
+        hit = self._newest_rollout_for_cwd(tui.cwd, after_ts=after, exclude=taken)
         if not hit:
-            hit = self._newest_thread_for_cwd(tui.cwd, after_ts=after)
+            hit = self._newest_thread_for_cwd(tui.cwd, after_ts=after, exclude=taken)
         if not hit or not hit[0]:
             # Have id but missing path?
             if tui.session_id and not tui.rollout_path:
@@ -617,7 +676,9 @@ class CodexInteractiveManager:
                     return True
             return bool(tui.session_id and tui.rollout_path)
         sid, path = hit[0], hit[1] or ""
-        if not path:
+        # A rollout is named after its own thread; never pair an id with
+        # another thread's file.
+        if not path or sid not in Path(path).name:
             path = self._rollout_for(sid)
         changed = (sid != tui.session_id) or (path and path != tui.rollout_path)
         tui.session_id = sid
@@ -994,12 +1055,14 @@ class CodexInteractiveManager:
                 continue
 
             if ptype == "task_started":
+                state["turn_open"] = True
                 job.set_phase("thinking", "")
             elif ptype in ("agent_reasoning", "reasoning"):
                 job.set_phase("thinking", "")
             elif ptype == "task_complete":
                 turn_done = True
                 state["turn_done"] = True
+                state["turn_open"] = False
                 # Newer CLIs put the final answer on last_agent_message when
                 # item_completed was missed (e.g. offset after resume).
                 last = str(payload.get("last_agent_message") or "").strip()
@@ -1036,6 +1099,32 @@ class CodexInteractiveManager:
         job.cwd = cwd
         launched_at = time.time()
         iso = str(getattr(job, "isolate_root", "") or "")
+        tui, err = self._ensure_tui(
+            cwd, job.session_id, job.model, getattr(job, "effort", ""),
+            isolate_root=iso)
+        if err:
+            self._fail(job, err)
+            return
+        with tui.lock:
+            tui.job = job
+            job.tui_name = tui.name
+            try:
+                self._run_turn(job, tui, launched_at, resume=False)
+            finally:
+                tui.job = None
+        if not job.runner_state.get("died_before_submit"):
+            return
+        # A fresh TUI can exit within a second of starting (its handshake
+        # with codex's shared app server fails) after the pane already drew
+        # its composer, so the prompt went to a pane that was gone. Nothing
+        # reached codex: start a new TUI and send the prompt once more.
+        log.warning("codex TUI %s exited before taking the prompt; "
+                    "relaunching once for job %s", tui.name, job.id)
+        with job.lock:
+            if job.status == "stopped":
+                return
+            job.error = ""
+        launched_at = time.time()
         tui, err = self._ensure_tui(
             cwd, job.session_id, job.model, getattr(job, "effort", ""),
             isolate_root=iso)
@@ -1138,6 +1227,18 @@ class CodexInteractiveManager:
         """
         return False
 
+    def _prompt_never_landed(self, tui: _Tui, state: dict) -> bool:
+        """True when a dead TUI's prompt left no trace in codex: no thread
+        was created for it, or the thread gained no user message."""
+        path = tui.rollout_path or (
+            self._rollout_for(tui.session_id) if tui.session_id else "")
+        if not path:
+            return True
+        before = state.get("before")
+        if not isinstance(before, int) or before < 0:
+            return False
+        return self._count_user_messages(path) <= before
+
     def _run_turn(self, job, tui: _Tui, launched_at: float, resume: bool = False):
         state = job.runner_state
         state.clear()
@@ -1163,6 +1264,7 @@ class CodexInteractiveManager:
         if not resume:
             before = self._count_user_messages(
                 tui.rollout_path or self._rollout_for(tui.session_id))
+            state["before"] = before
             err = self._send_prompt(tui, job.prompt)
             if err:
                 self._fail(job, err)
@@ -1208,6 +1310,7 @@ class CodexInteractiveManager:
         tui.typed_ahead = 0
         last_off = tui.rollout_offset
         last_bind_try = 0.0
+        typed_wait = 0.0  # >0: a turn ended, waiting to see a typed one start
 
         while True:
             time.sleep(_POLL_S)
@@ -1229,6 +1332,10 @@ class CodexInteractiveManager:
                     with job.lock:
                         job.new_session_id = tui.session_id or job.new_session_id
                     self._done(job, text)
+                    return
+                if not resume and self._prompt_never_landed(tui, state):
+                    state["died_before_submit"] = True
+                    self._fail(job, "codex TUI exited before it took the prompt")
                     return
                 self._fail(job, "codex TUI exited mid-turn")
                 break
@@ -1254,15 +1361,30 @@ class CodexInteractiveManager:
             # A TUI panel that blocks the turn on a human (Cursor asks its
             # questions this way) is handled outside the journal.
             self._maybe_answer_panel(job, tui)
-            if tui.rollout_offset != last_off:
+            grew = tui.rollout_offset != last_off
+            if grew:
                 quiet_since = time.time()
                 last_off = tui.rollout_offset
+
+            if typed_wait and not (done or state.get("turn_done")):
+                if state.get("turn_open"):
+                    typed_wait = 0.0  # the typed message's turn is running
+                elif grew or tui.typed_ahead > 0:
+                    # Cursor/Copilot journals carry no turn-start marker:
+                    # new bytes, or another message typed, extend the wait.
+                    tui.typed_ahead = 0
+                    typed_wait = time.time()
+                elif time.time() - typed_wait > _TYPED_GRACE_S:
+                    # Nothing started: the typed messages were answered by
+                    # the turn that already ended.
+                    done = True
 
             if done or state.get("turn_done"):
                 if tui.typed_ahead > 0:
                     # Mid-turn typed message — keep watching for its reply.
                     tui.typed_ahead = 0
                     state["turn_done"] = False
+                    typed_wait = time.time()
                     quiet_since = time.time()
                     continue
                 # Last chance to bind before finishing.
