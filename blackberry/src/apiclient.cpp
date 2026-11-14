@@ -308,6 +308,35 @@ QString safeLocalFileName(const QString &name)
     return out;
 }
 
+// "<name>.part.meta" sits next to a kept Inbox .part: three lines saying
+// which daemon, which drop entry and which ETag its bytes came from. A
+// later download resumes the .part only when all three still match.
+QString dropPartMetaPath(const QString &partPath)
+{
+    return partPath + QLatin1String(".meta");
+}
+
+QStringList readDropPartMeta(const QString &partPath)
+{
+    QFile f(dropPartMetaPath(partPath));
+    if (!f.open(QIODevice::ReadOnly))
+        return QStringList();
+    const QStringList lines = QString::fromUtf8(f.read(16 * 1024))
+            .split(QLatin1Char('\n'));
+    if (lines.size() < 3)
+        return QStringList();
+    return lines.mid(0, 3);
+}
+
+void writeDropPartMeta(const QString &partPath, const QString &base,
+                       const QString &name, const QString &etag)
+{
+    QFile f(dropPartMetaPath(partPath));
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        f.write(QString(base + QLatin1Char('\n') + name + QLatin1Char('\n')
+                        + etag + QLatin1Char('\n')).toUtf8());
+}
+
 // Transcript items are typed display blocks (GrokRemote's model): the
 // daemon renders markdown into Cascades-safe HTML per block, the phone
 // rasterizes rich blocks to PNGs (paint pipeline) and routes the rest by
@@ -383,6 +412,7 @@ ApiClient::ApiClient(QObject *parent)
     , m_loadingOlder(false)
     , m_scrollToEnd(true)
     , m_since(0)
+    , m_replayPending(false)
     , m_pollFailures(0)
     , m_pollInFlight(false)
     , m_awaitingJob(false)
@@ -2669,7 +2699,7 @@ void ApiClient::openTranscript(const QString &sessionId)
     }
     if (!jobId.isEmpty() && !isSyntheticJobId(jobId)) {
         m_sessionJobs[sessionId] = jobId;
-        attachToJob(jobId);
+        attachToJob(jobId, true);
     } else {
         emit jobRunningChanged();
     }
@@ -2696,12 +2726,13 @@ bool ApiClient::isSyntheticJobId(const QString &jobId)
     return jobId.startsWith(QLatin1String("tui-"));
 }
 
-void ApiClient::attachToJob(const QString &jobId)
+void ApiClient::attachToJob(const QString &jobId, bool adopted)
 {
     if (jobId.isEmpty() || isSyntheticJobId(jobId))
         return;
     m_jobId = jobId;
     m_since = 0;
+    m_replayPending = adopted;
     m_pollFailures = 0;
     m_pollInFlight = false;
     resetWsJobState();
@@ -3566,15 +3597,31 @@ void ApiClient::downloadDropFrom(int profileIndex, const QString &name)
     QDir().mkpath(m_dropLocalDir);
     // Bytes land in "<name>.part" as they arrive and are renamed once the
     // whole file is in, so a half download never poses as the real thing.
+    // A .part left by an earlier attempt (failed, or the app was closed)
+    // carries on from its last byte when its sidecar says it is this same
+    // file from this same daemon; If-Range makes the daemon send the whole
+    // file instead if its copy changed since.
     QFile *part = new QFile(QDir(m_dropLocalDir).absoluteFilePath(
             localName + QLatin1String(".part")), this);
-    if (!part->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    QString resumeEtag;
+    if (part->exists() && part->size() > 0) {
+        const QStringList meta = readDropPartMeta(part->fileName());
+        if (meta.size() == 3 && meta.at(0) == base && meta.at(1) == clean
+                && !meta.at(2).isEmpty())
+            resumeEtag = meta.at(2);
+    }
+    const bool opened = resumeEtag.isEmpty()
+            ? part->open(QIODevice::WriteOnly | QIODevice::Truncate)
+            : part->open(QIODevice::WriteOnly | QIODevice::Append);
+    if (!opened) {
         m_dropStatus = tr("Could not write %1").arg(part->fileName());
         delete part;
         m_dropRev++;
         emit dropChanged();
         return;
     }
+    if (resumeEtag.isEmpty())
+        QFile::remove(dropPartMetaPath(part->fileName()));
     if (m_dls.isEmpty()) {
         // A new batch: "Saved N files" counts from here.
         m_dropDoneCount = 0;
@@ -3586,7 +3633,8 @@ void ApiClient::downloadDropFrom(int profileIndex, const QString &name)
     t->base = base;
     t->token = token;
     t->file = part;
-    t->got = 0;
+    t->etag = resumeEtag;
+    t->got = resumeEtag.isEmpty() ? 0 : part->size();
     t->total = 0;
     t->started = false;
     t->resumable = false;
@@ -3710,6 +3758,13 @@ void ApiClient::onDropReadyRead()
         if (!etag.isEmpty())
             t->etag = QString::fromLatin1(etag);
         t->resumable = reply->rawHeader("Accept-Ranges") == "bytes";
+        // Note what this .part is, so a later tap (even after the app was
+        // closed) can continue it; a zip built per request cannot resume.
+        const QString meta = dropPartMetaPath(t->file->fileName());
+        if (t->resumable && !t->etag.isEmpty())
+            writeDropPartMeta(t->file->fileName(), t->base, t->name, t->etag);
+        else
+            QFile::remove(meta);
     }
     const QByteArray chunk = reply->readAll();
     if (chunk.isEmpty())
@@ -3806,6 +3861,18 @@ void ApiClient::onDropReplyFinished()
         }
     }
     const bool netError = reply->error() != QNetworkReply::NoError;
+    if (status == 416 && t->got > 0 && t->attempt < DOWNLOAD_MAX_RETRIES) {
+        // The kept .part is not shorter than the host's file (same ETag,
+        // so a leftover that was complete or overlong): fetch it whole.
+        t->attempt++;
+        t->file->resize(0);
+        t->file->seek(0);
+        t->got = 0;
+        t->etag.clear();
+        QFile::remove(dropPartMetaPath(t->file->fileName()));
+        startDropRequest(t);
+        return;
+    }
     if (status > 0 && (status < 200 || status >= 300)) {
         // Error body is usually JSON {"error": "..."}.
         bool parseOk = false;
@@ -3813,7 +3880,9 @@ void ApiClient::onDropReplyFinished()
         QString err = parseOk ? data.toMap().value("error").toString() : QString();
         if (err.isEmpty())
             err = tr("HTTP %1").arg(status);
-        failDropDownload(t, err);
+        // Gone from the host: nothing left to continue. Anything else (a
+        // proxy's 502, a daemon restart) may pass, so the bytes stay.
+        failDropDownload(t, err, status != 404 && status != 410);
         return;
     }
     const bool shortBody = t->total > 0 && t->got < t->total;
@@ -3831,7 +3900,7 @@ void ApiClient::onDropReplyFinished()
         return;
     }
     failDropDownload(t, netError ? reply->errorString()
-                                 : tr("connection closed early"));
+                                 : tr("connection closed early"), true);
 }
 
 // Forget a transfer: off the list, timers and file objects released. The
@@ -3853,21 +3922,34 @@ void ApiClient::dropTransferDone(DropTransfer *t)
     pumpDropDownloads();
 }
 
-void ApiClient::failDropDownload(DropTransfer *t, const QString &why)
+void ApiClient::failDropDownload(DropTransfer *t, const QString &why,
+                                 bool keepPart)
 {
     const QString name = t->name;
+    // What arrived stays as "<name>.part" when the daemon can serve the
+    // rest (Range + ETag); tapping the row again carries on from there.
+    const bool kept = keepPart && t->resumable && t->got > 0
+            && !t->etag.isEmpty();
+    const qint64 got = t->got;
     t->file->close();
-    t->file->remove();
+    if (!kept) {
+        t->file->remove();
+        QFile::remove(dropPartMetaPath(t->file->fileName()));
+    }
     dropTransferDone(t);
+    const QString shown = kept
+            ? tr("%1 (%2 kept, tap it again to continue)")
+                      .arg(why, formatBytes(got))
+            : why;
     if (m_dls.isEmpty()) {
-        m_dropStatus = tr("Download failed: %1").arg(why);
+        m_dropStatus = tr("Download failed: %1").arg(shown);
         m_dropRev++;
         emit dropChanged();
         return;
     }
     // Others are still running and own the status line: say it as a toast.
     bb::system::SystemToast *toast = new bb::system::SystemToast(this);
-    toast->setBody(tr("%1 failed: %2").arg(name, why));
+    toast->setBody(tr("%1 failed: %2").arg(name, shown));
     QObject::connect(toast,
                      SIGNAL(finished(bb::system::SystemUiResult::Type)),
                      toast, SLOT(deleteLater()));
@@ -3879,6 +3961,7 @@ void ApiClient::finishDropDownload(DropTransfer *t)
 {
     QFile *part = t->file;
     part->close();
+    QFile::remove(dropPartMetaPath(part->fileName()));
     const QString localName = safeLocalFileName(
             t->served.isEmpty() ? t->name : t->served);
     const QString dest = QDir(m_dropLocalDir).absoluteFilePath(localName);
@@ -4467,10 +4550,18 @@ void ApiClient::handleJobPoll(int httpStatus, const QVariant &data, bool parseOk
     QVariantMap snap = data.toMap();
     QVariantList events = snap["events"].toList();
     bool changed = false;
+    // A turn adopted mid-way replays from seq 0, and the page just read from
+    // disk already holds all of that text. Appending it put a long turn's
+    // early answers BELOW the newest ones, so the transcript looked stale
+    // until a refresh. Skip the replay's text; later polls are new.
+    const bool replay = m_replayPending;
+    m_replayPending = false;
     for (int i = 0; i < events.size(); ++i) {
         QVariantMap event = events.at(i).toMap();
         QString kind = event.value("kind").toString();
-        if (kind == "text") {
+        if (kind == "text" && replay) {
+            continue;
+        } else if (kind == "text") {
             QVariantList blocks = event.value("blocks").toList();
             if (!blocks.isEmpty())
                 appendRenderedBlocks(m_messages, blocks, true);
@@ -5728,7 +5819,7 @@ void ApiClient::onStatusFrame(const QByteArray &payload)
                 && (sid == m_currentSessionId || fork == m_currentSessionId);
         if (matchesOpen && m_jobId.isEmpty() && !m_awaitingJob
                 && !isSyntheticJobId(jobId))
-            attachToJob(jobId);
+            attachToJob(jobId, true);
         if (!m_jobId.isEmpty() && jobId == m_jobId) {
             tracked = s;
             trackedFound = true;

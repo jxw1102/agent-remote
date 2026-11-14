@@ -731,7 +731,7 @@ private:
     void postPrompt(const QString &prompt);
     void postQueuePrompt(const QString &jobId, const QString &prompt);
     void postDirectInput(const QString &jobId, const QString &prompt);
-    void attachToJob(const QString &jobId);
+    void attachToJob(const QString &jobId, bool adopted = false);
     void detachJob();
     /// Daemon /ws/status may advertise busy host TUIs as synthetic
     /// `tui-<sidprefix>` rows so the list can pulse "working" after a real
@@ -956,6 +956,9 @@ private:
     // Job of the open session (only this one is polled/bannered).
     QString m_jobId;
     int m_since;
+    // Adopted mid-turn: the transcript just came from disk, so the first
+    // since=0 snapshot's text is already on screen (see onJobReply).
+    bool m_replayPending;
     int m_pollFailures;
     bool m_pollInFlight;
     bool m_awaitingJob;
@@ -1078,7 +1081,8 @@ private:
     void startDropRequest(DropTransfer *t);
     void pumpDropDownloads();
     void updateDropProgress(bool force);
-    void failDropDownload(DropTransfer *t, const QString &why);
+    void failDropDownload(DropTransfer *t, const QString &why,
+                          bool keepPart = false);
     void finishDropDownload(DropTransfer *t);
     void dropTransferDone(DropTransfer *t);
     void publishStepEdit(const QString &action, int index,
