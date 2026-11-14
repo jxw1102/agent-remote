@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -23,19 +24,28 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
+import com.bb10d.remote.ui.markdown.LocalHostLinkHandler
+import com.bb10d.remote.ui.markdown.MarkdownText
 import com.bb10d.remote.ui.theme.MonoStyle
 import com.bb10d.remote.ui.theme.palette
 
 /** Lines past this are cut on a phone; the full file stays a Copy away. */
 private const val MAX_LINES = 5000
+
+private val MARKDOWN = Regex("""\.(md|markdown|mdown|mkd|mdx)$""", RegexOption.IGNORE_CASE)
 
 /**
  * A host file the agent linked, as the daemon served it: text in a
@@ -46,8 +56,13 @@ fun HostFileDialog(
     file: HostFileUi,
     onCopy: (String) -> Unit,
     onDismiss: () -> Unit,
+    onHostLink: ((String) -> Unit)? = null,
 ) {
     val pal = palette
+    // Markdown reads formatted, like the transcript it came from; a link to a
+    // specific line opens the source so that line can be marked.
+    val isMarkdown = MARKDOWN.containsMatchIn(file.path)
+    var formatted by rememberSaveable(file.path) { mutableStateOf(isMarkdown && file.line <= 0) }
     AlertDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -88,6 +103,15 @@ fun HostFileDialog(
                     }
                 }
 
+                file.text != null && isMarkdown && formatted ->
+                    CompositionLocalProvider(LocalHostLinkHandler provides onHostLink) {
+                        MarkdownText(
+                            file.text,
+                            modifier = Modifier.heightIn(max = 520.dp)
+                                .verticalScroll(rememberScrollState()),
+                        )
+                    }
+
                 file.text != null -> TextLines(file.text, file.line)
             }
         },
@@ -96,7 +120,14 @@ fun HostFileDialog(
         },
         dismissButton = {
             if (file.text != null) {
-                TextButton(onClick = { onCopy(file.text) }) { Text("Copy") }
+                Row {
+                    if (isMarkdown) {
+                        TextButton(onClick = { formatted = !formatted }) {
+                            Text(if (formatted) "Source" else "Formatted")
+                        }
+                    }
+                    TextButton(onClick = { onCopy(file.text) }) { Text("Copy") }
+                }
             }
         },
     )

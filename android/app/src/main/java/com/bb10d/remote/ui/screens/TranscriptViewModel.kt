@@ -147,7 +147,14 @@ class TranscriptViewModel(
         },
     )
 
-    private val watcher = JobWatcher(repo, initialRef.profileId, viewModelScope)
+    private val watcher = JobWatcher(repo, initialRef.profileId, viewModelScope).also { w ->
+        w.shownTexts = {
+            _ui.value.items.asSequence()
+                .filter { it.role == "assistant" && !it.live }
+                .map { it.text.trim() }
+                .toSet()
+        }
+    }
     val job: StateFlow<JobState> = watcher.state
 
     val settings = repo.settings
@@ -241,7 +248,7 @@ class TranscriptViewModel(
             liveStatus.collect { active ->
                 if (active == null || job.value.running) return@collect
                 if (active.jobId in handledJobs) return@collect
-                watcher.attach(active.jobId, _ref.value.sessionId)
+                watcher.attach(active.jobId, _ref.value.sessionId, adopted = true)
             }
         }
 
@@ -299,7 +306,9 @@ class TranscriptViewModel(
             // Anything already running is picked up by the liveStatus
             // collector above; this just avoids waiting for the next frame
             // when the stream is already connected.
-            repo.activeFor(initialRef)?.let { watcher.attach(it.jobId, initialRef.sessionId) }
+            repo.activeFor(initialRef)?.let {
+                watcher.attach(it.jobId, initialRef.sessionId, adopted = true)
+            }
         }
     }
 

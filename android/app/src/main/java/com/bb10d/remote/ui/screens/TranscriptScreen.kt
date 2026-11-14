@@ -578,6 +578,7 @@ private fun TranscriptScreenBody(
             file = hostFile,
             onCopy = { clipboard.copy(it) },
             onDismiss = { vm.dismissHostFile() },
+            onHostLink = vm::openHostFile,
         )
     }
 

@@ -319,7 +319,10 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
         val profile = profile(ref.profileId) ?: return Result.failure(
             IllegalStateException("unknown daemon"),
         )
-        if (!profile.linkedFiles) {
+        // Cached caps can predate a daemon upgrade: ping again before refusing.
+        val linked = profile.linkedFiles ||
+            pingProfile(profile).getOrNull()?.linkedFiles == true
+        if (!linked) {
             return Result.failure(
                 IllegalStateException(
                     "Opening host files needs agentremoted 2.20.0 or newer",

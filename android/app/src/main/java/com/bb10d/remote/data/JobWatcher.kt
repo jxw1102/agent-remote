@@ -50,6 +50,12 @@ class JobWatcher(
     /** Text/result events, in order, for the transcript to append. */
     val events = MutableSharedFlow<JobEventDto>(extraBufferCapacity = 256)
 
+    /** Assistant texts the transcript already shows from disk (set by the screen). */
+    var shownTexts: () -> Set<String> = { emptySet() }
+
+    /** Adopted mid-turn: the next snapshot is a replay from seq 0. */
+    private var replayPending = false
+
     /** Fires once when the turn is over (done | error | stopped). */
     val ended = MutableSharedFlow<JobState>(extraBufferCapacity = 8)
 
@@ -71,11 +77,16 @@ class JobWatcher(
         _state.value = _state.value.copy(starting = false)
     }
 
-    fun attach(jobId: String, sessionId: String) {
+    /**
+     * [adopted]: the turn was already running when the screen found it, so
+     * the transcript read from disk already holds what it said so far.
+     */
+    fun attach(jobId: String, sessionId: String, adopted: Boolean = false) {
         if (jobId.isEmpty()) return
         if (_state.value.jobId == jobId && loop?.isActive == true) return
         loop?.cancel()
         since = 0
+        replayPending = adopted
         failures = 0
         dismissedQuestionIds.clear()
         dismissedPermissionIds.clear()
@@ -211,7 +222,12 @@ class JobWatcher(
     }
 
     private suspend fun apply(snapshot: JobSnapshotDto) {
-        snapshot.events.forEach { event ->
+        var replay = snapshot.events
+        if (replayPending) {
+            replayPending = false
+            replay = replayTail(replay, shownTexts())
+        }
+        replay.forEach { event ->
             when (event.kind) {
                 "text" -> if (event.text.isNotBlank()) events.emit(event)
                 "tool" -> _state.value = _state.value.copy(toolLine = toolLine(event))
@@ -276,4 +292,20 @@ class JobWatcher(
         const val ACTIVE_POLL_MS = 1_500L
         const val MAX_FAILURES = 5
     }
+}
+
+/**
+ * The part of a replayed turn (since=0) the transcript does not hold yet.
+ *
+ * Opening a session reads its newest page from disk, then adopts the running
+ * turn, whose first snapshot replays it from the start. Every replayed answer
+ * used to be appended, so a long turn's early answers landed BELOW the newest
+ * ones and the screen looked stale until a refresh. Disk is the truth: keep
+ * what follows the last replayed text already shown. When none of it is shown
+ * the disk page is newer than all of it (or not loaded yet, and will be), so
+ * no text is replayed; later polls and the end-of-turn reload carry on.
+ */
+internal fun replayTail(events: List<JobEventDto>, shown: Set<String>): List<JobEventDto> {
+    val last = events.indexOfLast { it.kind == "text" && it.text.trim() in shown }
+    return events.drop(last + 1).filter { it.kind != "text" || last >= 0 }
 }
