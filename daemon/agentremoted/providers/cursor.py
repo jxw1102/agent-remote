@@ -123,6 +123,43 @@ def _munge_cwd(cwd: str) -> str:
     return "".join(out)
 
 
+def _unmunge_project(munged: str, _cache={}) -> str:
+    """Real directory whose _munge_cwd() is *munged*, or "".
+
+    Munging is lossy ('-', '.', '/' all become '-'), so walk the filesystem
+    and only accept a path that exists and munges back exactly.
+    """
+    if not munged:
+        return ""
+    if munged in _cache:
+        return _cache[munged]
+
+    def walk(base: str, rest: str, depth: int) -> str:
+        if not rest:
+            return base
+        if depth > 24:
+            return ""
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            return ""
+        for name in names:
+            m = _munge_cwd("/" + name)
+            if rest == m or rest.startswith(m + "-"):
+                child = os.path.join(base, name)
+                if os.path.isdir(child):
+                    hit = walk(child, rest[len(m) + 1:], depth + 1)
+                    if hit:
+                        return hit
+        return ""
+
+    found = walk("/", munged, 0)
+    if found and _munge_cwd(found) != munged:
+        found = ""
+    _cache[munged] = found
+    return found
+
+
 def _ms_to_iso(ms) -> str:
     try:
         n = float(ms)
@@ -324,6 +361,9 @@ class CursorStore:
                     yield sdir
 
     def _transcript_path(self, session_id: str, cwd: str = "") -> Path | None:
+        """The session's transcript. A chat resumed from another folder gets
+        a second copy under that folder's project dir, and only the newest
+        copy is current — so return the most recently written one."""
         sid = (session_id or "").strip()
         if not _is_session_id(sid):
             return None
@@ -342,20 +382,38 @@ class CursorStore:
                 candidates.append(
                     self._projects_root() / _munge_cwd("/private" + cwd)
                     / "agent-transcripts" / sid / (sid + ".jsonl"))
-        for path in candidates:
-            if path.is_file():
-                return path
         root = self._projects_root()
-        if not root.is_dir():
-            return None
-        try:
-            for proj in root.iterdir():
-                path = proj / "agent-transcripts" / sid / (sid + ".jsonl")
-                if path.is_file():
-                    return path
-        except OSError:
-            return None
-        return None
+        if root.is_dir():
+            try:
+                for proj in root.iterdir():
+                    candidates.append(
+                        proj / "agent-transcripts" / sid / (sid + ".jsonl"))
+            except OSError:
+                pass
+        best, best_mtime = None, -1.0
+        seen = set()
+        for path in candidates:
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if path.is_file() and mtime > best_mtime:
+                best, best_mtime = path, mtime
+        return best
+
+    def _effective_cwd(self, path: Path | None, meta_cwd: str) -> str:
+        """Folder the session last ran in. meta.json keeps the folder the
+        chat was created in; a resume from elsewhere only shows up as the
+        transcript's project dir."""
+        if path is None:
+            return meta_cwd
+        proj = path.parent.parent.parent.name
+        if meta_cwd and proj == _munge_cwd(meta_cwd):
+            return meta_cwd
+        return _unmunge_project(proj) or meta_cwd
 
     def find_session_dir(self, session_id: str) -> Path | None:
         sid = (session_id or "").strip()
@@ -640,7 +698,7 @@ class CursorStore:
     def _session_summary_from_transcript(
             self, sid: str, path: Path | None, meta: dict,
             project_id: str) -> dict:
-        cwd = str(meta.get("cwd") or "")
+        cwd = self._effective_cwd(path, str(meta.get("cwd") or ""))
         first_user = ""
         last_text = ""
         last_role = ""
