@@ -2152,7 +2152,7 @@ async function openSession(row) {
     && (j.pending_question || j.pending_permission));
   const running = frames.find((j) => match(j) && !isSyntheticJobId(j.job_id));
   if (blocked || running) {
-    attachJob((blocked || running).job_id, sessionId);
+    attachJob((blocked || running).job_id, sessionId, { adopted: true });
   } else {
     // SSE only lists in-flight turns. A finished job can still hold an
     // unanswered AskUserQuestion (Stop + panel race) — recover via /api/jobs.
@@ -2192,7 +2192,7 @@ async function recoverPendingGate(profileId, sessionId, gen) {
     }
     if (!hit) return;
     if (!isOpenStill(gen, profileId, sessionId)) return;
-    attachJob(hit.id, sessionId);
+    attachJob(hit.id, sessionId, { adopted: true });
   } catch {
     // Best-effort — banner stays empty if the daemon is unreachable.
   }
@@ -3100,6 +3100,8 @@ async function openHostFile(link) {
   const open = state.open;
   const profile = open && profileById(open.profileId);
   if (!profile) return;
+  // The flag may be stale (saved before the daemon was upgraded): ask again.
+  if (!profile.linkedFiles) await pingProfile(profile);
   if (!profile.linkedFiles) {
     toast(`Opening host files needs agentremoted 2.20.0 or newer (this daemon is ${profile.version || "older"})`);
     return;
@@ -3144,26 +3146,31 @@ async function openHostFile(link) {
     return;
   }
   const text = await blob.text();
+  // Markdown reads formatted, like the transcript it came from. A link to a
+  // specific line opens the source instead, so that line can be marked.
+  const isMd = /\.(md|markdown|mdown|mkd|mdx)$/i.test(link.path.replace(LINK_LOC, ""));
+  let formatted = isMd && !(link.line > 0);
+  let paint = null;
   modal({
     title: link.name, wide: true,
     build(body) {
       body.appendChild(el("div", "host-file-path", link.path.replace(LINK_LOC, "")));
-      const pre = el("pre", "host-file");
-      const lines = text.split("\n");
-      if (link.line > 0 && link.line <= lines.length) {
-        pre.appendChild(document.createTextNode(lines.slice(0, link.line - 1).join("\n")
-          + (link.line > 1 ? "\n" : "")));
-        const mark = el("mark", "host-file-line", lines[link.line - 1] || " ");
-        pre.appendChild(mark);
-        pre.appendChild(document.createTextNode(
-          (link.line < lines.length ? "\n" : "") + lines.slice(link.line).join("\n")));
-        requestAnimationFrame(() => mark.scrollIntoView({ block: "center" }));
-      } else {
-        pre.textContent = text;
-      }
-      body.appendChild(pre);
+      const view = el("div");
+      body.appendChild(view);
+      // Links inside the file go through the daemon too (it still refuses
+      // anything the session did not link).
+      wireHostFileLinks(view);
+      paint = () => {
+        view.replaceChildren(formatted ? markdownFile(text) : sourceView(text, link.line));
+      };
+      paint();
     },
     actions: [
+      ...(isMd ? [{ label: formatted ? "Source" : "Formatted", close: false, run: (btn) => {
+        formatted = !formatted;
+        if (btn) btn.textContent = formatted ? "Source" : "Formatted";
+        if (paint) paint();
+      } }] : []),
       { label: "Copy", close: false, run: async () => {
         try { await copyText(text); toast("Copied"); } catch { toast("Copy failed"); }
       } },
@@ -3171,6 +3178,29 @@ async function openHostFile(link) {
       { label: "Close", primary: true },
     ],
   });
+}
+
+function markdownFile(text) {
+  const box = renderMarkdown(text);
+  box.classList.add("host-file-md");
+  return box;
+}
+
+function sourceView(text, line) {
+  const pre = el("pre", "host-file");
+  const lines = text.split("\n");
+  if (line > 0 && line <= lines.length) {
+    pre.appendChild(document.createTextNode(lines.slice(0, line - 1).join("\n")
+      + (line > 1 ? "\n" : "")));
+    const mark = el("mark", "host-file-line", lines[line - 1] || " ");
+    pre.appendChild(mark);
+    pre.appendChild(document.createTextNode(
+      (line < lines.length ? "\n" : "") + lines.slice(line).join("\n")));
+    requestAnimationFrame(() => mark.scrollIntoView({ block: "center" }));
+  } else {
+    pre.textContent = text;
+  }
+  return pre;
 }
 
 function saveBlob(blob, name) {
@@ -3429,6 +3459,30 @@ function appendLive(item, { gen = state.openGen, profileId = null, sessionId = n
  * then job events since=0 re-stream the same flushes — without this the user
  * sees every bubble twice.
  */
+/**
+ * The part of a replayed job (since=0) that the transcript does not hold yet.
+ *
+ * Opening a session reads its newest page from disk, then adopts the running
+ * turn and replays that turn from its first event. A turn that has run for
+ * hours said far more than the 40 rows assistantTextAlreadyShown looks at, so
+ * its early answers used to land BELOW the newest ones and the transcript
+ * looked stale until a refresh. Disk is the truth: keep only what comes after
+ * the last replayed text already on screen. When none of it is on screen the
+ * page from disk is newer than all of it, so nothing is replayed; later polls
+ * and the end-of-turn reload carry on from there.
+ */
+function replayTail(events) {
+  const shown = new Set();
+  for (const it of state.items) {
+    if (it.role === "assistant" && !it.live) shown.add(String(it.text || "").trim());
+  }
+  let last = -1;
+  events.forEach((ev, i) => {
+    if (ev.kind === "text" && ev.text && shown.has(String(ev.text).trim())) last = i;
+  });
+  return events.slice(last + 1).filter((ev) => ev.kind !== "text" || last >= 0);
+}
+
 function assistantTextAlreadyShown(text) {
   const t = String(text || "").trim();
   if (!t) return true;
@@ -3443,7 +3497,7 @@ function assistantTextAlreadyShown(text) {
 
 // -------------------------------------------------------------- job watch
 
-function attachJob(jobId, sessionId = null) {
+function attachJob(jobId, sessionId = null, { adopted = false } = {}) {
   if (isSyntheticJobId(jobId)) return;
   const open = state.open;
   // Prefer explicit pin; fall back to open only when attaching for the
@@ -3481,6 +3535,10 @@ function attachJob(jobId, sessionId = null) {
     pendingPermission: null,
     lastPendingQuestion: null,
     lastPendingPermission: null,
+    // Adopted mid-turn: the transcript on screen was just read from disk,
+    // which already holds everything the turn said so far. The first
+    // snapshot replays the job from seq 0; see replayTail().
+    replayAfterShown: adopted,
   };
   state.jobSince = 0;
   state.jobFails = 0;
@@ -3600,7 +3658,12 @@ async function pollJob() {
   }
 
   state.jobSince = snap.next_seq || 0;
-  (snap.events || []).forEach((ev) => {
+  let events = snap.events || [];
+  if (job.replayAfterShown) {
+    job.replayAfterShown = false;
+    events = replayTail(events);
+  }
+  events.forEach((ev) => {
     if (ev.kind === "text" && ev.text) {
       // Journal messages for the open session already include flushed assistant
       // chunks; skip live echoes that would double-paint (see screenshot of
@@ -3783,7 +3846,7 @@ function renderBanner() {
       && (!jobBelongsToOpen(state.job) || state.job.id !== frame.job_id)) {
     // Pin to the open session id so a concurrent job for another row cannot
     // stream into this transcript.
-    attachJob(frame.job_id, sid);
+    attachJob(frame.job_id, sid, { adopted: true });
     return; // attachJob → pollJob will re-render
   }
   // Synthetic tui-* rows can now flag pending_question, but Answer POSTs need
@@ -3978,7 +4041,7 @@ function modal({ title, build, actions = [], wide = false }) {
     if (a.id) b.id = a.id;
     if (a.disabled) b.disabled = true;
     b.addEventListener("click", async () => {
-      if (a.run) await a.run();
+      if (a.run) await a.run(b);
       if (a.close !== false) closeModal();
     });
     foot.appendChild(b);
@@ -4262,6 +4325,14 @@ function normalizeProfile(p) {
     efforts: p.efforts || [],
     host: p.host || "",
     version: p.version || "",
+    // Ping flags survive a reload: a boot ping that fails or is still in
+    // flight must not make a 2.20 daemon look like it lacks the feature.
+    focus: !!p.focus,
+    share: !!p.share,
+    linkedFiles: !!p.linkedFiles,
+    chunkedUpload: !!p.chunkedUpload,
+    ...(typeof p.maxUploadMb === "number" && p.maxUploadMb > 0
+      ? { maxUploadMb: p.maxUploadMb } : {}),
     execMode: normalizeExecMode(p.execMode || ""),
     model: p.model || "",
     effort: p.effort || "",

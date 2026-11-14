@@ -1456,3 +1456,9 @@ pre.host-file mark.host-file-line {
   color: inherit;
 }
 img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
+
+/* A linked markdown file, formatted like an assistant message. */
+.host-file-md {
+  padding: 4px 2px 8px;
+  overflow-wrap: anywhere;
+}
