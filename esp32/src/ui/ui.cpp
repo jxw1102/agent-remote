@@ -285,7 +285,8 @@ lv_obj_t *makeProviderBadge(lv_obj_t *parent, const String &p) {
     pts[4] = {6, 15};  pts[5] = {14, 15};
     lv_obj_add_event_cb(chip, freeLogoPoints, LV_EVENT_DELETE, pts);
     for (int i = 0; i < 3; i++) addLine(pts + i * 2, 2, 2);
-  } else if (p.startsWith("co")) {
+  } else if (p.startsWith("co") && !p.startsWith("cop")) {
+    // "cop" is Copilot, which has no glyph yet and takes the dot below.
     // OpenAI-style knot: six skewed petals in hexagonal symmetry.
     lv_point_precise_t *pts =
         (lv_point_precise_t *)lv_malloc(sizeof(lv_point_precise_t) * 12);

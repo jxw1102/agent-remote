@@ -71,7 +71,7 @@ struct LiveTuiView: View {
                         keyButton("←", keys: ["Left"])
                         keyButton("→", keys: ["Right"])
                         keyButton("Enter", keys: ["Enter"])
-                        keyButton("Ctrl-C", keys: ["Ctrl-C"])
+                        keyButton("Ctrl-C", keys: ["Ctrl+C"])  // daemon key names use "+"
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
@@ -108,7 +108,9 @@ struct LiveTuiView: View {
         guard !text.isEmpty else { return }
         inputText = ""
         Task {
-            try? await client.agentClient?.sendTuiKeys(sessionId: sessionId, text: text)
+            // Text plus Enter is one submitted line (as on Android); text alone
+            // was typed into the pane and left unsent.
+            try? await client.agentClient?.sendTuiKeys(sessionId: sessionId, keys: ["Enter"], text: text)
         }
     }
 

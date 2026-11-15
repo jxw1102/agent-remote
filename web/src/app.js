@@ -1090,7 +1090,17 @@ function applyRemotePalettes(ping) {
 async function pingProfile(profile) {
   try {
     const ping = await call(profile, "/api/ping", { timeout: 10000 });
-    if (applyRemotePalettes(ping)) render();
+    if (applyRemotePalettes(ping)) {
+      // Palettes changed: repaint what is coloured by provider. (This used
+      // to call an undefined render(), and the ReferenceError skipped every
+      // assignment below - caps, models, focus, share - for this ping.)
+      renderFilters();
+      renderSessions();
+      if (state.open) {
+        const op = profileById(state.open.profileId);
+        applyAccent(sessionProvider(state.open.session, op));
+      }
+    }
     profile.provider = ping.provider || "";
     profile.caps = ping.caps || {};
     profile.slashCommands = ping.slash_commands || [];
@@ -5972,6 +5982,8 @@ function wire() {
   };
   prompt.addEventListener("input", grow);
   prompt.addEventListener("keydown", (e) => {
+    // Enter that confirms an IME candidate (CJK input) is not a send.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       const text = prompt.value;
