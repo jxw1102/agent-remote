@@ -83,10 +83,8 @@ a { color: var(--accent); }
      the flex children never shrink and overflow-y:auto never engages. */
   min-height: 0;
 }
-@media (max-width: 860px) {
-  /* Narrow window: one pane at a time, list on top. */
-  .app { grid-template-columns: 1fr; grid-template-rows: 45% 1fr; }
-}
+/* Width tiers, safe areas and touch sizing: see "adaptive" at the end of
+   this file (they must come after the rules they adjust). */
 
 .pane-list {
   display: flex;
@@ -547,7 +545,6 @@ button.icon-btn.icon-idle {
   overflow-x: hidden;
   overflow-y: auto;
   padding: 18px 0 8px;
-  scroll-behavior: smooth;
   -webkit-overflow-scrolling: touch;
 }
 .thread { max-width: 900px; margin: 0 auto; padding: 0 20px; }
@@ -1487,4 +1484,80 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
 .host-file-md {
   padding: 4px 2px 8px;
   overflow-wrap: anywhere;
+}
+
+/* -------------------------------------------------------------- adaptive */
+
+/* Three widths, one structure.
+     compact  (<= 720px)  one pane at a time: the list, or the open session
+     medium   (<= 1100px) list + chat, the list a little narrower
+     expanded (>  1100px) list + chat at full width                        */
+.icon-btn.back-btn { display: none; }
+@media (max-width: 1100px) {
+  .app { grid-template-columns: minmax(260px, 34vw) 1fr; }
+}
+@media (max-width: 720px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+  .app > .pane-list, .app > .pane-chat { grid-area: 1 / 1; }
+  .app:not(.show-chat) > .pane-chat { display: none; }
+  .app.show-chat > .pane-list { display: none; }
+  .icon-btn.back-btn { display: inline-flex; flex: none; margin-right: 2px; }
+  .pane-list { border-right: 0; }
+  .thread { padding: 0 14px; }
+  /* Two rows: who you are talking to, then what you can do about it. Six
+     finger-sized buttons beside the title left no room for the title. */
+  .chat-head { flex-wrap: wrap; row-gap: 6px; padding: 8px 10px; }
+  .chat-title { flex: 1 1 0; }
+  .chat-actions { flex: 1 0 100%; justify-content: space-between; }
+  .composer { padding-left: 12px; padding-right: 12px; }
+}
+
+/* Phones: keep clear of the notch and the home indicator, and let the page
+   shrink with the on-screen keyboard instead of sliding under it. */
+@supports (height: 100dvh) {
+  html, body { height: 100dvh; }
+}
+.list-head { padding-top: calc(12px + env(safe-area-inset-top, 0px)); }
+.chat-head { padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
+.composer { padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px)); }
+.pane-list, .pane-chat {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* Touch: a field under 16px makes iOS zoom the page on focus; controls need
+   a finger-sized target; and there is no hover to reveal message tools. */
+@media (pointer: coarse) {
+  input, textarea, select { font-size: 16px; }
+  .icon-btn { min-width: 44px; min-height: 44px; }
+  .head-actions button, .chip { min-height: 36px; }
+  .msg-tools { opacity: 1; }
+  .msg-tools button { padding: 6px 12px; font-size: 12px; }
+}
+
+/* "Jump to latest": sits over the bottom of the transcript, above the
+   composer, only while new output is arriving out of view. */
+.pane-chat { position: relative; }
+.jump-latest {
+  position: absolute;
+  left: 50%;
+  bottom: var(--jump-bottom, 84px);
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 13px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+.jump-latest.hidden { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

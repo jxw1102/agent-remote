@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>Agent Remote</title>
 <link rel="stylesheet" href="app.css">
@@ -42,6 +42,13 @@
   <!-- Right: the open transcript. -->
   <main class="pane-chat">
     <header id="chat-head" class="chat-head hidden">
+      <!-- Narrow windows show one pane at a time; this returns to the list. -->
+      <button id="btn-back" class="icon-btn back-btn" type="button"
+              title="Back to sessions" aria-label="Back to sessions">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
       <div class="chat-title">
         <h1 id="chat-title">Session</h1>
         <div id="chat-sub" class="chat-sub"></div>
@@ -123,6 +130,9 @@
 
     <div id="banner" class="banner hidden"></div>
 
+    <!-- Shown when new output arrives while reading earlier messages. -->
+    <button id="jump-latest" class="jump-latest hidden" type="button"
+            aria-live="polite">Jump to latest</button>
     <div id="transcript" class="transcript">
       <!-- Filled by app.js showWelcomeIfNeeded() — one guide only (not also in the list). -->
       <div id="welcome" class="empty welcome" aria-busy="true"></div>
