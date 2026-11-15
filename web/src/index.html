@@ -184,6 +184,11 @@
       </div>
     </div>
 
+    <!-- A permission or question the open session is waiting on. Docked here
+         rather than raised as a dialog, so it never replaces a dialog you are
+         in the middle of and is still there after you look away. -->
+    <section id="gate" class="gate hidden" aria-label="The agent is waiting on you"></section>
+
     <div id="composer" class="composer hidden">
       <div id="composer-note" class="composer-note hidden"></div>
       <div class="composer-row">
@@ -199,7 +204,7 @@
 
 <!-- Modal host: profiles, new session, inbox, usage, options, questions. -->
 <div id="modal" class="modal hidden">
-  <div class="modal-card">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <header class="modal-head">
       <h2 id="modal-title">…</h2>
       <button id="modal-close" class="ghost" type="button" aria-label="Close">✕</button>

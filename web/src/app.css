@@ -21,6 +21,7 @@
   --danger: #e5706b;
   --warn: #e0b454;
   --ok: #5fc98b;
+  --attention: #e0b454;       /* a session is waiting on you */
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
   --radius: 10px;
 }
@@ -1486,6 +1487,55 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   overflow-wrap: anywhere;
 }
 
+/* ------------------------------------------------------------------ gate */
+/* The permission / question card docked above the composer. */
+
+.gate {
+  flex: none;
+  border-top: 1px solid var(--attention);
+  background: color-mix(in srgb, var(--attention) 7%, var(--surface));
+  padding: 10px 20px 12px;
+}
+.gate.hidden { display: none; }
+.gate-inner { max-width: 900px; margin: 0 auto; }
+.gate-head { display: flex; align-items: center; gap: 8px; }
+.gate-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--attention);
+  animation: breathe 1.6s ease-in-out infinite;
+}
+.gate-title {
+  flex: 1; min-width: 0; font-weight: 600; font-size: 14px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gate-toggle { flex: none; padding: 3px 10px; font-size: 12px; }
+.gate-body {
+  margin-top: 8px;
+  max-height: min(42vh, 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.gate-body pre {
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.gate-body .q-block { margin-bottom: 10px; }
+.gate-body .q-block:last-child { margin-bottom: 0; }
+.gate-foot {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  justify-content: flex-end; margin-top: 8px;
+}
+.gate-foot .help { margin: 0 auto 0 0; }
+.gate.collapsed .gate-body, .gate.collapsed .gate-foot { display: none; }
+.gate.collapsed { padding-bottom: 10px; }
+
 /* -------------------------------------------------------------- adaptive */
 
 /* Three widths, one structure.
@@ -1510,6 +1560,8 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   .chat-title { flex: 1 1 0; }
   .chat-actions { flex: 1 0 100%; justify-content: space-between; }
   .composer { padding-left: 12px; padding-right: 12px; }
+  .gate { padding-left: 12px; padding-right: 12px; }
+  .gate-foot .help { flex: 1 0 100%; }
 }
 
 /* Phones: keep clear of the notch and the home indicator, and let the page
@@ -1533,6 +1585,7 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   .head-actions button, .chip { min-height: 36px; }
   .msg-tools { opacity: 1; }
   .msg-tools button { padding: 6px 12px; font-size: 12px; }
+  .gate-foot button, .gate-toggle { min-height: 40px; padding-left: 16px; padding-right: 16px; }
 }
 
 /* "Jump to latest": sits over the bottom of the transcript, above the

@@ -2164,8 +2164,11 @@ function syncJumpPill() {
     ? `↓ ${unseenLive} new`
     : "↓ Jump to latest";
   // Keep it just above the composer, whatever height that currently is.
-  const comp = $("composer");
-  const h = comp && !comp.classList.contains("hidden") ? comp.offsetHeight : 0;
+  // Keep it just above whatever is docked under the transcript.
+  const h = ["composer", "gate"].reduce((sum, id) => {
+    const n = $(id);
+    return sum + (n && !n.classList.contains("hidden") ? n.offsetHeight : 0);
+  }, 0);
   pill.style.setProperty("--jump-bottom", `${h + 14}px`);
 }
 
@@ -2199,6 +2202,7 @@ async function openSession(row) {
   stopJobWatch();
   closeLiveTui();
   showChatPane(true);
+  clearGate();
   unseenLive = 0;
   // Bump openGen BEFORE any await so an in-flight loadTail/pollJob from the
   // previous session can never paint into this transcript (two running jobs
@@ -3786,6 +3790,7 @@ function attachJob(jobId, sessionId = null, { adopted = false } = {}) {
 
 /** Tear down the job watch without touching the banner (see attachJob). */
 function detachJobWatch() {
+  clearGate();
   if (state.jobTimer) clearInterval(state.jobTimer);
   state.jobTimer = null;
   state.job = null;
@@ -3947,18 +3952,18 @@ async function pollJob() {
   // the user can reopen (same idea as the phone's QuestionSheet banner).
   // Do not clear askedQuestion when pending flickers null (race while the
   // daemon applies picks) — that reopened the same panel after Submit.
+  syncGate(job);
   if (!job.pendingPermission) state.askedPermission = null;
+  // The card is idempotent per request id, so it is offered on every tick
+  // (also after leaving this session and coming back). What must not come
+  // back is an ask already answered here while the daemon catches up.
   if (job.pendingPermission
-      && job.pendingPermission.request_id !== state.askedPermission
-      && !state.answeredQuestions.has(job.pendingPermission.request_id)) {
+      && !state.answeredQuestions.has(`p:${job.pendingPermission.request_id}`)) {
     state.askedPermission = job.pendingPermission.request_id;
     showPermission(job.pendingPermission);
   }
   const qid = job.pendingQuestion && job.pendingQuestion.request_id;
-  if (job.pendingQuestion
-      && qid
-      && qid !== state.askedQuestion
-      && !state.answeredQuestions.has(qid)) {
+  if (job.pendingQuestion && qid && !state.answeredQuestions.has(qid)) {
     state.askedQuestion = qid;
     showQuestion(job.pendingQuestion);
   }
@@ -4353,12 +4358,53 @@ function modal({ title, build, actions = [], wide = false }) {
     buttons.push(b);
     foot.appendChild(b);
   });
+  // Remember where focus was the first time the dialog opens (a dialog that
+  // repaints itself must not overwrite that with one of its own buttons).
+  if (host.classList.contains("hidden")) {
+    const active = document.activeElement;
+    modalReturnFocus = active && !host.contains(active) ? active : null;
+  }
   host.classList.remove("hidden");
   host.querySelector(".modal-card").style.width = wide ? "min(900px, 100%)" : "";
+  if (!host.contains(document.activeElement)) {
+    const first = body.querySelector(MODAL_FOCUSABLE)
+      || foot.querySelector(".primary:not(:disabled)")
+      || $("modal-close");
+    if (first) first.focus({ preventScroll: true });
+  }
   return { body, foot };
 }
+
+let modalReturnFocus = null;
+const MODAL_FOCUSABLE = 'button:not(:disabled), [href], input:not(:disabled), '
+  + 'select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+/** Keep Tab inside the open dialog (it is aria-modal). */
+function trapModalTab(e) {
+  if (e.key !== "Tab") return;
+  const host = $("modal");
+  if (host.classList.contains("hidden")) return;
+  const items = [...host.querySelectorAll(MODAL_FOCUSABLE)]
+    .filter((n) => n.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  if (!host.contains(document.activeElement)) {
+    e.preventDefault(); first.focus();
+  } else if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault(); first.focus();
+  }
+}
+
 function closeModal() {
+  const wasOpen = !$("modal").classList.contains("hidden");
   $("modal").classList.add("hidden");
+  if (wasOpen && modalReturnFocus && document.contains(modalReturnFocus)) {
+    modalReturnFocus.focus({ preventScroll: true });
+  }
+  modalReturnFocus = null;
   // New-session (and other) modals may recolor chrome via applyAccent(harness);
   // restore the open session's brand, or neutral multi chrome when idle.
   if (state.open) {
@@ -4960,54 +5006,245 @@ async function pendingNewJob(profile, jobId, prompt) {
 
 // ------------------------------------------------------ permission / ask
 
+// The open session's pending permission or question, shown as a card docked
+// above the composer. It used to be a dialog raised on arrival, and the page
+// has one dialog: a permission arriving while you filled in New session or
+// edited a daemon replaced that form. A card never takes anything over, can
+// be hidden without cancelling the ask, and keeps your picks across the
+// poll's repaints because it is only rebuilt when the request id changes.
+
+const gate = {
+  key: "",          // "p:<request_id>" | "q:<request_id>" | ""
+  kind: "",         // "permission" | "question" | "plan"
+  pending: null,
+  picks: [],
+  notes: [],
+  collapsed: false,
+  busy: false,
+};
+
+const isPlanQuestion = (questions) => questions.some((q) =>
+  (q.header || "").toLowerCase().includes("plan")
+  || (q.question || "").length > 800);
+
+function clearGate() {
+  if (!gate.key && $("gate").classList.contains("hidden")) return;
+  gate.key = "";
+  gate.kind = "";
+  gate.pending = null;
+  gate.busy = false;
+  const box = $("gate");
+  const pinned = nearBottom($("transcript"));
+  box.textContent = "";
+  box.classList.add("hidden");
+  if (pinned) $("transcript").scrollTop = $("transcript").scrollHeight;
+  syncJumpPill();
+}
+
+/** Drop the card once the daemon no longer has that ask pending. */
+function syncGate(job) {
+  if (!gate.key) return;
+  const perm = job && job.pendingPermission;
+  const q = job && job.pendingQuestion;
+  const live = (gate.kind === "permission")
+    ? perm && `p:${perm.request_id}` === gate.key
+    : q && `q:${q.request_id}` === gate.key
+      && !state.answeredQuestions.has(q.request_id);
+  if (!live && !gate.busy) clearGate();
+}
+
+function gateButton(label, cls, run) {
+  const b = el("button", cls, label);
+  b.type = "button";
+  b.addEventListener("click", async () => {
+    if (gate.busy) return;
+    gate.busy = true;
+    $("gate").querySelectorAll(".gate-foot button").forEach((x) => { x.disabled = true; });
+    try { await run(); } finally { gate.busy = false; }
+  });
+  return b;
+}
+
+function renderGate({ focus = false } = {}) {
+  const box = $("gate");
+  const pending = gate.pending;
+  if (!gate.key || !pending) { clearGate(); return; }
+  const hadFocus = box.contains(document.activeElement);
+  // The card takes height from the transcript: someone reading the latest
+  // output stays on the latest output.
+  const pinned = nearBottom($("transcript"));
+  box.textContent = "";
+  box.classList.remove("hidden");
+  box.classList.toggle("collapsed", gate.collapsed);
+  const inner = el("div", "gate-inner");
+
+  const head = el("div", "gate-head");
+  head.appendChild(el("span", "gate-dot"));
+  const questions = pending.questions || [];
+  const title = gate.kind === "permission"
+    ? `Allow ${pending.tool_name || "this tool"}?`
+    : gate.kind === "plan"
+      ? (questions[0].header || "Plan ready for review")
+      : (questions.length === 1
+        ? (questions[0].header || "The agent is asking")
+        : `The agent is asking ${questions.length} things`);
+  head.appendChild(el("div", "gate-title", title));
+  const toggle = el("button", "ghost gate-toggle", gate.collapsed ? "Show" : "Hide");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", String(!gate.collapsed));
+  toggle.title = gate.collapsed
+    ? "Show what is being asked"
+    : "Hide for now — this does not answer or cancel it";
+  toggle.addEventListener("click", () => {
+    gate.collapsed = !gate.collapsed;
+    renderGate({ focus: true });
+  });
+  head.appendChild(toggle);
+  inner.appendChild(head);
+
+  const body = el("div", "gate-body");
+  const foot = el("div", "gate-foot");
+  const profile = () => profileById(state.open.profileId);
+
+  if (gate.kind === "permission") {
+    if (pending.detail) body.appendChild(el("pre", null, pending.detail));
+    const answer = async (allow) => {
+      try {
+        await call(profile(), `/api/jobs/${state.job.id}/permission`,
+          { method: "POST", body: { request_id: pending.request_id, allow } });
+        state.answeredQuestions.add(`p:${pending.request_id}`);
+        clearGate();
+      } catch (e) { toast(e.message); renderGate(); }
+    };
+    foot.appendChild(el("div", "help", "The turn is paused until you answer."));
+    foot.appendChild(gateButton("Deny", "danger", () => answer(false)));
+    foot.appendChild(gateButton("Allow", "primary", () => answer(true)));
+  } else if (gate.kind === "plan") {
+    body.appendChild(el("div", "help",
+      "The agent wrote a plan and is waiting for you to approve it, ask for changes or quit."));
+    const open = el("button", "primary", "Review plan");
+    open.type = "button";
+    open.addEventListener("click", () => showPlanModal(pending));
+    foot.appendChild(open);
+  } else {
+    questions.forEach((q, qi) => {
+      const block = el("div", "q-block");
+      if (q.header && questions.length > 1) block.appendChild(el("div", "q-head", q.header));
+      if (q.question) {
+        const text = el("div", "md");
+        text.appendChild(renderMarkdown(q.question));
+        block.appendChild(text);
+      }
+      if (q.multi_select) block.appendChild(el("div", "help", "Pick as many as apply"));
+      (q.options || []).forEach((opt) => {
+        const active = gate.picks[qi].includes(opt.label);
+        const b = el("button", "q-opt");
+        b.type = "button";
+        b.setAttribute("aria-pressed", String(active));
+        b.appendChild(el("span", "qmark",
+          q.multi_select ? (active ? "[x]" : "[ ]") : (active ? "(o)" : "( )")));
+        const col = el("div");
+        col.appendChild(el("div", null, opt.label));
+        if (opt.description) col.appendChild(el("div", "qdesc", opt.description));
+        b.appendChild(col);
+        b.addEventListener("click", () => {
+          if (q.multi_select) {
+            const at = gate.picks[qi].indexOf(opt.label);
+            if (at >= 0) gate.picks[qi].splice(at, 1); else gate.picks[qi].push(opt.label);
+          } else {
+            gate.picks[qi] = [opt.label];
+          }
+          const top = body.scrollTop;
+          renderGate({ focus: true });
+          const nb = $("gate").querySelector(".gate-body");
+          if (nb) nb.scrollTop = top;
+        });
+        block.appendChild(b);
+        // Some options take free text with the pick (grok's "Request
+        // changes" becomes the revision note it then waits for).
+        if (q.note_for && q.note_for === opt.label && active) {
+          const input = el("input");
+          input.placeholder = q.note_hint || "Your answer";
+          input.value = gate.notes[qi];
+          input.addEventListener("input", () => { gate.notes[qi] = input.value; });
+          block.appendChild(input);
+        }
+      });
+      body.appendChild(block);
+    });
+    const settle = async (payload) => {
+      try {
+        await call(profile(), `/api/jobs/${state.job.id}/question`,
+          { method: "POST", body: { request_id: pending.request_id, ...payload } });
+        // Optimistically dismiss so a lagging poll cannot re-open this id.
+        state.answeredQuestions.add(pending.request_id);
+        state.askedQuestion = pending.request_id;
+        if (state.job) {
+          state.job.pendingQuestion = null;
+          state.job.lastPendingQuestion = null;
+        }
+        clearGate();
+        renderBanner();
+      } catch (e) { toast(e.message); renderGate(); }
+    };
+    foot.appendChild(gateButton("Cancel", null, () => settle({ cancel: true })));
+    const send = gateButton("Send answer", "primary",
+      () => settle({ answers: gate.picks, notes: gate.notes }));
+    send.disabled = gate.picks.some((p) => !p.length);
+    foot.appendChild(send);
+  }
+  inner.appendChild(body);
+  inner.appendChild(foot);
+  box.appendChild(inner);
+  if (focus || hadFocus) {
+    const target = gate.collapsed ? toggle
+      : (box.querySelector('.q-opt[aria-pressed="true"]')
+        || box.querySelector(".gate-foot .primary:not(:disabled)")
+        || box.querySelector(".q-opt") || toggle);
+    if (target) target.focus({ preventScroll: true });
+  }
+  if (pinned) $("transcript").scrollTop = $("transcript").scrollHeight;
+  syncJumpPill();
+}
+
+/** force = the banner's Respond / Answer: bring a hidden card back. */
 function showPermission(pending, { force = false } = {}) {
   if (!pending) return;
-  // Suppress a re-paint when the same modal is already up (poll ticks);
-  // force=true is the banner's "Respond" after a dismiss.
-  if (!force && !$("modal").classList.contains("hidden")
-      && $("modal-title").textContent.startsWith("Allow ")) {
-    return;
-  }
-  const answer = async (allow) => {
-    const profile = profileById(state.open.profileId);
-    try {
-      await call(profile, `/api/jobs/${state.job.id}/permission`,
-        { method: "POST", body: { request_id: pending.request_id, allow } });
-    } catch (e) { toast(e.message); }
-  };
-  modal({
-    title: `Allow ${pending.tool_name || "this tool"}?`,
-    build(body) {
-      if (pending.detail) {
-        const pre = el("pre", null, pending.detail);
-        pre.style.whiteSpace = "pre-wrap";
-        pre.style.fontFamily = "var(--mono)";
-        pre.style.fontSize = "12.5px";
-        body.appendChild(pre);
-      }
-      body.appendChild(el("div", "help",
-        "The turn is paused until you answer. Closing this dialog does not deny — use Respond in the banner to reopen."));
-    },
-    actions: [
-      { label: "Deny", danger: true, close: true, run: () => answer(false) },
-      { label: "Allow", primary: true, close: true, run: () => answer(true) },
-    ],
-  });
+  const key = `p:${pending.request_id}`;
+  if (gate.key === key && !force) return;   // poll tick: already showing
+  const same = gate.key === key;
+  gate.key = key;
+  gate.kind = "permission";
+  gate.pending = pending;
+  if (!same || force) gate.collapsed = false;
+  renderGate({ focus: force });
 }
 
 function showQuestion(pending, { force = false } = {}) {
   if (!pending) return;
   const questions = pending.questions || [];
   if (!questions.length) return;
-  // Plan approval and AskUserQuestion share this modal. Suppress re-paint
-  // when either is already open (poll ticks); force=true is banner Answer.
-  const openTitle = ($("modal-title").textContent || "");
-  if (!force && !$("modal").classList.contains("hidden")
-      && (openTitle.startsWith("The agent is asking")
-          || openTitle === "Plan approval"
-          || openTitle.startsWith("Review plan"))) {
-    return;
+  const key = `q:${pending.request_id}`;
+  const plan = isPlanQuestion(questions);
+  if (gate.key === key && !force) return;
+  if (gate.key !== key) {
+    gate.key = key;
+    gate.kind = plan ? "plan" : "question";
+    gate.pending = pending;
+    gate.picks = questions.map(() => []);
+    gate.notes = questions.map(() => "");
   }
+  gate.collapsed = false;
+  renderGate({ focus: force });
+  // A plan is pages long and is read in a dialog, but only when asked for:
+  // raising it on arrival is what used to replace other dialogs.
+  if (plan && force) showPlanModal(pending);
+}
+
+function showPlanModal(pending) {
+  if (!pending) return;
+  const questions = pending.questions || [];
+  if (!questions.length) return;
   const picks = questions.map(() => []);
   const notes = questions.map(() => "");
   const isPlan = questions.some((q) =>
@@ -5095,6 +5332,7 @@ function showQuestion(pending, { force = false } = {}) {
               state.job.lastPendingQuestion = null;
             }
             renderBanner();
+            clearGate();
           } catch (e) { toast(e.message); }
         },
       },
@@ -5116,6 +5354,7 @@ function showQuestion(pending, { force = false } = {}) {
               state.job.lastPendingQuestion = null;
             }
             renderBanner();
+            clearGate();
           } catch (e) { toast(e.message); }
         },
       },
@@ -6035,6 +6274,7 @@ function wire() {
     } catch (e) { toast(e.message); }
   });
   $("modal-close").addEventListener("click", closeModal);
+  document.addEventListener("keydown", trapModalTab);
   $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) closeModal(); });
 
   let searchTimer;
