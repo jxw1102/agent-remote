@@ -1151,6 +1151,8 @@ async function pingProfile(profile) {
     profile.share = !!ping.share;
     // Linked host files (agentremoted ≥ 2.20): /api/sessions/<id>/file.
     profile.linkedFiles = !!ping.linked_files;
+    // Changes view (agentremoted ≥ 2.24): /api/sessions/<id>/changes.
+    profile.changes = !!ping.changes;
     // Live TUI frames pushed over SSE + ordered key batches (agentremoted ≥ 2.22).
     profile.tuiStream = !!ping.tui_stream;
     profile.chunkedUpload = !!ping.chunked_upload
@@ -1161,7 +1163,7 @@ async function pingProfile(profile) {
     store.save();
     syncShareButton();
     // Models, efforts and capabilities may have just arrived or changed.
-    if (state.open && state.open.profileId === profile.id) syncComposer();
+    if (state.open && state.open.profileId === profile.id) { syncComposer(); syncChangesButton(); }
     return true;
   } catch {
     return false;
@@ -2315,6 +2317,8 @@ async function openSession(row) {
   $("composer").classList.remove("hidden");
   closePop();
   syncComposer();
+  syncChangesButton();
+  if (side.open) { side.data = null; side.out = ""; side.form = false; loadChanges(); }
   $("chat-title").textContent = row.session.title || "Session";
   renderChatSub();
   updateLiveTuiButton();
@@ -2420,6 +2424,269 @@ function syncShareButton() {
   const open = state.open;
   const profile = open && profileById(open.profileId);
   btn.classList.toggle("hidden", !shareCapable(profile));
+}
+
+// ----------------------------------------------------------------- changes
+//
+// What the agent changed, before you answer it: the session folder's working
+// tree against its last commit. Read-only on the daemon; commit and push are
+// explicit actions here, run through the same /api/shell as a "!command".
+
+const side = { open: false, loading: false, data: null, error: "", gen: 0, out: "", form: false, busy: false };
+
+function syncChangesButton() {
+  const btn = $("btn-changes");
+  if (!btn) return;
+  const profile = state.open && profileById(state.open.profileId);
+  const can = !!(profile && profile.changes && state.open.session
+    && state.open.session.cwd);
+  btn.classList.toggle("hidden", !can);
+  btn.setAttribute("aria-pressed", String(side.open));
+  if (!can && side.open) closeSide();
+}
+
+function openSide() {
+  if (!state.open) return;
+  side.open = true;
+  side.out = "";
+  side.form = false;
+  $("side").classList.remove("hidden");
+  $("app").classList.add("with-side");
+  $("btn-changes").setAttribute("aria-pressed", "true");
+  loadChanges();
+  // On a narrow window the pane covers everything: put focus inside it.
+  if (window.matchMedia("(max-width: 1100px)").matches) $("side-back").focus();
+}
+
+function closeSide() {
+  const hadFocus = $("side").contains(document.activeElement);
+  side.open = false;
+  side.gen += 1;
+  $("side").classList.add("hidden");
+  $("app").classList.remove("with-side");
+  $("btn-changes").setAttribute("aria-pressed", "false");
+  if (hadFocus) $("btn-changes").focus();
+}
+
+async function loadChanges() {
+  if (!side.open || !state.open) return;
+  const profile = profileById(state.open.profileId);
+  const sid = state.open.sessionId;
+  const gen = ++side.gen;
+  side.loading = true;
+  side.error = "";
+  renderSide();
+  try {
+    const data = await call(profile,
+      `/api/sessions/${encodeURIComponent(sid)}/changes`, { timeout: 30000 });
+    if (gen !== side.gen) return;
+    side.data = data;
+  } catch (e) {
+    if (gen !== side.gen) return;
+    side.error = e.message || "Could not read the changes";
+  }
+  side.loading = false;
+  renderSide();
+}
+
+/** Split one unified diff into per-file sections. */
+function splitDiff(text) {
+  const out = [];
+  let cur = null;
+  String(text || "").split("\n").forEach((line) => {
+    if (line.startsWith("diff --git ")) {
+      const m = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
+      cur = { path: m ? m[2] : line.slice(11), lines: [] };
+      out.push(cur);
+      return;
+    }
+    if (cur) cur.lines.push(line);
+  });
+  return out;
+}
+
+function diffLineClass(line) {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+++") || line.startsWith("---")) return "meta";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  if (line.startsWith(" ")) return "";
+  return "meta";
+}
+
+function renderSide() {
+  const body = $("side-body");
+  const sub = $("side-sub");
+  const foot = $("side-foot");
+  const keepScroll = body.scrollTop;
+  body.textContent = "";
+  foot.textContent = "";
+  foot.classList.add("hidden");
+  const d = side.data;
+  if (side.out) body.appendChild(el("pre", "side-out", side.out));
+  if (side.loading && !d) {
+    sub.textContent = "";
+    const note = el("div", "side-note");
+    note.appendChild(el("span", "spinner"));
+    note.appendChild(document.createTextNode(" Reading the working tree…"));
+    body.appendChild(note);
+    return;
+  }
+  if (side.error) {
+    sub.textContent = "";
+    body.appendChild(el("div", "side-note err", side.error));
+    return;
+  }
+  if (!d) return;
+  if (!d.repo) {
+    sub.textContent = d.cwd || "";
+    body.appendChild(el("div", "side-note",
+      "This session's folder is not a git repository, so there is nothing to compare with."));
+    return;
+  }
+  const bits = [d.branch || "detached"];
+  if (d.ahead) bits.push(`↑${d.ahead}`);
+  if (d.behind) bits.push(`↓${d.behind}`);
+  const files = d.files || [];
+  bits.push(files.length
+    ? `${files.length} ${files.length === 1 ? "file" : "files"} · +${d.added} −${d.removed}`
+    : "no changes");
+  sub.textContent = bits.join(" · ") + (side.loading ? " · refreshing…" : "");
+  sub.title = d.root || "";
+
+  if (!files.length) {
+    body.appendChild(el("div", "side-note",
+      "Nothing differs from the last commit."
+      + (d.ahead ? ` ${d.ahead} ${d.ahead === 1 ? "commit is" : "commits are"} not pushed yet.` : "")));
+  } else {
+    const sections = splitDiff(d.diff);
+    const anchors = new Map();
+    const list = el("ul", "chg-files");
+    files.forEach((f) => {
+      const li = el("li");
+      const row = el("button", "chg-file");
+      row.type = "button";
+      row.appendChild(el("span", "chg-path", f.from ? `${f.from} → ${f.path}` : f.path));
+      row.appendChild(el("span", "chg-kind k-" + String(f.status).replace(/\s+/g, "-"), f.status));
+      const count = el("span", "chg-count");
+      if (f.binary) count.textContent = "binary";
+      else if (f.added || f.removed) {
+        count.appendChild(el("span", "chg-add", "+" + f.added));
+        count.appendChild(document.createTextNode(" "));
+        count.appendChild(el("span", "chg-del", "−" + f.removed));
+      }
+      row.appendChild(count);
+      row.addEventListener("click", () => {
+        const target = anchors.get(f.path);
+        if (target) target.scrollIntoView({ block: "start" });
+      });
+      // Untracked files have no diff section to jump to.
+      row.disabled = !sections.some((sec) => sec.path === f.path);
+      li.appendChild(row);
+      list.appendChild(li);
+    });
+    body.appendChild(list);
+    if (d.more_files) {
+      body.appendChild(el("div", "side-note", `…and ${d.more_files} more files not listed.`));
+    }
+    sections.forEach((sec) => {
+      const box = el("section", "diff-file");
+      box.appendChild(el("div", "diff-name", sec.path));
+      const pre = el("pre", "diff-lines");
+      sec.lines.forEach((line) => {
+        if (/^(index |similarity index |new file mode|deleted file mode|old mode|new mode)/.test(line)) return;
+        const cls = diffLineClass(line);
+        pre.appendChild(el("span", "diff-line" + (cls ? " " + cls : ""), line || " "));
+      });
+      box.appendChild(pre);
+      anchors.set(sec.path, box);
+      body.appendChild(box);
+    });
+    if (d.truncated) {
+      body.appendChild(el("div", "side-note",
+        "The diff is too long to show in full. The file list above is complete."));
+    }
+  }
+  body.scrollTop = keepScroll;
+
+  // Git actions. Each one says exactly what it will run.
+  if (!files.length && !d.ahead) return;
+  foot.classList.remove("hidden");
+  if (side.form) {
+    const msg = el("textarea");
+    msg.id = "side-commit-msg";
+    msg.placeholder = "Commit message";
+    msg.setAttribute("aria-label", "Commit message");
+    foot.appendChild(msg);
+    foot.appendChild(el("span", "help",
+      `Stages and commits all ${files.length} changed ${files.length === 1 ? "file" : "files"} on ${d.branch || "this branch"}.`));
+    const cancel = el("button", null, "Cancel");
+    cancel.type = "button";
+    cancel.addEventListener("click", () => { side.form = false; renderSide(); });
+    const go = el("button", "primary", "Commit");
+    go.type = "button";
+    go.disabled = true;
+    msg.addEventListener("input", () => { go.disabled = !msg.value.trim() || side.busy; });
+    go.addEventListener("click", () => {
+      const text = msg.value.trim();
+      if (!text) return;
+      // Single-quoted for the shell: the message is data, never syntax.
+      runGit("git add -A && git commit -m '" + text.replace(/'/g, "'\\''") + "'");
+    });
+    foot.appendChild(cancel);
+    foot.appendChild(go);
+    msg.focus();
+    return;
+  }
+  if (files.length) {
+    const commit = el("button", null, "Commit…");
+    commit.type = "button";
+    commit.disabled = side.busy;
+    commit.addEventListener("click", () => { side.form = true; renderSide(); });
+    foot.appendChild(commit);
+  }
+  if (d.ahead || !d.upstream) {
+    // No upstream yet: publish the branch to origin and track it.
+    const cmd = d.upstream ? "git push" : "git push -u origin HEAD";
+    const push = el("button", null, d.upstream ? `Push ${d.ahead}` : "Publish branch");
+    push.type = "button";
+    push.disabled = side.busy;
+    push.title = cmd;
+    push.addEventListener("click", () => {
+      const where = d.upstream ? ` to ${d.upstream}` : " to origin";
+      if (!window.confirm(`Push ${d.branch || "this branch"}${where}? Others will see these commits.`)) return;
+      runGit(cmd);
+    });
+    foot.appendChild(push);
+  }
+  foot.appendChild(el("span", "help", side.busy ? "Running…" : ""));
+}
+
+/** Run one git command in the session's folder and show what it printed. */
+async function runGit(command) {
+  if (!state.open || side.busy) return;
+  const profile = profileById(state.open.profileId);
+  const gen = side.gen;
+  side.busy = true;
+  side.form = false;
+  renderSide();
+  let out = "";
+  try {
+    const res = await call(profile, "/api/shell", {
+      method: "POST",
+      timeout: 40000,
+      body: { command, session_id: state.open.sessionId,
+              cwd: (side.data && side.data.root) || state.open.session.cwd || "" },
+    });
+    out = `$ ${command.split(" -m ")[0]}\n` + ((res.output || "").trim() || "(no output)")
+      + (res.exit_code ? `\n(exit code ${res.exit_code})` : "");
+  } catch (e) {
+    out = `$ ${command.split(" -m ")[0]}\n${e.message || "failed"}`;
+  }
+  side.busy = false;
+  if (gen !== side.gen && !side.open) return;
+  side.out = out;
+  loadChanges();
 }
 
 /**
@@ -4393,6 +4660,8 @@ async function pollJob() {
     || snap.pending_question || snap.pending_permission);
   if (["done", "error", "stopped"].includes(snap.status) && !gateOpen) {
     const notes = [];
+    // The turn is over: what it changed is now worth a fresh look.
+    if (side.open) loadChanges();
     // Only real job errors — never "failed" for empty/unknown status.
     if (snap.status === "error") notes.push(snap.error || "The turn failed");
     if (snap.status === "stopped") notes.push("Stopped");
@@ -6799,6 +7068,13 @@ function wire() {
   prompt.addEventListener("focus", syncSlashMenu);
   prompt.addEventListener("blur", () => { if (pop.kind === "slash") closePop(); });
   $("composer-pop").addEventListener("keydown", onPopKeydown);
+  $("btn-changes").addEventListener("click", () => { if (side.open) closeSide(); else openSide(); });
+  $("side-close").addEventListener("click", closeSide);
+  $("side-back").addEventListener("click", closeSide);
+  $("side-refresh").addEventListener("click", loadChanges);
+  $("side").addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("modal").classList.contains("hidden")) { e.stopPropagation(); closeSide(); }
+  });
   // The machine itself lost or regained its network.
   window.addEventListener("offline", () => {
     enabledProfiles().forEach((p) => { if (connOf(p.id) === "live") setConn(p.id, "reconnecting"); });

@@ -1127,6 +1127,100 @@ button.icon-btn.icon-idle {
   border-color: var(--accent);
 }
 
+/* -------------------------------------------------------------- changes */
+/* The side pane: what differs from the last commit in this session's
+   folder. A third column on a wide window; a full overlay otherwise. */
+.pane-side {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+}
+.side-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.side-head .back-btn { display: none; }
+.side-title { flex: 1 1 0; min-width: 0; }
+.side-title h2 { margin: 0; font-size: 14px; }
+.side-sub {
+  color: var(--dim);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.side-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 12px 16px; }
+.side-foot {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--line);
+}
+.side-foot .help { flex: 1 1 120px; color: var(--dim); font-size: 12px; }
+.side-foot textarea { flex: 1 0 100%; min-height: 60px; resize: vertical; }
+.side-note { color: var(--dim); font-size: 13px; padding: 18px 4px; }
+.side-note.err { color: var(--danger); }
+.side-out {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  font: 12px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.chg-files { list-style: none; margin: 0 0 12px; padding: 0; }
+.chg-file {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  text-align: left;
+  font-size: 12.5px;
+}
+.chg-file:hover:not(:disabled), .chg-file:focus-visible { background: var(--surface-3); }
+.chg-file:disabled { opacity: 1; cursor: default; }
+.chg-path { flex: 1 1 0; min-width: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+.chg-kind { flex: none; color: var(--dim); font-size: 11px; }
+.chg-kind.k-deleted, .chg-kind.k-conflicted { color: var(--danger); }
+.chg-kind.k-added, .chg-kind.k-untracked { color: var(--ok); }
+.chg-count { flex: none; font: 11.5px var(--mono); }
+.chg-add { color: var(--ok); }
+.chg-del { color: var(--danger); }
+.diff-file { margin-bottom: 14px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.diff-name {
+  padding: 6px 10px;
+  background: var(--surface-3);
+  font: 600 12px var(--mono);
+  overflow-wrap: anywhere;
+  position: sticky;
+  top: -10px;
+}
+.diff-lines { margin: 0; padding: 4px 0; overflow-x: auto; font: 12px/1.5 var(--mono); }
+.diff-line { display: block; padding: 0 10px; white-space: pre; min-width: max-content; }
+.diff-line.add { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.diff-line.del { background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.diff-line.hunk { color: var(--dim); background: var(--surface-2); }
+.diff-line.meta { color: var(--dim); }
+
 /* -------------------------------------------------------------- composer */
 
 .composer {
@@ -1647,11 +1741,23 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
      medium   (<= 1100px) list + chat, the list a little narrower
      expanded (>  1100px) list + chat at full width                        */
 .icon-btn.back-btn { display: none; }
+/* Expanded: the changes pane is a third column. */
+.app.with-side { grid-template-columns: minmax(260px, 22vw) 1fr minmax(360px, 36vw); }
 @media (max-width: 1100px) {
-  .app { grid-template-columns: minmax(260px, 34vw) 1fr; }
+  .app, .app.with-side { grid-template-columns: minmax(260px, 34vw) 1fr; }
+  /* No room for three columns: the pane covers the window instead. */
+  .pane-side {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    border-left: 0;
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  .side-head .back-btn { display: inline-flex; }
+  #side-close { display: none; }
 }
 @media (max-width: 720px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+  .app, .app.with-side { grid-template-columns: 1fr; grid-template-rows: 1fr; }
   .app > .pane-list, .app > .pane-chat { grid-area: 1 / 1; }
   .app:not(.show-chat) > .pane-chat { display: none; }
   .app.show-chat > .pane-list { display: none; }
