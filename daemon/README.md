@@ -19,6 +19,19 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.24.1** A long transcript no longer stalls the daemon. Finding a
+session's title source re-read the whole transcript whenever the file had
+changed, with no limit on how many requests did so at once. On a 245 MB
+transcript of a session that was still working, a client polling
+`GET /api/sessions/<id>/tui` (which looked the session up on every frame)
+piled up 800 threads each parsing the file, and the daemon stopped answering.
+Now the scan reads only what was appended since the last look, one reader per
+session at a time, and the Live TUI routes remember for a minute whether the
+caller may see the pane. Web: the polled Live TUI fallback sends one request
+at a time, and goes back to the pushed stream ten seconds after a refusal
+instead of polling for as long as the pane is open. Covered by
+`tests/scan_session_test.py`.
+
 **2.24.0** Changes: what differs from the last commit in a session's folder.
 `GET /api/sessions/<id>/changes` returns the branch (with upstream, ahead and
 behind), each changed file with its status and added/removed line counts, and

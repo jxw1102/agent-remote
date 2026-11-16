@@ -268,6 +268,9 @@ const state = {
   liveTui: false,        // Live TUI mode open
   liveTuiTimer: null,
   liveTuiStream: null,   // EventSource of pushed frames (daemon ≥ 2.22)
+  liveTuiRetry: null,    // timer: ask for the stream again after falling back to polling
+  liveTuiPolling: false, // a polled frame request is in flight
+  liveTuiPollAgain: false,
   liveTuiSeq: 0,
   liveTuiKeys: false,    // pane has keyboard focus
   liveTuiCols: 0,        // host pane width in columns (frame.cols)
@@ -2977,8 +2980,7 @@ function startLiveTuiFeed() {
   const profile = open && profileById(open.profileId);
   if (!profile) return;
   if (!profile.tuiStream || typeof EventSource === "undefined") {
-    pollLiveTui(true);
-    state.liveTuiTimer = setInterval(() => pollLiveTui(false), 400);
+    startLiveTuiPolling();
     return;
   }
   const gen = state.openGen;
@@ -3001,10 +3003,14 @@ function startLiveTuiFeed() {
   src.onerror = () => {
     if (state.liveTuiStream !== src) return;
     if (src.readyState === EventSource.CLOSED) {
-      // Refused outright (an old proxy, a daemon swapped under us): poll.
+      // Refused outright (an old proxy, a daemon restarting under us): poll
+      // for now, and ask for the stream again shortly. Polling used to be
+      // where this ended, for as long as the pane stayed open.
       state.liveTuiStream = null;
-      pollLiveTui(true);
-      state.liveTuiTimer = setInterval(() => pollLiveTui(false), 400);
+      startLiveTuiPolling();
+      state.liveTuiRetry = setTimeout(() => {
+        if (state.liveTui && isOpenStill(gen, profileId, sessionId)) startLiveTuiFeed();
+      }, LIVE_TUI_STREAM_RETRY_MS);
       return;
     }
     $("live-tui-status").textContent = "Host TUI · reconnecting…";
@@ -3013,9 +3019,19 @@ function startLiveTuiFeed() {
   };
 }
 
+const LIVE_TUI_STREAM_RETRY_MS = 10000;
+
+function startLiveTuiPolling() {
+  clearInterval(state.liveTuiTimer);
+  pollLiveTui(true);
+  state.liveTuiTimer = setInterval(() => pollLiveTui(false), 400);
+}
+
 function stopLiveTuiFeed() {
   clearInterval(state.liveTuiTimer);
   state.liveTuiTimer = null;
+  clearTimeout(state.liveTuiRetry);
+  state.liveTuiRetry = null;
   if (state.liveTuiStream) state.liveTuiStream.close();
   state.liveTuiStream = null;
 }
@@ -3043,6 +3059,14 @@ async function pollLiveTui(force) {
   const sessionId = state.open.sessionId;
   const profile = profileById(profileId);
   if (!profile) return;
+  // One request at a time. The timer used to send another every 400 ms
+  // whether or not the last had come back, so a daemon that was slow to
+  // answer was sent more work the slower it got.
+  if (state.liveTuiPolling) {
+    if (force) state.liveTuiPollAgain = true;
+    return;
+  }
+  state.liveTuiPolling = true;
   try {
     // Colour clients opt in; default daemon payload is plain for BB.
     const frame = await call(
@@ -3056,6 +3080,14 @@ async function pollLiveTui(force) {
     if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) return;
     $("live-tui-status").textContent = e.message || "Live TUI error";
     $("live-tui-status").classList.remove("live");
+  } finally {
+    state.liveTuiPolling = false;
+    if (state.liveTuiPollAgain) {
+      // A repaint was asked for (a key was sent, another session was opened)
+      // while this one was out.
+      state.liveTuiPollAgain = false;
+      pollLiveTui(true);
+    }
   }
 }
 

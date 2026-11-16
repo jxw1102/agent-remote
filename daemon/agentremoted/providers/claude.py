@@ -1358,9 +1358,11 @@ class ClaudeStore:
         self._titles = titles.TitleCache(config, _oauth_token)
         # Set by providers.build_one to this harness's own generator.
         self.titler = None
-        # (mtime_ns, size) -> (compactions, first_user_text, last_summary) so
-        # the sessions list doesn't re-scan an unchanged transcript.
+        # session id -> how far its transcript has been scanned and what was
+        # found, so the sessions list reads only what was appended since.
         self._scan_memo = {}
+        self._scan_locks = {}
+        self._scan_guard = threading.Lock()
         # (mtime_ns, size) -> is-the-user's-own-session verdict, same deal.
         self._user_memo = {}
 
@@ -1372,41 +1374,69 @@ class ClaudeStore:
         and /rewind all read through this one seam."""
         return obj
 
+    # Bytes every record _scan_session cares about contains, so the others
+    # are skipped without parsing. Empty: parse every line (a subclass whose
+    # _rec turns some other shape into a user record).
+    _scan_marker = b'"user"'
+
     def _scan_session(self, path: Path):
-        """Full-file scan for the number of context compactions, the first
-        user message, and the text of the most-recent compaction summary.
-        Memoized by (mtime_ns, size) so a given transcript is scanned at most
-        once until it changes."""
+        """The number of context compactions, the first user message, and the
+        text of the most recent compaction summary.
+
+        A transcript only grows, so this reads what was appended since the
+        last look and adds it to what it already knows. It used to re-read the
+        whole file whenever it changed: a 245 MB transcript of a session that
+        was still working was parsed end to end for every request that named
+        it, by every request at once, until the daemon stopped answering.
+        One scan per session at a time; the others wait for its result.
+        """
         try:
             st = path.stat()
-            key = (st.st_mtime_ns, st.st_size)
         except OSError:
             return 0, "", ""
-        cached = self._scan_memo.get(path.stem)
-        if cached and cached[0] == key:
-            return cached[1]
-        compactions = 0
-        first = ""
-        last_summary = ""
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    obj = self._rec(_safe_json(line))
-                    if not obj or obj.get("type") != "user":
-                        continue
-                    if obj.get("isCompactSummary"):
-                        compactions += 1
-                        last_summary = _text_of(obj.get("message"))
-                        continue
-                    if not first:
-                        text = _human_user_text(obj)
-                        if text:
-                            first = text
-        except OSError:
-            return 0, "", ""
-        result = (compactions, first, last_summary)
-        self._scan_memo[path.stem] = (key, result)
-        return result
+        key = (st.st_mtime_ns, st.st_size)
+        with self._scan_guard:
+            lock = self._scan_locks.setdefault(path.stem, threading.Lock())
+        with lock:
+            memo = self._scan_memo.get(path.stem)
+            if memo and memo["key"] == key:
+                return memo["result"]
+            if (memo and memo["ino"] == st.st_ino
+                    and memo["offset"] <= st.st_size):
+                offset = memo["offset"]
+                compactions, first, last_summary = memo["result"]
+            else:       # new to us, or replaced / cut short: from the top
+                offset = 0
+                compactions, first, last_summary = 0, "", ""
+            try:
+                with open(path, "rb") as f:
+                    f.seek(offset)
+                    for raw in f:
+                        if not raw.endswith(b"\n"):
+                            break       # still being written: next time
+                        offset += len(raw)
+                        # Only user records count; skip the rest unparsed.
+                        if self._scan_marker and self._scan_marker not in raw:
+                            continue
+                        obj = self._rec(_safe_json(
+                            raw.decode("utf-8", errors="replace")))
+                        if not obj or obj.get("type") != "user":
+                            continue
+                        if obj.get("isCompactSummary"):
+                            compactions += 1
+                            last_summary = _text_of(obj.get("message"))
+                            continue
+                        if not first:
+                            text = _human_user_text(obj)
+                            if text:
+                                first = text
+            except OSError:
+                return 0, "", ""
+            result = (compactions, first, last_summary)
+            self._scan_memo[path.stem] = {
+                "key": key, "ino": st.st_ino, "offset": offset,
+                "result": result}
+            return result
 
     def _is_user_session(self, path: Path) -> bool:
         """True for transcripts worth showing the human.

@@ -121,6 +121,11 @@ _SESSION_TUI_STREAM = re.compile(r"^/sse/sessions/([^/]+)/tui$")
 # session id -> the runner whose TUI answered for it. A session never changes
 # harness, so this only saves probing every runner on every frame and key.
 _TUI_RUNNERS = {}
+# (account, isolate root, session id) -> (expires, may this caller see the
+# pane). The answer does not change while a pane is watched, and a polled
+# frame is asked for several times a second.
+_TUI_SCOPE = {}
+_TUI_SCOPE_TTL_S = 60.0
 # Same shape jobs.py runs as a daemon rewind.
 _TUI_REWIND_LINE = re.compile(r"^/rewind(?:\s+\d+)?$")
 _SESSION_ONE = re.compile(r"^/api/sessions/([^/]+)$")
@@ -3468,13 +3473,30 @@ class ApiHandler(BaseHTTPRequestHandler):
         )
 
     def _tui_in_scope(self, session_id: str) -> bool:
-        """Never show or drive another account's pane."""
+        """Never show or drive another account's pane.
+
+        Remembered for a minute per caller: finding the session means reading
+        its transcript, which is too much to do again for every polled frame.
+        """
+        p = self.principal
+        key = (getattr(p, "account", ""), getattr(p, "isolate_root", ""),
+               session_id)
+        now = time.time()
+        hit = _TUI_SCOPE.get(key)
+        if hit is not None and hit[0] > now:
+            return hit[1]
         sess = None
         if self.store is not None:
             sess = self.store.get_session(session_id)
         if sess is None:
             _n, _b, sess = self._find_session(session_id)
-        return sess is None or self._session_in_scope(sess)
+        if sess is None:
+            return True     # no transcript yet; not remembered
+        ok = self._session_in_scope(sess)
+        if len(_TUI_SCOPE) > 512:
+            _TUI_SCOPE.clear()
+        _TUI_SCOPE[key] = (now + _TUI_SCOPE_TTL_S, ok)
+        return ok
 
     def _handle_tui_stream(self, session_id: str, query=None):
         """GET /sse/sessions/<id>/tui — Live TUI frames, pushed when the pane
