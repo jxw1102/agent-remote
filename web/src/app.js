@@ -1891,99 +1891,197 @@ function blockedKeys() {
 }
 
 function renderStatus() {
-  renderFilters();   // the Focus chip carries the row count
-  const box = $("list-status");
-  box.textContent = "";
-  const problems = Object.entries(state.feeds).filter(([, f]) => f.error);
-  if (state.loading) {
-    box.appendChild(el("span", "spinner"));
-    box.appendChild(document.createTextNode(" Loading…"));
-  } else if (focusMode()) {
-    // Focus mode counts by state — "3 sessions" says nothing about what to do
-    // next, whereas "1 needs you" does.
-    const rows = visibleRows();
+  // What the Focus view holds, by state: "1 needs answer" says what to do
+  // next. It rides on the Focus switch (its tooltip), not on a line of its own.
+  state.focusTally = "";
+  if (focusMode() && !state.loading) {
     const tally = {};
-    rows.forEach((r) => {
+    visibleRows().forEach((r) => {
       const s = r.session.focus_state;
       if (s) tally[s] = (tally[s] || 0) + 1;
     });
-    const bits = FOCUS_STATES.filter((s) => tally[s])
-      .map((s) => `${tally[s]} ${FOCUS_LABELS[s]}`);
-    box.appendChild(document.createTextNode(
-      rows.length ? bits.join(" · ") : "Nothing in focus"));
-  } else {
-    const working = workingKeys().size;
-    const bits = [`${visibleRows().length} sessions`];
-    if (working) bits.push(`${working} working`);
-    box.appendChild(document.createTextNode(bits.join(" · ")));
+    state.focusTally = FOCUS_STATES.filter((s) => tally[s])
+      .map((s) => `${tally[s]} ${FOCUS_LABELS[s]}`).join(" · ");
   }
-  // A dead daemon must never read as "it has no sessions".
-  problems.forEach(([pid, f]) => {
-    const p = profileById(pid);
-    const line = el("div", "err", `${(p && p.name) || "Daemon"}: ${f.error}`);
-    box.appendChild(line);
-  });
+  renderFilters();
+  const box = $("list-status");
+  box.textContent = "";
+  if (state.loading) {
+    const spin = el("span", "spinner");
+    spin.setAttribute("aria-label", "Loading");
+    box.appendChild(spin);
+  }
+  // A dead daemon must never read as "it has no sessions". With several
+  // daemons the daemon button and its menu say which and why; with one there
+  // is no such button, so it is said here.
+  if (state.profiles.length < 2) {
+    Object.entries(state.feeds).filter(([, f]) => f.error).forEach(([pid, f]) => {
+      const p = profileById(pid);
+      const line = el("div", "err", `${(p && p.name) || "Daemon"}: ${f.error}`);
+      line.title = line.textContent;
+      box.appendChild(line);
+    });
+  }
 }
 
 /**
- * One chip row: the Focus toggle, then the per-daemon filters.
+ * The list is narrowed by two different questions, and each gets the control
+ * that fits it, folded into a row that was already there (the header is two
+ * rows: view and tools, then find / where / new):
  *
- * Focus rides in the same row rather than getting its own control — it is one
- * more way to narrow the same list, and a full-width switch above the row made
- * it look like a different screen.
+ *   which sessions   Focus | All     two views of one list, so a two-way
+ *                                    switch that names both
+ *   on which daemon  All daemons ▾   one button and a menu, however many
+ *                                    daemons there are
+ *
+ * They used to be one run of look-alike chips: "Focus" was a toggle that never
+ * said what the other choice was, "All" sat beside it meaning all *daemons*,
+ * and a chip per daemon wrapped onto a second row from the third daemon on.
+ *
+ * Called on every status frame, so it only touches the page when what it
+ * would draw has changed (otherwise the menu would close under the pointer).
  */
-function renderFilters() {
-  const box = $("filters");
-  box.textContent = "";
+let filtersDrawn = "";
 
-  // Focus toggle. Always present (a single-daemon setup still wants it), and
-  // the count only shows while Focus is on, where it means "rows below".
-  if (state.profiles.some((p) => focusCapable(p))) {
-    const n = (focusMode() && state.rowsFocus && !state.loading)
-      ? visibleRows().length : 0;
-    const chip = el("button", "chip chip-focus");
-    chip.type = "button";
-    chip.setAttribute("aria-pressed", String(focusMode()));
-    chip.title = focusMode()
-      ? "Showing only the projects you are carrying"
-      : "Show only the projects you are carrying";
-    chip.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none"'
-      + ' stroke="currentColor" stroke-width="2.2" stroke-linecap="round"'
-      + ' stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg>';
-    chip.appendChild(document.createTextNode(n ? `Focus · ${n}` : "Focus"));
-    chip.addEventListener("click", () => setFocusMode(!focusMode()));
-    box.appendChild(chip);
+function renderFilters() {
+  const box = $("filters");          // row 1: Focus | All
+  const dbox = $("filter-daemon");   // row 2, beside the search field
+  const focusOn = focusMode();
+  const hasFocus = state.profiles.some((p) => focusCapable(p));
+  // How many sessions are being carried. Only the Focus fetch knows: the
+  // other view is a page of the newest sessions, which holds some of them.
+  let carried = 0;
+  if (hasFocus && focusOn && state.rowsFocus && !state.loading) {
+    carried = visibleRows().length;
+  }
+  const picked = state.filter ? profileById(state.filter) : null;
+  if (state.filter && !picked) state.filter = null;   // that daemon was removed
+  const daemons = state.profiles.length >= 2 ? state.profiles.map((p) => {
+    const feed = state.feeds[p.id];
+    return [p.id, p.name || p.baseUrl, profileHostAccent(p), (feed && feed.error) || "",
+            connOf(p.id), p.host || "", p.version || ""];
+  }) : [];
+  const sig = JSON.stringify([hasFocus, focusOn, carried, state.focusTally || "",
+                              state.filter, daemons]);
+  if (sig === filtersDrawn) return;
+  filtersDrawn = sig;
+  const menuWasOpen = !!dbox.querySelector(".filter-pop");
+  box.textContent = "";
+  dbox.textContent = "";
+
+  if (hasFocus) {
+    const seg = el("div", "seg");
+    seg.setAttribute("role", "group");
+    seg.setAttribute("aria-label", "Which sessions to list");
+    const mk = (label, on, title, count) => {
+      const b = el("button", "seg-opt", label);
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(on));
+      b.title = title;
+      if (count) b.appendChild(el("span", "seg-count", String(count)));
+      return b;
+    };
+    const f = mk("Focus", focusOn, "Only the sessions you are carrying"
+      + (focusOn ? `\n${carried ? carried + " in focus: " : ""}${state.focusTally || "Nothing in focus"}` : ""), carried);
+    const a = mk("All", !focusOn, "Every session, newest first", 0);
+    f.addEventListener("click", () => { if (!focusMode()) setFocusMode(true); });
+    a.addEventListener("click", () => { if (focusMode()) setFocusMode(false); });
+    seg.append(f, a);
+    box.appendChild(seg);
   }
 
-  if (state.profiles.length < 2) return;
-  const mk = (label, id, accent) => {
-    const b = el("button", "chip", label);
-    b.type = "button";
-    b.setAttribute("aria-pressed", String(state.filter === id));
-    if (accent) {
-      b.style.setProperty("--chip", accent);
-      b.style.setProperty("--chip-soft", accent + "24");
-    }
-    b.addEventListener("click", () => {
-      state.filter = state.filter === id ? null : id;
-      renderFilters();
-      renderSessions();
-      renderStatus();
-    });
-    return b;
+  if (!daemons.length) return;
+  const broken = daemons.filter((d) => d[3]).length;
+  const btn = el("button", "chip chip-daemon");
+  btn.type = "button";
+  btn.setAttribute("aria-haspopup", "true");
+  btn.setAttribute("aria-expanded", "false");
+  if (picked) {
+    btn.style.setProperty("--chip", profileHostAccent(picked));
+    btn.style.setProperty("--chip-soft", profileHostAccent(picked) + "24");
+    btn.setAttribute("aria-pressed", "true");
+  }
+  if (picked) {
+    btn.appendChild(el("span", "chip-daemon-name", picked.name || picked.baseUrl));
+  } else {
+    // Every daemon: a funnel, not words — this sits beside the search field.
+    const ico = el("span", "chip-daemon-ico");
+    ico.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none"'
+      + ' stroke="currentColor" stroke-width="1.9" stroke-linecap="round"'
+      + ' stroke-linejoin="round"><path d="M4 6h16l-6 7v5l-4 2v-7z"/></svg>';
+    btn.appendChild(ico);
+  }
+  btn.setAttribute("aria-label", picked
+    ? `Showing ${picked.name || picked.baseUrl} only — choose a daemon`
+    : "Showing every daemon — choose one");
+  if (broken) {
+    const warn = el("span", "chip-daemon-warn");
+    warn.title = broken === 1 ? "One daemon cannot be reached" : `${broken} daemons cannot be reached`;
+    warn.setAttribute("aria-label", warn.title);
+    btn.appendChild(warn);
+  }
+  btn.appendChild(el("span", "chip-caret", "▾"));
+  btn.title = picked ? `Only ${picked.name || picked.baseUrl} — choose a daemon`
+                     : "Every daemon — choose one";
+  dbox.appendChild(btn);
+
+  const closeMenu = () => {
+    const pop = dbox.querySelector(".filter-pop");
+    if (pop) pop.remove();
+    btn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("click", onOutside, true);
+    document.removeEventListener("keydown", onKey, true);
   };
-  box.appendChild(mk("All", null, null));
-  state.profiles.forEach((p) => {
-    const b = mk(p.name || p.baseUrl, p.id, profileHostAccent(p));
-    const feed = state.feeds[p.id];
-    if (feed && feed.error) {
-      b.classList.add("chip-error");
-      b.title = feed.error;
-    } else if (p.host) {
-      b.title = p.host + (p.version ? ` · v${p.version}` : "");
-    }
-    box.appendChild(b);
+  const onOutside = (e) => { if (!dbox.contains(e.target)) closeMenu(); };
+  const onKey = (e) => {
+    if (e.key !== "Escape") return;
+    e.stopPropagation();
+    closeMenu();
+    btn.focus();
+  };
+  const pick = (id) => {
+    state.filter = id;
+    closeMenu();
+    renderStatus();     // redraws this row
+    renderSessions();
+    dbox.querySelector(".chip-daemon")?.focus();
+  };
+  const openMenu = ({ focus = true } = {}) => {
+    const pop = el("div", "filter-pop");
+    pop.setAttribute("role", "menu");
+    const item = (id, name, accent, hint, bad) => {
+      const o = el("button", "pop-opt filter-opt");
+      o.type = "button";
+      o.setAttribute("role", "menuitemradio");
+      o.setAttribute("aria-checked", String((state.filter || null) === id));
+      o.setAttribute("aria-selected", String((state.filter || null) === id));
+      const main = el("span", "pop-main");
+      const dot = el("span", "filter-dot");
+      if (accent) dot.style.background = accent;
+      main.append(dot, document.createTextNode(name));
+      o.appendChild(main);
+      if (hint) o.appendChild(el("span", bad ? "pop-hint filter-bad" : "pop-hint", hint));
+      o.addEventListener("click", () => pick(id));
+      return o;
+    };
+    pop.appendChild(item(null, "All daemons", "", "", false));
+    daemons.forEach(([id, name, accent, error, conn, host, version]) => {
+      const hint = error
+        || [conn === "live" ? "" : CONN_TEXT[conn] || conn, host, version ? "v" + version : ""]
+          .filter(Boolean).join(" · ");
+      pop.appendChild(item(id, name, accent, hint, !!error));
+    });
+    dbox.appendChild(pop);
+    btn.setAttribute("aria-expanded", "true");
+    document.addEventListener("click", onOutside, true);
+    document.addEventListener("keydown", onKey, true);
+    if (focus) (pop.querySelector('[aria-checked="true"]') || pop.firstChild).focus();
+  };
+  btn.addEventListener("click", () => {
+    if (dbox.querySelector(".filter-pop")) closeMenu(); else openMenu();
   });
+  // A daemon came or went while the menu was open: draw it again, open.
+  if (menuWasOpen) openMenu({ focus: false });
 }
 
 /**
@@ -2123,8 +2221,16 @@ function renderSessions() {
       : "Daemon profile";
     meta.appendChild(hostTag);
     const folder = String(row.session.cwd || "").replace(/\/+$/, "").split("/").pop();
-    if (folder) meta.appendChild(el("span", "tag", folder));
-    if (row.session.git_branch) meta.appendChild(el("span", "tag", "⑂ " + row.session.git_branch));
+    if (folder) {
+      const f = el("span", "row-folder", folder);
+      f.title = row.session.cwd;
+      meta.appendChild(f);
+    }
+    if (row.session.git_branch) {
+      const br = el("span", "row-branch", "⑂ " + row.session.git_branch);
+      br.title = "Branch " + row.session.git_branch;
+      meta.appendChild(br);
+    }
     // The daemon's word for it, so the list, Focus and every other client agree.
     if (blocked.has(key)) meta.appendChild(el("span", "tag waiting", FOCUS_LABELS.needs_answer));
     // Focus state tag. Same row layout as any other session — one more chip.
@@ -2145,8 +2251,10 @@ function renderSessions() {
       meta.appendChild(tag);
     }
     if (row.session.id) {
-      // Full id when space allows (CSS ellipsis); click copies without opening.
-      const idTag = el("button", "tag session-id-tag", row.session.id);
+      // Enough of the id to tell two sessions apart; the tooltip has all of
+      // it and a click copies all of it, without opening the session.
+      const idTag = el("button", "tag session-id-tag", String(row.session.id).slice(0, 8));
+      idTag.setAttribute("aria-label", "Copy session id " + row.session.id);
       idTag.type = "button";
       idTag.title = `Copy session id\n${row.session.id}`;
       idTag.addEventListener("click", (e) => {
@@ -2166,7 +2274,10 @@ function renderSessions() {
     const preview = listPreview(row.session, state.query);
     if (preview) {
       const box = el("div", "row-preview");
-      highlightInto(box, String(preview).replace(/\s+/g, " ").trim(), state.query);
+      // One line of what was last said, as prose: the markdown marks of a
+      // reply ("**Progress:**") are noise at this size.
+      highlightInto(box, String(preview).replace(/\*\*|__|`/g, "")
+        .replace(/\s+/g, " ").trim(), state.query);
       btn.appendChild(box);
     }
 

@@ -13,6 +13,7 @@
   <!-- Left: every daemon's sessions in one list. -->
   <aside class="pane-list">
     <header class="list-head">
+      <div class="head-row">
       <div class="brand">
         <svg class="logo" viewBox="0 0 108 108" aria-hidden="true">
           <path d="M34 40 L48 54 L34 68" stroke="#d97757" stroke-width="7"
@@ -20,21 +21,53 @@
           <path d="M56 68 L76 68" stroke="#00d4ff" stroke-width="7"
                 stroke-linecap="round"/>
         </svg>
-        <span>Agent Remote</span>
       </div>
-      <div class="head-actions">
-        <button id="btn-new" class="primary" type="button">New session</button>
-        <button id="btn-inbox" type="button" title="Files from host">Inbox</button>
-        <button id="btn-usage" type="button" title="Subscription usage">Usage</button>
-        <button id="btn-profiles" type="button" title="Daemons">Daemons</button>
-        <button id="btn-sound" type="button" title="Sound cues" aria-pressed="true">♪</button>
+      <!-- Row 1: which sessions (Focus | All, renderFilters), then the places
+           you visit now and then. The mark shows when there is room. -->
+        <div id="filters" class="filters"></div>
+        <div id="list-status" class="list-status" role="status"></div>
+        <div class="head-tools">
+          <button id="btn-inbox" class="icon-btn" type="button"
+                  title="Inbox — files from the host" aria-label="Inbox">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+                 stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+                 stroke-linejoin="round">
+              <path d="M4 13l2.5-7h11L20 13v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/>
+              <path d="M4 13h4.5a3.5 3.5 0 0 0 7 0H20"/>
+            </svg>
+          </button>
+          <button id="btn-usage" class="icon-btn" type="button"
+                  title="Subscription usage" aria-label="Usage">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                 stroke-linejoin="round">
+              <path d="M5 20V11M12 20V4M19 20v-6"/>
+            </svg>
+          </button>
+          <button id="btn-profiles" class="icon-btn" type="button"
+                  title="Daemons" aria-label="Daemons">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+                 stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+                 stroke-linejoin="round">
+              <rect x="4" y="4" width="16" height="7" rx="1.5"/>
+              <rect x="4" y="13" width="16" height="7" rx="1.5"/>
+              <path d="M8 7.5h.01M8 16.5h.01"/>
+            </svg>
+          </button>
+          <button id="btn-sound" class="icon-btn" type="button" title="Sound cues"
+                  aria-label="Sound cues" aria-pressed="true">♪</button>
+        </div>
       </div>
-      <input id="search" class="search" type="search"
-             placeholder="Search titles and messages…"
-             autocomplete="off" spellcheck="false">
-      <!-- Focus toggle + per-daemon chips, one row (renderFilters). -->
-      <div id="filters" class="filters"></div>
-      <div id="list-status" class="list-status"></div>
+      <!-- Row 2: find one, on which daemon, or start one. -->
+      <div class="head-row head-row-find">
+        <input id="search" class="search" type="search"
+               placeholder="Search…" aria-label="Search titles and messages"
+               autocomplete="off" spellcheck="false">
+        <div id="filter-daemon" class="filter-daemon"></div>
+        <button id="btn-new" class="primary" type="button" title="New session"
+                aria-label="New session"><span class="new-long">New session</span><span
+                class="new-short">New</span></button>
+      </div>
     </header>
     <div id="sessions" class="sessions" tabindex="0"></div>
     <!-- Is what the list shows live? One line, per daemon when it is not. -->
