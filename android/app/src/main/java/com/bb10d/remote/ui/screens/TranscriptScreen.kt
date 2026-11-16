@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Difference
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
 import androidx.compose.material.icons.outlined.Refresh
@@ -159,6 +160,7 @@ private fun TranscriptScreenBody(
     val openSteps by vm.openSteps.collectAsStateWithLifecycle()
     val share by vm.share.collectAsStateWithLifecycle()
     val hostFile by vm.hostFile.collectAsStateWithLifecycle()
+    val changes by vm.changes.collectAsStateWithLifecycle()
     var menuOpen by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showOptions by remember { mutableStateOf(false) }
@@ -352,6 +354,20 @@ private fun TranscriptScreenBody(
                                         onClick = {
                                             menuOpen = false
                                             vm.shareSession()
+                                        },
+                                    )
+                                }
+                                // Only where it can work: a daemon that has
+                                // the route, and a session with a folder.
+                                if (profile?.caps?.changes == true &&
+                                    !session?.cwd.isNullOrBlank() && ref.sessionId.isNotEmpty()
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Changes") },
+                                        leadingIcon = { Icon(Icons.Outlined.Difference, null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            vm.openChanges()
                                         },
                                     )
                                 }
@@ -565,6 +581,24 @@ private fun TranscriptScreenBody(
                 onClose = { showQueue = false },
             )
         }
+    }
+
+    if (changes.open) {
+        ModalBottomSheet(
+            onDismissRequest = vm::closeChanges,
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
+            ChangesSheet(
+                ui = changes,
+                onRefresh = vm::loadChanges,
+                onCommit = vm::commitChanges,
+                onPush = vm::pushChanges,
+            )
+        }
+    }
+    // The turn is over: what it changed is worth a fresh look.
+    LaunchedEffect(jobState.running) {
+        if (!jobState.running && changes.open) vm.loadChanges()
     }
 
     if (showOptions) {

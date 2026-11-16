@@ -1,0 +1,345 @@
+package com.bb10d.remote.ui.screens
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.bb10d.remote.data.ChangedFileDto
+import com.bb10d.remote.data.ChangesDto
+import com.bb10d.remote.ui.components.Hairline
+import com.bb10d.remote.ui.theme.MonoStyle
+import com.bb10d.remote.ui.theme.palette
+
+// What the agent changed, before you answer it: the session folder's working
+// tree against its last commit (daemon 2.24). Read-only on the daemon; commit
+// and push are explicit actions here, run through the same shell route as a
+// "!command". The web client's Changes pane is the same view.
+
+/** One row of the list under the file summary. */
+internal sealed interface DiffRow {
+    data class File(val path: String) : DiffRow
+    data class Line(val text: String, val kind: Char) : DiffRow
+}
+
+/**
+ * A unified diff as rows: a header per file, then its lines tagged
+ * '+' added, '-' removed, '@' hunk, 'm' metadata, ' ' context.
+ */
+internal fun diffRows(diff: String): List<DiffRow> {
+    val out = ArrayList<DiffRow>()
+    var inFile = false
+    for (line in diff.split('\n')) {
+        if (line.startsWith("diff --git ")) {
+            val path = Regex("^diff --git a/(.*) b/(.*)$").find(line)?.groupValues?.get(2)
+                ?: line.removePrefix("diff --git ")
+            out += DiffRow.File(path)
+            inFile = true
+            continue
+        }
+        if (!inFile) continue
+        if (HIDDEN_META.any { line.startsWith(it) }) continue
+        val kind = when {
+            line.startsWith("@@") -> '@'
+            line.startsWith("+++") || line.startsWith("---") -> 'm'
+            line.startsWith("+") -> '+'
+            line.startsWith("-") -> '-'
+            line.startsWith(" ") || line.isEmpty() -> ' '
+            else -> 'm'
+        }
+        out += DiffRow.Line(line, kind)
+    }
+    // A trailing newline in the diff is not a line of it.
+    if ((out.lastOrNull() as? DiffRow.Line)?.text?.isEmpty() == true) out.removeAt(out.lastIndex)
+    return out
+}
+
+private val HIDDEN_META = listOf(
+    "index ", "similarity index ", "new file mode", "deleted file mode", "old mode", "new mode",
+)
+
+internal fun changesSummary(d: ChangesDto): String = buildList {
+    add(d.branch.ifBlank { "detached" })
+    if (d.ahead > 0) add("↑${d.ahead}")
+    if (d.behind > 0) add("↓${d.behind}")
+    add(
+        if (d.files.isEmpty()) "no changes"
+        else "${d.files.size} ${if (d.files.size == 1) "file" else "files"} · +${d.added} −${d.removed}",
+    )
+}.joinToString(" · ")
+
+@Composable
+internal fun ChangesSheet(
+    ui: TranscriptViewModel.ChangesUi,
+    onRefresh: () -> Unit,
+    onCommit: (String) -> Unit,
+    onPush: () -> Unit,
+) {
+    val pal = palette
+    val data = ui.data
+    var message by remember { mutableStateOf("") }
+    var confirmPush by remember { mutableStateOf(false) }
+    val rows = remember(data?.diff) { diffRows(data?.diff.orEmpty()) }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .imePadding(),
+    ) {
+        Row(
+            Modifier.padding(start = 16.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Changes",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.semantics { heading() },
+                )
+                if (data != null && data.repo) {
+                    Text(
+                        changesSummary(data),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = pal.dim,
+                    )
+                }
+            }
+            if (ui.loading || ui.busy) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+            }
+            TextButton(onClick = onRefresh, enabled = !ui.loading && !ui.busy) { Text("Refresh") }
+        }
+        Hairline()
+
+        LazyColumn(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f, fill = false)
+                .heightIn(min = 120.dp),
+        ) {
+            if (ui.output.isNotEmpty()) {
+                item(key = "output") {
+                    Text(
+                        ui.output,
+                        style = MonoStyle.copy(fontSize = 12.sp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(pal.codeBg)
+                            .padding(10.dp),
+                    )
+                }
+            }
+            when {
+                ui.error != null -> item(key = "error") { Note(ui.error, pal.danger) }
+                data == null -> item(key = "wait") { Note("Reading the working tree…", pal.dim) }
+                !data.repo -> item(key = "norepo") {
+                    Note(
+                        "This session's folder is not a git repository, so there is " +
+                            "nothing to compare with.",
+                        pal.dim,
+                    )
+                }
+                data.files.isEmpty() -> item(key = "clean") {
+                    Note(
+                        "Nothing differs from the last commit." + when (data.ahead) {
+                            0 -> ""
+                            1 -> " 1 commit is not pushed yet."
+                            else -> " ${data.ahead} commits are not pushed yet."
+                        },
+                        pal.dim,
+                    )
+                }
+                else -> {
+                    items(data.files, key = { "f:" + it.path }) { FileRow(it) }
+                    if (data.moreFiles > 0) {
+                        item(key = "more") { Note("…and ${data.moreFiles} more files not listed.", pal.dim) }
+                    }
+                    item(key = "gap") { Spacer(Modifier.height(8.dp)) }
+                    items(rows.size, key = { "d:$it" }) { index ->
+                        when (val row = rows[index]) {
+                            is DiffRow.File -> Text(
+                                row.path,
+                                style = MonoStyle.copy(fontSize = 12.sp),
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 10.dp)
+                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                                    .semantics { heading() },
+                            )
+                            is DiffRow.Line -> Text(
+                                row.text.ifEmpty { " " },
+                                style = MonoStyle.copy(fontSize = 12.sp),
+                                color = when (row.kind) {
+                                    '@', 'm' -> pal.dim
+                                    else -> MaterialTheme.colorScheme.onSurface
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        when (row.kind) {
+                                            '+' -> pal.ok.copy(alpha = 0.16f)
+                                            '-' -> pal.danger.copy(alpha = 0.16f)
+                                            else -> androidx.compose.ui.graphics.Color.Transparent
+                                        },
+                                    )
+                                    .padding(horizontal = 12.dp),
+                            )
+                        }
+                    }
+                    if (data.truncated) {
+                        item(key = "cut") {
+                            Note(
+                                "The diff is too long to show in full. The file list above is complete.",
+                                pal.dim,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Git actions. Each one says what it will do.
+        if (data != null && data.repo && (data.files.isNotEmpty() || data.ahead > 0 || data.upstream.isEmpty())) {
+            Hairline()
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                if (data.files.isNotEmpty()) {
+                    OutlinedTextField(
+                        value = message,
+                        onValueChange = { message = it },
+                        label = { Text("Commit message") },
+                        maxLines = 3,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "Commit stages all ${data.files.size} changed " +
+                            "${if (data.files.size == 1) "file" else "files"} on " +
+                            "${data.branch.ifBlank { "this branch" }}.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = pal.dim,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (data.ahead > 0 || data.upstream.isEmpty()) {
+                        TextButton(onClick = { confirmPush = true }, enabled = !ui.busy) {
+                            Text(if (data.upstream.isEmpty()) "Publish branch" else "Push ${data.ahead}")
+                        }
+                    }
+                    if (data.files.isNotEmpty()) {
+                        TextButton(
+                            onClick = {
+                                onCommit(message)
+                                message = ""
+                            },
+                            enabled = message.isNotBlank() && !ui.busy,
+                        ) { Text("Commit") }
+                    }
+                }
+            }
+        }
+    }
+
+    if (confirmPush && data != null) {
+        val where = data.upstream.ifEmpty { "origin" }
+        AlertDialog(
+            onDismissRequest = { confirmPush = false },
+            title = { Text("Push ${data.branch.ifBlank { "this branch" }} to $where?") },
+            text = { Text("Others will see these commits.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmPush = false
+                    onPush()
+                }) { Text("Push") }
+            },
+            dismissButton = { TextButton(onClick = { confirmPush = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+@Composable
+private fun Note(text: String, color: androidx.compose.ui.graphics.Color) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = color,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp),
+    )
+}
+
+@Composable
+private fun FileRow(file: ChangedFileDto) {
+    val pal = palette
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            if (file.from.isNotEmpty()) "${file.from} → ${file.path}" else file.path,
+            style = MonoStyle.copy(fontSize = 12.sp),
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            file.status,
+            style = MaterialTheme.typography.labelSmall,
+            color = when (file.status) {
+                "deleted", "conflicted" -> pal.danger
+                "added", "untracked" -> pal.ok
+                else -> pal.dim
+            },
+        )
+        if (file.binary) {
+            Spacer(Modifier.width(8.dp))
+            Text("binary", style = MaterialTheme.typography.labelSmall, color = pal.dim)
+        } else if (file.added > 0 || file.removed > 0) {
+            Spacer(Modifier.width(8.dp))
+            Text("+${file.added}", style = MonoStyle.copy(fontSize = 11.sp), color = pal.ok)
+            Spacer(Modifier.width(4.dp))
+            Text("−${file.removed}", style = MonoStyle.copy(fontSize = 11.sp), color = pal.danger)
+        }
+    }
+}

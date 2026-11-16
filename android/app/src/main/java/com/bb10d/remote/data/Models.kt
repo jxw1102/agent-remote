@@ -171,6 +171,8 @@ data class PingDto(
     val share: Boolean = false,
     /** GET /api/sessions/<id>/file — host files the agent linked (≥ 2.20). */
     @SerialName("linked_files") val linkedFiles: Boolean = false,
+    /** GET /api/sessions/<id>/changes — working-tree changes (≥ 2.24). */
+    val changes: Boolean = false,
     /** 1: Live TUI frames pushed over SSE (agentremoted ≥ 2.22); 0: poll. */
     @SerialName("tui_stream") val tuiStream: Int = 0,
     /** Chunked POST /api/attachments (agentremoted ≥ 2.8.6). */
@@ -535,6 +537,37 @@ data class ShellResultDto(
     val cwd: String = "",
 )
 
+/** One changed file in [ChangesDto]. */
+@Serializable
+data class ChangedFileDto(
+    val path: String = "",
+    val status: String = "",
+    val staged: Boolean = false,
+    val added: Int = 0,
+    val removed: Int = 0,
+    val binary: Boolean = false,
+    val from: String = "",
+)
+
+/** GET /api/sessions/<id>/changes: the session folder against its last commit. */
+@Serializable
+data class ChangesDto(
+    val ok: Boolean = false,
+    val repo: Boolean = false,
+    val cwd: String = "",
+    val root: String = "",
+    val branch: String = "",
+    val upstream: String = "",
+    val ahead: Int = 0,
+    val behind: Int = 0,
+    val files: List<ChangedFileDto> = emptyList(),
+    @SerialName("more_files") val moreFiles: Int = 0,
+    val added: Int = 0,
+    val removed: Int = 0,
+    val diff: String = "",
+    val truncated: Boolean = false,
+)
+
 @Serializable
 data class ErrorDto(val error: String = "")
 
@@ -603,6 +636,8 @@ data class Caps(
     val share: Boolean = false,
     /** Host files the agent linked (agentremoted >= 2.20). */
     val linkedFiles: Boolean = false,
+    /** The Changes view (agentremoted >= 2.24). */
+    val changes: Boolean = false,
     /** Live TUI frames are pushed, not polled (agentremoted >= 2.22). */
     val tuiStream: Boolean = false,
     /** Chunked attachments (agentremoted >= 2.8.6). */
@@ -748,6 +783,7 @@ data class Caps(
             focus = ping.focus,
             share = ping.share,
             linkedFiles = ping.linkedFiles,
+            changes = ping.changes,
             tuiStream = ping.tuiStream > 0 || ping.caps["tui_stream"] == true,
             chunkedUpload = ping.chunkedUpload || ping.caps["chunked_upload"] == true,
             maxUploadMb = ping.maxUploadMb.takeIf { it > 0 } ?: 16,

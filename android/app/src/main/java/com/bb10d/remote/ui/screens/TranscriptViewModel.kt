@@ -994,6 +994,78 @@ class TranscriptViewModel(
         _share.value = ShareUi()
     }
 
+    // -- changes: the session folder against its last commit ---------------
+
+    /** [output] is what the last git action printed; [busy] while one runs. */
+    data class ChangesUi(
+        val open: Boolean = false,
+        val loading: Boolean = false,
+        val data: com.bb10d.remote.data.ChangesDto? = null,
+        val error: String? = null,
+        val output: String = "",
+        val busy: Boolean = false,
+    )
+
+    private val _changes = MutableStateFlow(ChangesUi())
+    val changes: StateFlow<ChangesUi> = _changes.asStateFlow()
+
+    fun openChanges() {
+        _changes.value = ChangesUi(open = true)
+        loadChanges()
+    }
+
+    fun closeChanges() {
+        _changes.value = ChangesUi()
+    }
+
+    fun loadChanges() {
+        val c = client ?: return
+        val sid = _ref.value.sessionId
+        if (sid.isEmpty() || !_changes.value.open) return
+        _changes.value = _changes.value.copy(loading = true, error = null)
+        viewModelScope.launch {
+            val result = runCatching { c.changes(sid) }
+            if (!_changes.value.open) return@launch
+            _changes.value = result.fold(
+                onSuccess = { _changes.value.copy(loading = false, data = it) },
+                onFailure = { _changes.value.copy(loading = false, error = repo.reason(it)) },
+            )
+        }
+    }
+
+    /** Stage everything listed and commit it with [message]. */
+    fun commitChanges(message: String) {
+        val text = message.trim()
+        if (text.isEmpty()) return
+        // Single-quoted for the shell: the message is data, never syntax.
+        runGit("git add -A && git commit -m '" + text.replace("'", "'\\''") + "'", "git add -A && git commit")
+    }
+
+    /** Push; publishes the branch to origin when it has no upstream yet. */
+    fun pushChanges() {
+        val command = if (_changes.value.data?.upstream.isNullOrEmpty()) "git push -u origin HEAD" else "git push"
+        runGit(command, command)
+    }
+
+    private fun runGit(command: String, shown: String) {
+        val c = client ?: return
+        if (_changes.value.busy) return
+        val cwd = _changes.value.data?.root?.ifEmpty { null } ?: _session.value?.cwd.orEmpty()
+        _changes.value = _changes.value.copy(busy = true)
+        viewModelScope.launch {
+            val output = runCatching { c.shell(command, _ref.value.sessionId, cwd) }.fold(
+                onSuccess = {
+                    "$ $shown\n" + it.output.trim().ifEmpty { "(no output)" } +
+                        if (it.exitCode != 0) "\n(exit code ${it.exitCode})" else ""
+                },
+                onFailure = { "$ $shown\n" + repo.reason(it) },
+            )
+            if (!_changes.value.open) return@launch
+            _changes.value = _changes.value.copy(busy = false, output = output)
+            loadChanges()
+        }
+    }
+
     private val _hostFile = MutableStateFlow(HostFileUi())
     val hostFile: StateFlow<HostFileUi> = _hostFile.asStateFlow()
 
