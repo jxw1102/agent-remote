@@ -164,6 +164,11 @@ class TranscriptViewModel(
         byProfile[ref.profileId]?.firstOrNull { it.sessionIds().contains(ref.sessionId) }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    /** This session's daemon: is the live connection up? */
+    val conn: StateFlow<com.bb10d.remote.data.ConnState?> = combine(repo.conn, _ref) { byProfile, ref ->
+        byProfile[ref.profileId]
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, repo.conn.value[initialRef.profileId])
+
     /** Process view for THIS session (persisted per session, like web). */
     val processView: StateFlow<Boolean> = combine(repo.settings, _ref) { s, ref ->
         ref.sessionId.isNotEmpty() && ref.sessionId in s.processViewSessions

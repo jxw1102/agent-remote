@@ -13,6 +13,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import com.bb10d.remote.data.ConnState
+import com.bb10d.remote.ui.components.connLabel
+import com.bb10d.remote.ui.components.connTint
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -107,6 +115,7 @@ fun SessionsScreen(
     val profileFilter by vm.profileFilter.collectAsStateWithLifecycle()
     val projectFilter by vm.projectFilter.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
+    val conn by vm.conn.collectAsStateWithLifecycle()
 
     var searching by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
@@ -205,6 +214,12 @@ fun SessionsScreen(
                 Hairline()
             }
         },
+        bottomBar = {
+            ConnLine(
+                daemons = profileState.enabled.map { it.displayName to conn[it.id] },
+                onRetry = vm::retryConnections,
+            )
+        },
         floatingActionButton = {
             if (profileState.enabled.isNotEmpty()) {
                 ExtendedFloatingActionButton(
@@ -293,6 +308,75 @@ fun SessionsScreen(
 
     LaunchedEffect(rows.size) {
         if (listState.firstVisibleItemIndex <= 1) listState.animateScrollToItem(0)
+    }
+}
+
+/**
+ * Is what the list shows live? One line under the list: "Live" when every
+ * daemon is connected, otherwise each one that is not, by name, with Retry.
+ * Words as well as colour.
+ */
+@Composable
+private fun ConnLine(daemons: List<Pair<String, ConnState?>>, onRetry: () -> Unit) {
+    if (daemons.isEmpty()) return
+    val pal = palette
+    val notLive = daemons.filter { it.second != ConnState.LIVE }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.background)
+            .navigationBarsPadding(),
+    ) {
+        Hairline()
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 4.dp)
+                .semantics { liveRegion = LiveRegionMode.Polite },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val items: List<Pair<String, ConnState?>> = if (notLive.isEmpty()) {
+                listOf(
+                    (if (daemons.size > 1) "Live · ${daemons.size} daemons" else "Live") to
+                        ConnState.LIVE,
+                )
+            } else {
+                notLive.map { (name, state) ->
+                    val words = connLabel(state)
+                    (if (daemons.size > 1) "$name $words"
+                    else words.replaceFirstChar { it.uppercase() }) to state
+                }
+            }
+            Row(
+                Modifier
+                    .weight(1f)
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                items.take(3).forEachIndexed { index, (text, state) ->
+                    if (index > 0) Spacer(Modifier.width(12.dp))
+                    val tint = connTint(state)
+                    Box(
+                        Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(tint),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (state == ConnState.LIVE) pal.dim else tint,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
+            }
+            if (notLive.any { it.second == ConnState.OFFLINE || it.second == ConnState.RECONNECTING }) {
+                TextButton(onClick = onRetry) { Text("Retry") }
+            }
+        }
     }
 }
 

@@ -30,6 +30,7 @@ class SessionsViewModel(val repo: AgentRepository) : ViewModel() {
     val workingKeys = repo.workingKeys
     val blockedKeys = repo.blockedKeys
     val streamsUp = repo.streamsUp
+    val conn = repo.conn
 
     private val _query = MutableStateFlow("")
     val query: StateFlow<String> = _query.asStateFlow()
@@ -164,6 +165,12 @@ class SessionsViewModel(val repo: AgentRepository) : ViewModel() {
             repo.pingAll()
             repo.refreshSessions(_query.value.trim())
         }
+    }
+
+    /** Retry on the connection line: reconnect, then re-list. */
+    fun retryConnections() {
+        repo.reconnectNow()
+        refreshEverything()
     }
 
     fun touch(ref: SessionRef) {

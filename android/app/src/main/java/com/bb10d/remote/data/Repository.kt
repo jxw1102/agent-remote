@@ -8,6 +8,7 @@ import com.bb10d.remote.net.LinkedFile
 import com.bb10d.remote.net.StatusStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -69,6 +70,12 @@ data class SessionsState(
         get() = feeds.values.mapNotNull { f -> f.error?.let { f.profileId to it } }
 }
 
+/** A profile's status stream, as the user should think of it. */
+enum class ConnState { CONNECTING, LIVE, RECONNECTING, OFFLINE }
+
+/** How long the last known state is trusted while a stream reconnects. */
+private const val CONN_GRACE_MS = 15_000L
+
 /**
  * The app's single source of truth.
  *
@@ -106,6 +113,54 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
     /** Profiles whose status stream is currently connected. */
     private val _streamsUp = MutableStateFlow<Set<String>>(emptySet())
     val streamsUp: StateFlow<Set<String>> = _streamsUp.asStateFlow()
+
+    /**
+     * Where each profile's status stream stands. A drop used to blank every
+     * "working" mark at once and say nothing, so a turn that was still
+     * running looked finished (and could raise a "finished" notification).
+     */
+    private val _conn = MutableStateFlow<Map<String, ConnState>>(emptyMap())
+    val conn: StateFlow<Map<String, ConnState>> = _conn.asStateFlow()
+    private val connGrace = ConcurrentHashMap<String, Job>()
+
+    private fun setConn(id: String, next: ConnState) {
+        if (_conn.value[id] == next) return
+        connGrace.remove(id)?.cancel()
+        _conn.value = _conn.value + (id to next)
+        _streamsUp.value =
+            if (next == ConnState.LIVE) _streamsUp.value + id else _streamsUp.value - id
+        when (next) {
+            // Keep showing what was last known while the stream retries,
+            // but not for ever.
+            ConnState.CONNECTING, ConnState.RECONNECTING -> {
+                connGrace[id] = scope.launch {
+                    delay(CONN_GRACE_MS)
+                    connGrace.remove(id)
+                    if (_conn.value[id] != ConnState.LIVE) setConn(id, ConnState.OFFLINE)
+                }
+            }
+            ConnState.OFFLINE -> _active.value = _active.value + (id to emptyList())
+            ConnState.LIVE -> Unit
+        }
+    }
+
+    private fun forgetConn(id: String) {
+        connGrace.remove(id)?.cancel()
+        _conn.value = _conn.value - id
+        _streamsUp.value = _streamsUp.value - id
+    }
+
+    /** Reconnect every daemon that is not live, now (the Retry button). */
+    fun reconnectNow() {
+        profiles.value.enabled.forEach { profile ->
+            if (_conn.value[profile.id] == ConnState.LIVE) return@forEach
+            streams.remove(profile.id)?.cancel()
+            streamTags.remove(profile.id)
+            connGrace.remove(profile.id)?.cancel()
+            _conn.value = _conn.value + (profile.id to ConnState.CONNECTING)
+        }
+        syncStreams()
+    }
 
     /** Emitted when a watched job ends, so notifications can fire once. */
     val jobEnded = MutableSharedFlow<JobEndNotice>(extraBufferCapacity = 16)
@@ -395,7 +450,7 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
             if (!wanted.containsKey(id)) {
                 streams.remove(id)?.cancel()
                 _active.value = _active.value - id
-                _streamsUp.value = _streamsUp.value - id
+                forgetConn(id)
             }
         }
         wanted.values.forEach { profile ->
@@ -405,12 +460,17 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
             streams.remove(profile.id)?.cancel()
             lastSessionsRev.remove(profile.id)
             streamTags[profile.id] = tag
+            if (_conn.value[profile.id] != ConnState.OFFLINE) {
+                // Forces the grace timer to start even if the state is unchanged.
+                _conn.value = _conn.value - profile.id
+                setConn(profile.id, ConnState.CONNECTING)
+            }
             streams[profile.id] = scope.launch {
                 StatusStream(client(profile)).events().collect { event ->
                     when (event) {
                         is StatusStream.Event.Frame -> {
                             _active.value = _active.value + (profile.id to event.active)
-                            _streamsUp.value = _streamsUp.value + profile.id
+                            setConn(profile.id, ConnState.LIVE)
                             // sessions_rev (daemon ≥ 2.21) bumps when a new
                             // session appears — re-list so it shows without a
                             // manual refresh. The first frame per (re)connect
@@ -421,17 +481,22 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
                             }
                         }
 
-                        is StatusStream.Event.Up -> {
-                            _streamsUp.value = _streamsUp.value + profile.id
-                        }
+                        is StatusStream.Event.Up -> setConn(profile.id, ConnState.LIVE)
 
                         is StatusStream.Event.Down -> {
-                            _streamsUp.value = _streamsUp.value - profile.id
-                            _active.value = _active.value + (profile.id to emptyList())
                             // Keep the rev baseline: if a session appeared while
                             // the stream was down, the reconnect's first frame
                             // differs and re-lists (a daemon restart resets the
                             // rev to 0, which costs one harmless re-list).
+                            when {
+                                // The daemon said no (bad token, HTTP error).
+                                event.refused -> setConn(profile.id, ConnState.OFFLINE)
+                                _conn.value[profile.id] == ConnState.LIVE ->
+                                    setConn(profile.id, ConnState.RECONNECTING)
+                                // Already connecting / reconnecting / offline:
+                                // the grace timer, if any, keeps running.
+                                else -> Unit
+                            }
                         }
                     }
                 }

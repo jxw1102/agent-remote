@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -52,7 +53,12 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.derivedStateOf
+import com.bb10d.remote.ui.components.MetaPill
 import androidx.compose.runtime.getValue
+import com.bb10d.remote.ui.components.connLabel
+import com.bb10d.remote.ui.components.connTint
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -60,6 +66,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -91,6 +98,7 @@ fun TranscriptScreen(
     val profile by vm.profile.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
     val harness by vm.harnessProvider.collectAsStateWithLifecycle()
+    val conn by vm.conn.collectAsStateWithLifecycle()
 
     // Theme follows THIS session's harness (multi hosts), not the profile's
     // default ping provider — matches BB/web chrome.
@@ -113,6 +121,7 @@ fun TranscriptScreen(
             settings = settings,
             accent = accent,
             harness = harness,
+            conn = conn,
         )
     }
 }
@@ -131,6 +140,7 @@ private fun TranscriptScreenBody(
     settings: com.bb10d.remote.data.AppSettings,
     accent: Accent,
     harness: String,
+    conn: com.bb10d.remote.data.ConnState?,
 ) {
     val pal = palette
     val ref by vm.ref.collectAsStateWithLifecycle()
@@ -194,11 +204,40 @@ private fun TranscriptScreenBody(
     }
     // Keyed on the LAST item, not the count, so loading older messages (which
     // also changes the count) can never be mistaken for new output arriving.
-    LaunchedEffect(ui.items.lastOrNull()?.id) {
+    // Two distances from the newest output. "Away": the newest message is
+    // not on screen at all. "Behind": it is, but its end is more than a
+    // little below the screen. Pixels, not rows, for the second: one reply
+    // can be several screens tall, so "within three rows of the end" used to
+    // be true a long way up, and new output pulled the reader down.
+    val slackPx = with(LocalDensity.current) { 160.dp.roundToPx() }
+    val awayFromLatest by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val tail = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf false
+            tail.index < info.totalItemsCount - 1
+        }
+    }
+    val behindLatest by remember(slackPx) {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val tail = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf false
+            tail.offset + tail.size > info.viewportEndOffset + slackPx
+        }
+    }
+    // New output that arrived while reading further up: the pill says so.
+    var unseen by remember { mutableStateOf(false) }
+    // Where the reader was BEFORE the newest row was added; by the time the
+    // effect below runs, the list already contains it.
+    val wasReadingBack = remember { booleanArrayOf(false) }
+    val lastId = ui.items.lastOrNull()?.id
+    LaunchedEffect(lastId) {
         if (ui.items.isEmpty()) return@LaunchedEffect
-        val atBottom = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index
-            ?.let { it >= ui.items.size - 3 } ?: true
-        if (atBottom) listState.animateScrollToItem(ui.items.lastIndex)
+        if (wasReadingBack[0]) unseen = true
+        else listState.animateScrollToItem(ui.items.lastIndex)
+    }
+    LaunchedEffect(awayFromLatest, behindLatest, lastId) {
+        wasReadingBack[0] = awayFromLatest || behindLatest
+        if (!wasReadingBack[0]) unseen = false
     }
     // Older messages went in above: shift the anchor by exactly as many rows,
     // so the message you were reading stays under your thumb.
@@ -238,7 +277,16 @@ private fun TranscriptScreenBody(
                                     color = pal.dim,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false),
                                 )
+                                // Only when it is NOT live: what is on screen
+                                // may be out of date.
+                                if (conn == com.bb10d.remote.data.ConnState.RECONNECTING ||
+                                    conn == com.bb10d.remote.data.ConnState.OFFLINE
+                                ) {
+                                    Spacer(Modifier.width(6.dp))
+                                    MetaPill(connLabel(conn), tint = connTint(conn))
+                                }
                             }
                         }
                     },
@@ -263,9 +311,6 @@ private fun TranscriptScreenBody(
                                     )
                                 }
                             }
-                        }
-                        IconButton(onClick = { showOptions = true }) {
-                            Icon(Icons.Outlined.Tune, contentDescription = "Turn options")
                         }
                         Box {
                             IconButton(onClick = { menuOpen = true }) {
@@ -310,6 +355,14 @@ private fun TranscriptScreenBody(
                                         },
                                     )
                                 }
+                                DropdownMenuItem(
+                                    text = { Text("Session options") },
+                                    leadingIcon = { Icon(Icons.Outlined.Tune, null) },
+                                    onClick = {
+                                        menuOpen = false
+                                        showOptions = true
+                                    },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Copy transcript") },
                                     leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
@@ -402,6 +455,27 @@ private fun TranscriptScreenBody(
                         }
                     } }
                 }
+                if ((awayFromLatest || unseen) && ui.items.isNotEmpty()) {
+                    JumpToLatest(
+                        unseen = unseen,
+                        accent = accent.tint,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 10.dp),
+                    ) {
+                        scope.launch {
+                            // Far away: go straight there. A smooth scroll
+                            // over a long transcript takes seconds.
+                            val last = ui.items.lastIndex
+                            val visible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                            if (last - visible > 30) listState.scrollToItem(last)
+                            else listState.animateScrollToItem(last)
+                            // To the END of it, not its first line.
+                            listState.scrollBy(1_000_000f)
+                            unseen = false
+                        }
+                    }
+                }
             }
 
             jobState.pendingPermission?.let { pending ->
@@ -444,6 +518,22 @@ private fun TranscriptScreenBody(
                 }
             }
 
+            val h = harness.ifBlank { null }
+            val interactiveNow = profile?.effectiveExecMode() == ExecMode.INTERACTIVE
+            SlashSuggestions(
+                matches = slashMatches(composerText, profile?.caps?.slashFor(h).orEmpty()),
+                headless = !interactiveNow,
+                onPick = { vm.updateComposer("$it ") },
+            )
+            profile?.let {
+                TurnChips(
+                    profile = it,
+                    harness = h,
+                    onExecMode = vm::setExecMode,
+                    onModel = vm::setModel,
+                    onEffort = vm::setEffort,
+                )
+            }
             AttachmentChips(
                 chips = attachments,
                 onRemove = vm::removeAttachment,
@@ -454,7 +544,7 @@ private fun TranscriptScreenBody(
                 canSend = composerText.isNotBlank() ||
                     attachments.any { !it.uploading },
                 running = jobState.running,
-                interactive = profile?.effectiveExecMode() == ExecMode.INTERACTIVE,
+                interactive = interactiveNow,
                 accent = accent.tint,
                 onAccent = accent.onTint,
                 onSend = vm::sendComposer,
@@ -479,7 +569,7 @@ private fun TranscriptScreenBody(
 
     if (showOptions) {
         ModalBottomSheet(onDismissRequest = { showOptions = false }) {
-            profile?.let { TurnOptionsSheet(vm, it) }
+            profile?.let { SessionOptionsSheet(vm, it) }
         }
     }
 

@@ -263,3 +263,19 @@ fun FocusPill(state: String, modifier: Modifier = Modifier, unread: Boolean = fa
 }
 
 val ScreenPadding = PaddingValues(horizontal = 16.dp)
+
+/** Words for a connection state; empty for live (nothing to say). */
+fun connLabel(state: com.bb10d.remote.data.ConnState?): String = when (state) {
+    com.bb10d.remote.data.ConnState.RECONNECTING -> "reconnecting…"
+    com.bb10d.remote.data.ConnState.OFFLINE -> "offline"
+    com.bb10d.remote.data.ConnState.CONNECTING, null -> "connecting…"
+    com.bb10d.remote.data.ConnState.LIVE -> ""
+}
+
+@Composable
+fun connTint(state: com.bb10d.remote.data.ConnState?): Color = when (state) {
+    com.bb10d.remote.data.ConnState.LIVE -> palette.ok
+    com.bb10d.remote.data.ConnState.OFFLINE -> palette.danger
+    com.bb10d.remote.data.ConnState.RECONNECTING -> palette.warn
+    else -> palette.dim
+}

@@ -9,7 +9,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -102,5 +108,35 @@ internal fun StatusBanner(
                 )
             }
         }
+    }
+}
+
+/**
+ * Back to the newest message. Shown while reading further up; tinted when
+ * output has arrived that has not been seen yet.
+ */
+@Composable
+internal fun JumpToLatest(
+    unseen: Boolean,
+    accent: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(50)
+    Row(
+        modifier
+            .heightIn(min = 40.dp)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .border(1.dp, if (unseen) accent else palette.hairline, shape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            if (unseen) "↓ New output" else "↓ Jump to latest",
+            style = MaterialTheme.typography.labelLarge,
+            color = if (unseen) accent else MaterialTheme.colorScheme.onSurface,
+        )
     }
 }

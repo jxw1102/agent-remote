@@ -192,72 +192,37 @@ internal fun QueueSheet(
 }
 
 
+/**
+ * What is true of this session and its daemon. Execution, model and effort
+ * are not here: they are per message, on the composer.
+ */
 @Composable
-internal fun TurnOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.remote.data.Profile) {
+internal fun SessionOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.remote.data.Profile) {
     val caps = profile.caps
     val harness by vm.harnessProvider.collectAsStateWithLifecycle()
     val h = harness.ifBlank { null }
-    val models = caps.modelsFor(h)
-    val efforts = caps.effortsFor(h)
-    val interactive = caps.interactiveFor(h)
-    val canSetModel = caps.canSetModelFor(h)
-    val canSetEffort = caps.canSetEffortFor(h)
-    // The sheet is about the session on screen, so show the model that
-    // session actually used when the profile has no explicit override —
-    // otherwise every CodeBuddy session read "default".
     val session by vm.session.collectAsStateWithLifecycle()
-    val currentModel = profile.model.ifBlank { session?.model.orEmpty() }
-    val modelOptions = if (currentModel.isNotBlank() && currentModel !in models)
-        models + currentModel else models
-    val selectedModel = currentModel.takeIf { it in modelOptions }
-        ?: modelOptions.firstOrNull().orEmpty()
-    val selectedEffort = profile.effort.takeIf { it in efforts } ?: efforts.firstOrNull().orEmpty()
+    val lastModel = session?.model.orEmpty()
     Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 28.dp)) {
-        Text("Turn options", style = MaterialTheme.typography.titleMedium)
+        Text("Session options", style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(4.dp))
         Text(
             buildString {
-                append("Applies to ${profile.displayName}")
+                append(profile.displayName)
                 if (harness.isNotBlank()) append(" · $harness")
-                append(" — later turns on this profile.")
+                if (lastModel.isNotBlank() && lastModel != "default" && lastModel != "interactive") {
+                    append(" · last ran on $lastModel")
+                }
             },
             style = MaterialTheme.typography.bodySmall,
             color = palette.dim,
         )
-        Spacer(Modifier.height(16.dp))
-        OptionRow(
-            label = "Execution",
-            options = ExecMode.options(interactive),
-            selected = profile.effectiveExecMode(),
-            display = { ExecMode.short(it) },
-            onSelect = { vm.setExecMode(it) },
-        )
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(10.dp))
         Text(
-            text = "Both modes auto-run tools (no permission prompts).",
+            "Execution, model and effort are set above the message box.",
             style = MaterialTheme.typography.bodySmall,
             color = palette.dim,
         )
-        if (canSetModel && models.isNotEmpty()) {
-            Spacer(Modifier.height(16.dp))
-            OptionRow(
-                label = "Model",
-                options = modelOptions,
-                selected = selectedModel,
-                display = { it },
-                onSelect = { vm.setModel(it) },
-            )
-        }
-        if (canSetEffort && efforts.isNotEmpty()) {
-            Spacer(Modifier.height(16.dp))
-            OptionRow(
-                label = "Reasoning effort",
-                options = efforts,
-                selected = selectedEffort,
-                display = { it },
-                onSelect = { vm.setEffort(it) },
-            )
-        }
         if (caps.goalWatchFor(h)) {
             GoalBlock(vm)
         }
