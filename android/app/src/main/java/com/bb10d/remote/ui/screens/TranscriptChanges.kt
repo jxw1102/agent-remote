@@ -23,6 +23,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -115,6 +116,9 @@ internal fun ChangesSheet(
     val pal = palette
     val data = ui.data
     var message by remember { mutableStateOf("") }
+    // Cleared when a commit went through, not when it was sent: a failed
+    // one (a hook, no user.email, a timeout) keeps what was typed.
+    LaunchedEffect(ui.committed) { if (ui.committed > 0) message = "" }
     var confirmPush by remember { mutableStateOf(false) }
     val rows = remember(data?.diff) { diffRows(data?.diff.orEmpty()) }
 
@@ -277,10 +281,7 @@ internal fun ChangesSheet(
                     }
                     if (data.files.isNotEmpty()) {
                         TextButton(
-                            onClick = {
-                                onCommit(message)
-                                message = ""
-                            },
+                            onClick = { onCommit(message) },
                             enabled = message.isNotBlank() && !ui.busy,
                         ) { Text("Commit") }
                     }

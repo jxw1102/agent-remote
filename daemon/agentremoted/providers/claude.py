@@ -1392,14 +1392,18 @@ class ClaudeStore:
         it, by every request at once, until the daemon stopped answering.
         One scan per session at a time; the others wait for its result.
         """
-        try:
-            st = path.stat()
-        except OSError:
-            return 0, "", ""
-        key = (st.st_mtime_ns, st.st_size)
         with self._scan_guard:
             lock = self._scan_locks.setdefault(path.stem, threading.Lock())
         with lock:
+            # Looked at only once the lock is held. A caller that waited for
+            # another's scan would otherwise carry a size from before that
+            # scan read past it, see "the file is shorter than what was
+            # read", and start again from the top: one full scan per waiter.
+            try:
+                st = path.stat()
+            except OSError:
+                return 0, "", ""
+            key = (st.st_mtime_ns, st.st_size)
             memo = self._scan_memo.get(path.stem)
             if memo and memo["key"] == key:
                 return memo["result"]

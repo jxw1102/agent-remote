@@ -369,9 +369,9 @@ def capture_session(mgr, session_id: str, *, ansi: bool = False) -> dict:
 # the rate follows what is happening: fast right after a key was sent or the
 # pane moved, slower while it sits still.
 
-STREAM_FAST_S = 0.04        # just typed, or the pane just changed
+STREAM_FAST_S = 0.04        # a key was just sent into THIS pane
 STREAM_FAST_FOR_S = 2.0
-STREAM_WARM_S = 0.12        # active a moment ago
+STREAM_WARM_S = 0.12        # the pane changed a moment ago
 STREAM_WARM_FOR_S = 15.0
 STREAM_IDLE_S = 0.35        # nothing moving
 STREAM_DETACHED_S = 0.5     # no TUI yet: waiting for one to be launched
@@ -379,28 +379,41 @@ STREAM_KEEPALIVE_S = 15.0
 STREAM_REDRAW_S = 0.015     # let the TUI draw before looking, after a key
 
 _wake = threading.Condition()
-_wake_gen = 0
+_wake_gens = {}             # session id -> how many times it was poked
 
 
-def poke() -> None:
-    """A key just went into some pane: every open stream looks again now."""
-    global _wake_gen
+def poke(session_id: str = "") -> None:
+    """A key just went into this session's pane: its streams look again now.
+
+    Per session. It used to wake every open stream, so typing in one
+    terminal put every other viewer's stream at the fast rate too.
+    """
     with _wake:
-        _wake_gen += 1
+        if len(_wake_gens) > 512:
+            _wake_gens.clear()
+        _wake_gens[session_id] = _wake_gens.get(session_id, 0) + 1
         _wake.notify_all()
 
 
-def _stream_interval(attached: bool, quiet_for: float) -> float:
+def _stream_interval(attached: bool, since_key: float, since_change: float) -> float:
+    """How long to wait before looking at the pane again.
+
+    Fast only while someone is typing. A pane that redraws by itself (a
+    spinner, a timer) gets the warm rate: at the fast one a working turn
+    cost every viewer a `tmux capture-pane` 25 times a second for its
+    whole length.
+    """
     if not attached:
         return STREAM_DETACHED_S
-    if quiet_for < STREAM_FAST_FOR_S:
+    if since_key < STREAM_FAST_FOR_S:
         return STREAM_FAST_S
-    if quiet_for < STREAM_WARM_FOR_S:
+    if since_change < STREAM_WARM_FOR_S:
         return STREAM_WARM_S
     return STREAM_IDLE_S
 
 
-def serve_stream(handler, capture_fn, *, max_seconds: float = 0.0) -> None:
+def serve_stream(handler, capture_fn, *, session_id: str = "",
+                 max_seconds: float = 0.0) -> None:
     """Write pane frames as SSE until the client disconnects.
 
     ``capture_fn()`` returns a frame dict (see frame_payload). A frame is
@@ -421,7 +434,8 @@ def serve_stream(handler, capture_fn, *, max_seconds: float = 0.0) -> None:
     last_key = None
     last_change = started
     last_write = started
-    seen_gen = _wake_gen
+    last_poke = 0.0
+    seen_gen = _wake_gens.get(session_id, 0)
     try:
         while True:
             frame = capture_fn()
@@ -441,14 +455,19 @@ def serve_stream(handler, capture_fn, *, max_seconds: float = 0.0) -> None:
             if max_seconds and now - started >= max_seconds:
                 return
             wait = _stream_interval(bool(frame.get("attached")),
-                                    now - last_change)
+                                    now - last_poke, now - last_change)
+            deadline = time.time() + wait
             with _wake:
-                if _wake_gen == seen_gen:
-                    _wake.wait(wait)
-                poked = _wake_gen != seen_gen
-                seen_gen = _wake_gen
+                # Other sessions' keys wake this too; only our own counts.
+                while _wake_gens.get(session_id, 0) == seen_gen:
+                    left = deadline - time.time()
+                    if left <= 0:
+                        break
+                    _wake.wait(left)
+                poked = _wake_gens.get(session_id, 0) != seen_gen
+                seen_gen = _wake_gens.get(session_id, 0)
             if poked:
-                last_change = time.time()
+                last_poke = time.time()
                 time.sleep(STREAM_REDRAW_S)
     except (OSError, BrokenPipeError):
         pass
@@ -499,5 +518,5 @@ def send_to_session(mgr, session_id: str, keys=None, text: str = "") -> str:
     except Exception as e:  # noqa: BLE001
         return "tmux input failed: %s" % e
     finally:
-        poke()   # open frame streams look at the pane now, not on their timer
+        poke(session_id)   # its frame streams look at the pane now, not on their timer
     return ""

@@ -19,6 +19,25 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.25.1** Second review pass. The transcript scan takes its file size after
+it holds the session's lock, not before: a request that waited for another's
+scan carried a stale size, read it as "the file got shorter" and scanned the
+whole transcript again, once per waiter. The Live TUI stream watches at the
+fast rate only for two seconds after a key into that session's pane; a pane
+that redraws by itself (a spinner) is watched at the warm rate, and a key in
+one session no longer wakes every other session's streams. On a
+multi-harness daemon the polled frame, stream and key routes use the
+remembered scope check instead of looking the session up on every request.
+`/api/ping` reports `changes: false` to isolated guests, who always got 403
+from the route. The Changes diff is read up to its cap and git is stopped
+there, instead of being read whole and cut down; reading untracked files
+stops after eight seconds. Web: a commit or push result is no longer dropped
+(leaving "Running…") when the pane reloads meanwhile; with one daemon on and
+one off, a failing daemon's error is shown again. Web and Android 1.7.15: a
+failed commit keeps its message. Android: the Execution chip and the send
+path follow the open session's harness, as on the web; after following a
+reply taller than the screen, the next row does not pull the reader off it.
+
 **2.25.0** Changes, after review. `GET /api/sessions/<id>/changes` now
 shows files git does not track yet as a diff against nothing, with their line
 counts (up to 40 files of 200 KB each): a client's Commit stages everything,

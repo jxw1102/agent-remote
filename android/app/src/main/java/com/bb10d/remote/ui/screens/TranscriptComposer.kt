@@ -271,7 +271,7 @@ internal fun TurnChips(
             TurnChip(
                 label = "Execution",
                 options = ExecMode.options(caps.interactiveFor(harness)),
-                selected = profile.effectiveExecMode(),
+                selected = profile.effectiveExecMode(harness),
                 display = { ExecMode.label(it) },
                 hint = {
                     if (it == ExecMode.INTERACTIVE) "In the terminal on the host. Slash commands work."

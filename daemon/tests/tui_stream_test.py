@@ -113,6 +113,7 @@ try:
     h = Handler()
     t = threading.Thread(target=serve_stream,
                          args=(h, lambda: capture_session(m, "s1", ansi=True)),
+                         kwargs={"session_id": "s1"},
                          daemon=True)
     t.start()
     check("first frame arrives at once",
@@ -180,6 +181,20 @@ try:
 finally:
     subprocess.run([TMUX, "-L", SOCK, "kill-server"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+# --- how often the pane is looked at ---
+from agentremoted import live_tui as _lt  # noqa: E402
+
+check("fast only just after a key into this pane",
+      _lt._stream_interval(True, 0.5, 0.5) == _lt.STREAM_FAST_S)
+check("a pane that redraws by itself is watched at the warm rate",
+      _lt._stream_interval(True, 60.0, 0.1) == _lt.STREAM_WARM_S)
+check("a still pane at the idle rate",
+      _lt._stream_interval(True, 60.0, 60.0) == _lt.STREAM_IDLE_S)
+before_a, before_b = _lt._wake_gens.get("a", 0), _lt._wake_gens.get("b", 0)
+_lt.poke("a")
+check("a key wakes its own session's streams only",
+      _lt._wake_gens.get("a", 0) == before_a + 1 and _lt._wake_gens.get("b", 0) == before_b)
 
 print()
 if failures:

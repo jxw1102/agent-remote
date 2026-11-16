@@ -1914,7 +1914,7 @@ function renderStatus() {
   // A dead daemon must never read as "it has no sessions". With several
   // daemons the daemon button and its menu say which and why; with one there
   // is no such button, so it is said here.
-  if (state.profiles.length < 2) {
+  if (enabledProfiles().length < 2) {
     Object.entries(state.feeds).filter(([, f]) => f.error).forEach(([pid, f]) => {
       const p = profileById(pid);
       const line = el("div", "err", `${(p && p.name) || "Daemon"}: ${f.error}`);
@@ -2446,6 +2446,7 @@ async function openSession(row) {
   closePop();
   syncComposer();
   syncChangesButton();
+  side.msg = "";      // a commit message belongs to the session it was typed in
   if (side.open) { side.data = null; side.out = ""; side.form = false; loadChanges(); }
   $("chat-title").textContent = row.session.title || "Session";
   renderChatSub();
@@ -2560,7 +2561,7 @@ function syncShareButton() {
 // tree against its last commit. Read-only on the daemon; commit and push are
 // explicit actions here, run through the same /api/shell as a "!command".
 
-const side = { open: false, loading: false, data: null, error: "", gen: 0, out: "", form: false, busy: false };
+const side = { open: false, loading: false, data: null, error: "", gen: 0, out: "", form: false, busy: false, msg: "" };
 
 function syncChangesButton() {
   const btn = $("btn-changes");
@@ -2765,13 +2766,20 @@ function renderSide() {
     cancel.addEventListener("click", () => { side.form = false; renderSide(); });
     const go = el("button", "primary", "Commit");
     go.type = "button";
-    go.disabled = true;
-    msg.addEventListener("input", () => { go.disabled = !msg.value.trim() || side.busy; });
+    // Kept until a commit succeeds: a failed one (a hook, no user.email, a
+    // timeout) must not cost the message.
+    msg.value = side.msg || "";
+    go.disabled = !msg.value.trim() || side.busy;
+    msg.addEventListener("input", () => {
+      side.msg = msg.value;
+      go.disabled = !msg.value.trim() || side.busy;
+    });
     go.addEventListener("click", () => {
       const text = msg.value.trim();
       if (!text) return;
       // Single-quoted for the shell: the message is data, never syntax.
-      runGit("git add -A && git commit -m '" + text.replace(/'/g, "'\\''") + "'");
+      runGit("git add -A && git commit -m '" + text.replace(/'/g, "'\\''") + "'",
+             { commit: true });
     });
     foot.appendChild(cancel);
     foot.appendChild(go);
@@ -2805,21 +2813,26 @@ function renderSide() {
 }
 
 /** Run one git command in the session's folder and show what it printed. */
-async function runGit(command) {
+async function runGit(command, { commit = false } = {}) {
   if (!state.open || side.busy) return;
   const profile = profileById(state.open.profileId);
-  const gen = side.gen;
+  // Which session this was started in. Not side.gen: every reload of the
+  // pane bumps that (a turn ending, Refresh), and the result was then
+  // dropped without a repaint, leaving "Running…" on a dead footer.
+  const { profileId, sessionId } = state.open;
   side.busy = true;
   side.form = false;
   renderSide();
   let out = "";
+  let ok = false;
   try {
     const res = await call(profile, "/api/shell", {
       method: "POST",
       timeout: 40000,
-      body: { command, session_id: state.open.sessionId,
+      body: { command, session_id: sessionId,
               cwd: (side.data && side.data.root) || state.open.session.cwd || "" },
     });
+    ok = !res.exit_code;
     out = `$ ${command.split(" -m ")[0]}\n` + ((res.output || "").trim() || "(no output)")
       + (res.exit_code ? `\n(exit code ${res.exit_code})` : "");
   } catch (e) {
@@ -2827,9 +2840,15 @@ async function runGit(command) {
   }
   side.busy = false;
   // Another session was opened, or the pane closed, while this ran: its
-  // output belongs to neither.
-  if (gen !== side.gen || !side.open) return;
+  // output belongs to neither. The pane is still repainted.
+  const same = side.open && state.open
+    && state.open.profileId === profileId && state.open.sessionId === sessionId;
+  if (!same) { renderSide(); return; }
   side.out = out;
+  if (commit) {
+    if (ok) side.msg = "";
+    else side.form = true;      // back to the form, message intact
+  }
   loadChanges();
 }
 

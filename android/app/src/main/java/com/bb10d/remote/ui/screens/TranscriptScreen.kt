@@ -250,6 +250,11 @@ private fun TranscriptScreenBody(
         } finally {
             following[0] = false
         }
+        // Reached only when the scroll ran to its end (a newer row cancels
+        // it above). Where the reader is now: a reply taller than the screen
+        // leaves them at its first line, reading, and the next row must not
+        // pull them off it.
+        wasReadingBack[0] = awayFromLatest || behindLatest
     }
     LaunchedEffect(awayFromLatest, behindLatest, lastId) {
         if (following[0]) return@LaunchedEffect
@@ -543,7 +548,7 @@ private fun TranscriptScreenBody(
             }
 
             val h = harness.ifBlank { null }
-            val interactiveNow = profile?.effectiveExecMode() == ExecMode.INTERACTIVE
+            val interactiveNow = profile?.effectiveExecMode(harness) == ExecMode.INTERACTIVE
             SlashSuggestions(
                 matches = slashMatches(composerText, profile?.caps?.slashFor(h).orEmpty()),
                 headless = !interactiveNow,

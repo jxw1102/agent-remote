@@ -2094,7 +2094,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 # GET /api/sessions/<id>/file: open a host path the agent linked.
                 payload["linked_files"] = True
                 # GET /api/sessions/<id>/changes: what differs from the last commit.
-                payload["changes"] = True
+                payload["changes"] = self._changes_allowed()
                 self._stamp_tui_caps(payload)
                 self._stamp_upload_caps(payload)
                 self._send_json(payload)
@@ -2151,7 +2151,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             # GET /api/sessions/<id>/file: open a host path the agent linked.
             payload["linked_files"] = True
             # GET /api/sessions/<id>/changes: what differs from the last commit.
-            payload["changes"] = True
+            payload["changes"] = self._changes_allowed()
             self._stamp_tui_caps(payload)
             self._stamp_upload_caps(payload)
             self._send_json(payload)
@@ -2535,26 +2535,15 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         m = _SESSION_TUI_STREAM.match(path)
         if m:
-            name, b, session = self._find_session(m.group(1))
-            if b is not None:
-                if not self._session_in_scope(session or {}):
-                    self._error(404, "session not found")
-                    return
-                self._bind_bundle(name)
-            self._handle_tui_stream(m.group(1), query)
+            if self._tui_route(m.group(1)):
+                self._handle_tui_stream(m.group(1), query)
             return
         m = _SESSION_TUI.match(path)
         if m:
-            name, b, session = self._find_session(m.group(1))
-            if b is None:
-                # TUI may exist for a brand-new session before store indexes it.
+            # A TUI may exist for a brand-new session before the store
+            # indexes it; _tui_route lets that through.
+            if self._tui_route(m.group(1)):
                 self._handle_tui_capture(m.group(1), query)
-                return
-            if not self._session_in_scope(session or {}):
-                self._error(404, "session not found")
-                return
-            self._bind_bundle(name)
-            self._handle_tui_capture(m.group(1), query)
             return
         m = _SESSION_ONE.match(path)
         if m:
@@ -2921,13 +2910,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         m = _SESSION_TUI_KEYS.match(path)
         if m:
-            name, b, session = self._find_session(m.group(1))
-            if b is not None:
-                if not self._session_in_scope(session or {}):
-                    self._error(404, "session not found")
-                    return
-                self._bind_bundle(name)
-            self._handle_tui_keys(m.group(1), body)
+            if self._tui_route(m.group(1)):
+                self._handle_tui_keys(m.group(1), body)
             return
         m = _JOB_PERM.match(path)
         if m:
@@ -3029,6 +3013,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"ok": True, "goal": row})
 
+    def _changes_allowed(self) -> bool:
+        """Whether this caller may read a session folder's changes.
+
+        Not an isolated guest: git would run as the daemon's user on a tree
+        the guest owns. /api/ping advertises exactly this, so a guest's
+        client does not offer a Changes view that can only answer 403.
+        """
+        p = self.principal or accounts.main_principal()
+        return not (p.is_guest and p.isolate_root)
+
     def _send_session_changes(self, session_id):
         """GET /api/sessions/<id>/changes: the session folder's working tree.
 
@@ -3041,8 +3035,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(404, "session not found")
             return
         p = self.principal or accounts.main_principal()
-        if p.is_guest and p.isolate_root:
-            # git would run as the daemon's user on a tree the guest owns.
+        if not self._changes_allowed():
             self._error(403, "changes are not available for isolated accounts")
             return
         raw = session.get("cwd") or ""
@@ -3476,11 +3469,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             ansi=want_ansi,
         )
 
-    def _tui_in_scope(self, session_id: str) -> bool:
-        """Never show or drive another account's pane.
+    def _tui_lookup(self, session_id: str):
+        """(may this caller see the pane, which harness owns the session).
 
         Remembered for a minute per caller: finding the session means reading
-        its transcript, which is too much to do again for every polled frame.
+        its transcript, which is too much to do again for every polled frame
+        and every key. The harness is "" when the session is not indexed yet
+        (a brand-new TUI), which is allowed and not remembered.
         """
         p = self.principal
         key = (getattr(p, "account", ""), getattr(p, "isolate_root", ""),
@@ -3488,19 +3483,35 @@ class ApiHandler(BaseHTTPRequestHandler):
         now = time.time()
         hit = _TUI_SCOPE.get(key)
         if hit is not None and hit[0] > now:
-            return hit[1]
-        sess = None
-        if self.store is not None:
+            return hit[1], hit[2]
+        name, _b, sess = self._find_session(session_id)
+        if sess is None and self.store is not None:
             sess = self.store.get_session(session_id)
         if sess is None:
-            _n, _b, sess = self._find_session(session_id)
-        if sess is None:
-            return True     # no transcript yet; not remembered
+            return True, ""
         ok = self._session_in_scope(sess)
         if len(_TUI_SCOPE) > 512:
             _TUI_SCOPE.clear()
-        _TUI_SCOPE[key] = (now + _TUI_SCOPE_TTL_S, ok)
-        return ok
+        _TUI_SCOPE[key] = (now + _TUI_SCOPE_TTL_S, ok, name or "")
+        return ok, name or ""
+
+    def _tui_in_scope(self, session_id: str) -> bool:
+        """Never show or drive another account's pane."""
+        return self._tui_lookup(session_id)[0]
+
+    def _tui_route(self, session_id: str) -> bool:
+        """Scope check and harness binding for a multi-harness TUI route.
+
+        False after answering 404. Goes through the same remembered lookup as
+        the handlers, so a polled frame or a key does not read the transcript.
+        """
+        ok, name = self._tui_lookup(session_id)
+        if not ok:
+            self._error(404, "session not found")
+            return False
+        if name and name in (self.bundles or {}):
+            self._bind_bundle(name)
+        return True
 
     def _handle_tui_stream(self, session_id: str, query=None):
         """GET /sse/sessions/<id>/tui — Live TUI frames, pushed when the pane
@@ -3516,7 +3527,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         want_ansi = self._flag(query or {}, "ansi")
         self.close_connection = True
         live_tui.serve_stream(
-            self, lambda: self._tui_frame(session_id, want_ansi))
+            self, lambda: self._tui_frame(session_id, want_ansi),
+            session_id=session_id)
 
     def _handle_tui_capture(self, session_id: str, query=None):
         """GET /api/sessions/<id>/tui — live host TUI pane text.
@@ -3598,12 +3610,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if (not keys) and not text:
             self._error(400, "provide 'keys' and/or 'text'")
             return
-        sess = None
-        if self.store is not None:
-            sess = self.store.get_session(session_id)
-        if sess is None:
-            _n, _b, sess = self._find_session(session_id)
-        if sess is not None and not self._session_in_scope(sess):
+        if not self._tui_in_scope(session_id):
             self._error(404, "session not found")
             return
         runner = self._tui_runner_for_session(session_id)

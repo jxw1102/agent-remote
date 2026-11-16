@@ -17,6 +17,8 @@ are the same programs any `git status` in that folder already runs.
 
 import os
 import subprocess
+import threading
+import time
 
 # One response must stay small enough for a phone on a bad link.
 MAX_DIFF_BYTES = 400 * 1024
@@ -26,6 +28,7 @@ GIT_TIMEOUT = 10
 # one; this many at most, and none larger than this.
 MAX_UNTRACKED_DIFFS = 40
 MAX_UNTRACKED_BYTES = 200 * 1024
+UNTRACKED_BUDGET_S = 8.0
 
 
 class ChangesError(Exception):
@@ -54,6 +57,44 @@ def _git(cwd, args, timeout=GIT_TIMEOUT):
     except (OSError, subprocess.SubprocessError):
         return -1, b""
     return out.returncode, out.stdout
+
+
+def _git_capped(cwd, args, cap, timeout=GIT_TIMEOUT):
+    """(returncode, stdout bytes, cut). Reads at most `cap` + one more line.
+
+    A diff can be hundreds of megabytes (a regenerated lockfile, a vendored
+    tree). It used to be read whole and then cut down to the cap; now git is
+    stopped as soon as there is enough to show.
+    """
+    env = dict(os.environ)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["LC_ALL"] = "C"
+    try:
+        proc = subprocess.Popen(["git"] + _SAFE + args, cwd=cwd, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return -1, b"", False
+    timer = threading.Timer(timeout, proc.kill)
+    timer.daemon = True
+    timer.start()
+    chunks, size, cut = [], 0, False
+    try:
+        while True:
+            chunk = proc.stdout.read(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > cap:
+                cut = True
+                proc.kill()
+                break
+    finally:
+        timer.cancel()
+        proc.stdout.close()
+        code = proc.wait()
+    return (0 if cut else code), b"".join(chunks), cut
 
 
 def _untracked_diff(root, path):
@@ -197,18 +238,23 @@ def collect(cwd):
                 info["added"] = int(added) if added.isdigit() else 0
                 info["removed"] = int(removed) if removed.isdigit() else 0
 
-    code, out = _git(cwd, ["diff", "--no-color", "-M", "--no-ext-diff",
-                           "--no-textconv"] + base)
+    code, out, cut = _git_capped(cwd, ["diff", "--no-color", "-M", "--no-ext-diff",
+                                       "--no-textconv"] + base, MAX_DIFF_BYTES)
     diff = out if code == 0 else b""
     # Files git does not track yet are part of what a commit would take
     # (the clients' Commit stages everything), so they are shown too: each
     # one as a diff against nothing, while there is room.
     read = 0
+    give_up = time.time() + UNTRACKED_BUDGET_S
     for path in order:
         info = files[path]
         if info["status"] != "untracked":
             continue
-        if read >= MAX_UNTRACKED_DIFFS or len(diff) > MAX_DIFF_BYTES:
+        # A git process per file: bounded by count, by the room left in the
+        # diff, and by the clock, so the request answers while the client
+        # is still waiting for it.
+        if (read >= MAX_UNTRACKED_DIFFS or len(diff) > MAX_DIFF_BYTES
+                or time.time() > give_up):
             break
         read += 1
         # status lists paths from the top of the work tree.
