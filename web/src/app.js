@@ -256,6 +256,7 @@ const state = {
   active: {},            // profileId -> [activeJobDto]
   sessionsRev: {},       // profileId -> last sessions_rev seen on its stream
   streams: {},           // profileId -> EventSource
+  conn: {},              // profileId -> { state, since } (see setConn)
   open: null,            // {profileId, sessionId, session}
   items: [],             // transcript rows
   total: 0,
@@ -1949,9 +1950,49 @@ function renderFilters() {
   });
 }
 
+/**
+ * The list is repainted on every status frame (about once a second per
+ * daemon). It used to be emptied and rebuilt each time, which restarted the
+ * "working" animation, dropped keyboard focus and hover, and made a row jump
+ * under the pointer. Now each row is built, compared with what is already on
+ * screen, and only swapped in if it differs.
+ */
+const listNodes = new Map();   // key -> { html, node }
+
+function reconcileList(host, want) {
+  const keys = new Set(want.map(([k]) => k));
+  for (const [k, old] of listNodes) {
+    if (!keys.has(k)) { old.node.remove(); listNodes.delete(k); }
+  }
+  let cursor = host.firstChild;
+  for (const [key, fresh] of want) {
+    const html = fresh.outerHTML;
+    const old = listNodes.get(key);
+    let node;
+    let refocus = false;
+    if (old && old.html === html && old.node.parentNode === host) {
+      node = old.node;
+      node._row = fresh._row;   // same pixels, newer data behind the click
+    } else {
+      node = fresh;
+      if (old) {
+        refocus = old.node.contains(document.activeElement);
+        if (cursor === old.node) cursor = cursor.nextSibling;
+        old.node.remove();
+      }
+      listNodes.set(key, { html, node });
+    }
+    if (node === cursor) cursor = cursor.nextSibling;
+    else host.insertBefore(node, cursor);
+    // A row that changed while it had the keyboard keeps it.
+    if (refocus && node.focus) node.focus({ preventScroll: true });
+  }
+  while (cursor) { const next = cursor.nextSibling; cursor.remove(); cursor = next; }
+}
+
 function renderSessions() {
   const host = $("sessions");
-  host.textContent = "";
+  const want = [];
   const rows = visibleRows();
   const working = workingKeys();
   const blocked = blockedKeys();
@@ -1961,7 +2002,7 @@ function renderSessions() {
     // never paint it twice (list + main). This column is the session list.
     const empty = el("div", "empty list-quiet");
     empty.appendChild(el("p", null, "Sessions appear here."));
-    host.appendChild(empty);
+    reconcileList(host, [["empty:none", empty]]);
     return;
   }
   if (!rows.length && !state.loading) {
@@ -1970,23 +2011,27 @@ function renderSessions() {
     empty.appendChild(el("p", null, state.query
       ? `No session on any daemon mentions “${state.query}”.`
       : "Start a session and it will show up here, whichever daemon runs it."));
-    host.appendChild(empty);
+    reconcileList(host, [["empty:" + state.query, empty]]);
     return;
   }
 
   let lastDay = "";
+  const used = new Set();
   rows.forEach((row) => {
     if (!state.query) {
       const day = dayLabel(row.sortKey);
       if (day !== lastDay) {
         lastDay = day;
-        host.appendChild(el("div", "day", day));
+        want.push(["day:" + day, el("div", "day", day)]);
       }
     }
     const key = `${row.profileId}/${row.session.id}`;
     const pal = providerOf(row.provider);
     const btn = el("button", "row");
     btn.type = "button";
+    // Handlers read the row through the node: a row that is kept on screen
+    // is handed the newer data (see reconcileList).
+    btn._row = row;
     if (state.open && state.open.profileId === row.profileId
         && state.open.sessionId === row.session.id) {
       btn.setAttribute("aria-current", "true");
@@ -2011,7 +2056,7 @@ function renderSessions() {
       done.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        setRowFocus(row, false);
+        setRowFocus(btn._row, false);
       });
       btn.appendChild(done);
     }
@@ -2070,7 +2115,7 @@ function renderSessions() {
       idTag.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        copySessionId(row.session.id);
+        copySessionId(btn._row.session.id);
       });
       meta.appendChild(idTag);
     }
@@ -2078,7 +2123,7 @@ function renderSessions() {
 
     btn.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      if (row.session.id) copySessionId(row.session.id);
+      if (btn._row.session.id) copySessionId(btn._row.session.id);
     });
 
     const preview = listPreview(row.session, state.query);
@@ -2088,9 +2133,13 @@ function renderSessions() {
       btn.appendChild(box);
     }
 
-    btn.addEventListener("click", () => openSession(row));
-    host.appendChild(btn);
+    btn.addEventListener("click", () => openSession(btn._row));
+    let nodeKey = "row:" + key;
+    while (used.has(nodeKey)) nodeKey += "+";
+    used.add(nodeKey);
+    want.push([nodeKey, btn]);
   });
+  reconcileList(host, want);
 }
 
 /** Case-insensitive query highlight, built with DOM nodes (never innerHTML). */
@@ -2994,6 +3043,15 @@ function renderChatSub() {
   const tag = el("span", "tag provider", tagText);
   tag.style.setProperty("--tag", pal.accent);
   sub.appendChild(tag);
+  // Only when it is NOT live: what is on screen may be out of date.
+  const conn = connOf(open.profileId);
+  if (conn === "reconnecting" || conn === "offline") {
+    const lost = el("span", "tag conn-tag conn-" + conn, CONN_TEXT[conn]);
+    lost.title = conn === "offline"
+      ? "This daemon cannot be reached. What you see may be out of date."
+      : "The live connection dropped and is being restored.";
+    sub.appendChild(lost);
+  }
   const cwd = open.session && open.session.cwd;
   if (cwd) sub.appendChild(el("span", "chat-cwd", cwd));
   const sid = open.sessionId;
@@ -4563,18 +4621,72 @@ async function reopenPermission() {
 
 // ---------------------------------------------------------------- streams
 
+// Per daemon: "connecting" | "live" | "reconnecting" | "offline".
+// A dropped stream used to blank every "working" mark at once and say
+// nothing, so a turn that was still running looked finished.
+const CONN_GRACE_MS = 15000;
+const connTimers = {};
+const connRetry = {};          // profileId -> { delay, timer }
+
+function connOf(profileId) {
+  return (state.conn[profileId] && state.conn[profileId].state) || "connecting";
+}
+
+function setConn(id, next) {
+  const cur = state.conn[id];
+  if (cur && cur.state === next) return;
+  state.conn[id] = { state: next, since: Date.now() };
+  clearTimeout(connTimers[id]);
+  delete connTimers[id];
+  if (next === "reconnecting" || next === "connecting") {
+    // Keep showing what was last known while the browser retries, but not
+    // for ever: after the grace period it is no longer worth believing.
+    connTimers[id] = setTimeout(() => setConn(id, "offline"), CONN_GRACE_MS);
+  }
+  if (next === "offline") {
+    state.active[id] = [];
+    renderStatus();
+    renderSessions();
+    renderBanner();
+  }
+  renderConn();
+}
+
+function dropStream(id, { forget = false } = {}) {
+  const src = state.streams[id];
+  if (src) src.close();
+  delete state.streams[id];
+  if (connRetry[id]) clearTimeout(connRetry[id].timer);
+  if (forget) {
+    clearTimeout(connTimers[id]);
+    delete connTimers[id];
+    delete connRetry[id];
+    delete state.conn[id];
+    delete state.active[id];
+    delete state.sessionsRev[id];
+    // Tear-down is not "job finished" — forget without end-chimes.
+    chimeForgetProfile(id);
+  }
+}
+
+/** Reconnect every daemon that is not live, now (Retry, or the network is back). */
+function reconnectNow() {
+  enabledProfiles().forEach((p) => {
+    if (connOf(p.id) === "live") return;
+    dropStream(p.id);
+    if (connRetry[p.id]) connRetry[p.id].delay = 0;
+  });
+  syncStreams();
+}
+
 function syncStreams() {
   const wanted = new Map(enabledProfiles().map((p) => [p.id, p]));
   for (const [id, src] of Object.entries(state.streams)) {
     const p = wanted.get(id);
-    if (!p || src._url !== streamUrl(p)) {
-      src.close();
-      delete state.streams[id];
-      delete state.active[id];
-      delete state.sessionsRev[id];
-      // Tear-down is not "job finished" — forget without end-chimes.
-      chimeForgetProfile(id);
-    }
+    if (!p || src._url !== streamUrl(p)) dropStream(id, { forget: true });
+  }
+  for (const id of Object.keys(state.conn)) {
+    if (!wanted.has(id)) dropStream(id, { forget: true });
   }
   wanted.forEach((profile, id) => {
     if (state.streams[id]) return;
@@ -4583,6 +4695,11 @@ function syncStreams() {
     // accepts the token as a query parameter on this endpoint.
     const src = new EventSource(url);
     src._url = url;
+    if (!state.conn[id]) setConn(id, "connecting");
+    src.onopen = () => {
+      if (connRetry[id]) connRetry[id].delay = 0;
+      setConn(id, "live");
+    };
     src.onmessage = (ev) => {
       let jobs = [];
       let newSession = false;
@@ -4600,6 +4717,7 @@ function syncStreams() {
           if (prev !== undefined && frame.sessions_rev !== prev) newSession = true;
         }
       } catch { return; }
+      setConn(id, "live");
       // Chimes for every session on this daemon, open or not.
       chimeFromActive(id, jobs);
       renderStatus();
@@ -4608,12 +4726,67 @@ function syncStreams() {
       if (newSession) refreshSessions();
     };
     src.onerror = () => {
-      // EventSource reconnects on its own; drop the stale view meanwhile.
       // Do NOT chime ends here — a glitch would bi-bi every running job.
-      state.active[id] = [];
+      if (state.streams[id] !== src) return;
+      if (src.readyState === EventSource.CLOSED) {
+        // The browser gave up (the daemon answered with an error, e.g. a
+        // rejected token). It will not retry on its own, so we do, slower
+        // each time.
+        setConn(id, "offline");
+        dropStream(id);
+        const r = connRetry[id] || (connRetry[id] = { delay: 0, timer: 0 });
+        r.delay = Math.min(60000, r.delay ? r.delay * 2 : 5000);
+        r.timer = setTimeout(syncStreams, r.delay);
+      } else if (connOf(id) === "live") {
+        // EventSource is reconnecting by itself; say so and keep the last
+        // known state on screen for the grace period.
+        setConn(id, "reconnecting");
+      }
     };
     state.streams[id] = src;
   });
+  renderConn();
+}
+
+const CONN_TEXT = { live: "live", connecting: "connecting…",
+                    reconnecting: "reconnecting…", offline: "offline" };
+
+/** The line under the session list, and the tag in the open session's header. */
+function renderConn() {
+  const box = $("conn");
+  if (!box) return;
+  const profiles = enabledProfiles();
+  box.classList.toggle("hidden", !profiles.length);
+  const states = profiles.map((p) => connOf(p.id));
+  const sig = JSON.stringify(profiles.map((p, i) => [p.id, p.name, states[i]]));
+  if (sig !== box.dataset.sig) {
+    box.dataset.sig = sig;
+    box.textContent = "";
+    const allLive = states.every((st) => st === "live");
+    if (allLive && profiles.length > 1) {
+      const item = el("span", "conn-item conn-live");
+      item.appendChild(el("span", "conn-dot"));
+      item.appendChild(document.createTextNode(`Live · ${profiles.length} daemons`));
+      box.appendChild(item);
+    } else {
+      profiles.forEach((p, i) => {
+        if (profiles.length > 1 && states[i] === "live") return;
+        const item = el("span", "conn-item conn-" + states[i]);
+        item.appendChild(el("span", "conn-dot"));
+        const text = profiles.length > 1 ? `${p.name} ${CONN_TEXT[states[i]]}`
+          : CONN_TEXT[states[i]].replace(/^./, (ch) => ch.toUpperCase());
+        item.appendChild(document.createTextNode(text));
+        box.appendChild(item);
+      });
+    }
+    if (states.some((st) => st === "offline" || st === "reconnecting")) {
+      const retry = el("button", "conn-retry", "Retry");
+      retry.type = "button";
+      retry.addEventListener("click", () => { reconnectNow(); refreshSessions(); });
+      box.appendChild(retry);
+    }
+    if (state.open) renderChatSub();
+  }
 }
 
 function streamUrl(profile) {
@@ -6591,6 +6764,11 @@ function wire() {
   prompt.addEventListener("focus", syncSlashMenu);
   prompt.addEventListener("blur", () => { if (pop.kind === "slash") closePop(); });
   $("composer-pop").addEventListener("keydown", onPopKeydown);
+  // The machine itself lost or regained its network.
+  window.addEventListener("offline", () => {
+    enabledProfiles().forEach((p) => { if (connOf(p.id) === "live") setConn(p.id, "reconnecting"); });
+  });
+  window.addEventListener("online", reconnectNow);
   // A click anywhere else closes a chip's menu.
   document.addEventListener("mousedown", (e) => {
     if (pop.kind !== "chip") return;
