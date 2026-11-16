@@ -184,6 +184,33 @@ def main():
           ping.get("states"))
     check("every state has a label",
           all(s.get("label") for s in ping.get("states", [])), ping.get("states"))
+
+    print("changes (the session folder's working tree):")
+    check("ping advertises changes", ping.get("changes") is True)
+    st, body = api(base, token, "/api/sessions/%s/changes" % SESSION_ID)
+    check("a folder that is not a repository says so",
+          st == 200 and body.get("repo") is False, body)
+    import subprocess
+    genv = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=PROJECT_CWD, env=genv, check=True)
+    with open(os.path.join(PROJECT_CWD, "login.py"), "w") as fh:
+        fh.write("print('hi')\n")
+    st, body = api(base, token, "/api/sessions/%s/changes" % SESSION_ID)
+    check("a repository lists what changed",
+          st == 200 and body.get("repo") is True and body.get("branch") == "main"
+          and [f["path"] for f in body.get("files", [])] == ["login.py"], body)
+    for label, path, tok, want in (
+            ("an unknown session is 404", "/api/sessions/nope/changes", token, 404),
+            ("no token is 401", "/api/sessions/%s/changes" % SESSION_ID, "wrong", 401)):
+        try:
+            api(base, tok, path)
+            got = 200
+        except urllib.error.HTTPError as e:
+            got = e.code
+        check(label, got == want, got)
+    import shutil
+    shutil.rmtree(os.path.join(PROJECT_CWD, ".git"))
+    os.remove(os.path.join(PROJECT_CWD, "login.py"))
     check("ping lists focus states",
           "needs_answer" in (ping.get("focus_states") or []), ping)
 

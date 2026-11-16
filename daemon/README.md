@@ -19,6 +19,17 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.24.0** Changes: what differs from the last commit in a session's folder.
+`GET /api/sessions/<id>/changes` returns the branch (with upstream, ahead and
+behind), each changed file with its status and added/removed line counts, and
+the diff against `HEAD` (staged and unstaged together, capped at 400 KB with
+`truncated`). `{"repo": false}` when the folder is not a git work tree.
+Read-only: git runs with a fixed argument list and with external diff
+drivers, textconv filters and fsmonitor switched off, so looking at a diff
+cannot run a program named by the repository's config. Not available to
+isolated guest accounts. `/api/ping` advertises `changes: true`. Covered by
+`tests/changes_test.py`.
+
 **2.23.0** One vocabulary for session states. `/api/ping` carries `states`:
 the four focus states in urgency order, each with its `label`, a `role`
 (`attention`, `danger`, `ok`, `dim`) and a `color` / `color_light` (empty for
@@ -815,6 +826,7 @@ GET  /api/sessions/<id>
 GET  /api/sessions/<id>/messages?offset=&limit=[&detail=steps]
 GET  /api/sessions/<id>/steps/<ref>             full text behind a truncated step
 GET  /api/sessions/<id>/file?path=<abs>         a host file the session linked (2.20+)
+GET  /api/sessions/<id>/changes                 working-tree changes of the session folder (2.24+)
 POST /api/sessions/new {cwd?, prompt, provider?, permission_mode?, …}
 POST /api/sessions/<id>/continue {prompt, permission_mode?, …}
 GET  /api/jobs

@@ -98,6 +98,7 @@ from urllib.parse import urlparse, parse_qs, unquote, quote
 from . import __version__
 from . import palette
 from . import accounts
+from . import changes
 from . import focus as focus_store
 from . import linked_files
 from . import shares as share_store
@@ -114,6 +115,7 @@ _SESSION_STEP = re.compile(r"^/api/sessions/([^/]+)/steps/([^/]+)$")
 _SESSION_CONT = re.compile(r"^/api/sessions/([^/]+)/continue$")
 _SESSION_TUI = re.compile(r"^/api/sessions/([^/]+)/tui$")
 _SESSION_FILE = re.compile(r"^/api/sessions/([^/]+)/file$")
+_SESSION_CHANGES = re.compile(r"^/api/sessions/([^/]+)/changes$")
 _SESSION_TUI_KEYS = re.compile(r"^/api/sessions/([^/]+)/tui/keys$")
 _SESSION_TUI_STREAM = re.compile(r"^/sse/sessions/([^/]+)/tui$")
 # session id -> the runner whose TUI answered for it. A session never changes
@@ -2086,6 +2088,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 payload["share"] = self.shares is not None
                 # GET /api/sessions/<id>/file: open a host path the agent linked.
                 payload["linked_files"] = True
+                # GET /api/sessions/<id>/changes: what differs from the last commit.
+                payload["changes"] = True
                 self._stamp_tui_caps(payload)
                 self._stamp_upload_caps(payload)
                 self._send_json(payload)
@@ -2141,6 +2145,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             payload["share"] = self.shares is not None
             # GET /api/sessions/<id>/file: open a host path the agent linked.
             payload["linked_files"] = True
+            # GET /api/sessions/<id>/changes: what differs from the last commit.
+            payload["changes"] = True
             self._stamp_tui_caps(payload)
             self._stamp_upload_caps(payload)
             self._send_json(payload)
@@ -2261,6 +2267,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         m = _SESSION_STEP.match(path)
         if m:
             self._send_session_step(m.group(1), m.group(2))
+            return
+
+        m = _SESSION_CHANGES.match(path)
+        if m:
+            self._send_session_changes(m.group(1))
             return
 
         m = _SESSION_FILE.match(path)
@@ -2503,6 +2514,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             self._bind_bundle(name)
             self._send_session_step(m.group(1), m.group(2))
+            return
+        m = _SESSION_CHANGES.match(path)
+        if m:
+            self._send_session_changes(m.group(1))
             return
         m = _SESSION_FILE.match(path)
         if m:
@@ -3008,6 +3023,35 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(400, str(e))
             return
         self._send_json({"ok": True, "goal": row})
+
+    def _send_session_changes(self, session_id):
+        """GET /api/sessions/<id>/changes: the session folder's working tree.
+
+        Read-only (see changes.py). Same access rules as running a shell
+        command in that folder: the session must be in scope and its cwd
+        inside what this principal may touch.
+        """
+        _name, _b, session = self._find_session(session_id)
+        if session is None or not self._session_in_scope(session):
+            self._error(404, "session not found")
+            return
+        p = self.principal or accounts.main_principal()
+        if p.is_guest and p.isolate_root:
+            # git would run as the daemon's user on a tree the guest owns.
+            self._error(403, "changes are not available for isolated accounts")
+            return
+        raw = session.get("cwd") or ""
+        cwd, cerr = accounts.confine_cwd(raw.strip() if isinstance(raw, str) else "", p)
+        if cerr:
+            self._error(403, cerr)
+            return
+        if not cwd or not os.path.isdir(cwd):
+            self._send_json({"ok": True, "repo": False, "cwd": cwd or ""})
+            return
+        payload = changes.collect(cwd)
+        payload["ok"] = True
+        payload["cwd"] = cwd
+        self._send_json(payload)
 
     def _handle_shell(self, body):
         if not isinstance(body, dict) or not isinstance(body.get("command"), str) \
