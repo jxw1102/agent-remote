@@ -1947,16 +1947,19 @@ function renderFilters() {
   const box = $("filters");          // row 1: Focus | All
   const dbox = $("filter-daemon");   // row 2, beside the search field
   const focusOn = focusMode();
-  const hasFocus = state.profiles.some((p) => focusCapable(p));
+  // Only daemons that are switched on. One that is off in Daemons has no
+  // connection to speak of, and used to be listed here as "connecting…".
+  const active = enabledProfiles();
+  const hasFocus = active.some((p) => focusCapable(p));
   // How many sessions are being carried. Only the Focus fetch knows: the
   // other view is a page of the newest sessions, which holds some of them.
   let carried = 0;
   if (hasFocus && focusOn && state.rowsFocus && !state.loading) {
     carried = visibleRows().length;
   }
-  const picked = state.filter ? profileById(state.filter) : null;
-  if (state.filter && !picked) state.filter = null;   // that daemon was removed
-  const daemons = state.profiles.length >= 2 ? state.profiles.map((p) => {
+  const picked = state.filter ? active.find((p) => p.id === state.filter) || null : null;
+  if (state.filter && !picked) state.filter = null;   // removed, or switched off
+  const daemons = active.length >= 2 ? active.map((p) => {
     const feed = state.feeds[p.id];
     return [p.id, p.name || p.baseUrl, profileHostAccent(p), (feed && feed.error) || "",
             connOf(p.id), p.host || "", p.version || ""];

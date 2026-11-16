@@ -174,14 +174,18 @@ fun SessionsScreen(
                             }
                             // On which daemon: one button and a menu, however
                             // many daemons there are.
-                            if (profileState.profiles.size >= 2) {
+                            // Only daemons that are switched on: one that is
+                            // off has no connection to speak of, and was
+                            // listed here as "connecting…".
+                            if (profileState.enabled.size >= 2) {
+                                val on = profileState.enabled.map { it.id }.toSet()
                                 DaemonFilter(
-                                    profiles = profileState.profiles.map {
+                                    profiles = profileState.enabled.map {
                                         Triple(it.id, it.displayName, it.provider)
                                     },
                                     selected = profileFilter,
                                     conn = conn,
-                                    problems = state.problems.toMap(),
+                                    problems = state.problems.toMap().filterKeys { it in on },
                                     onSelect = vm::setProfileFilter,
                                 )
                             }
@@ -256,7 +260,7 @@ fun SessionsScreen(
             // several daemons the daemon button (its red dot, its menu) and
             // the line under the list say which and why; with one there is no
             // such button, so it is said in a banner here.
-            val problems = if (profileState.profiles.size >= 2) emptyList() else
+            val problems = if (profileState.enabled.size >= 2) emptyList() else
                 state.problems.map { (id, msg) ->
                     (profileState.byId(id)?.displayName ?: "Daemon") to msg
                 }
@@ -325,6 +329,14 @@ fun SessionsScreen(
 
     LaunchedEffect(rows.size) {
         if (listState.firstVisibleItemIndex <= 1) listState.animateScrollToItem(0)
+    }
+    // The daemon being shown was removed or switched off: show all again,
+    // rather than an empty list with no way to see why.
+    LaunchedEffect(profileState.enabled, profileFilter) {
+        val picked = profileFilter
+        if (picked != null && profileState.enabled.none { it.id == picked }) {
+            vm.setProfileFilter(null)
+        }
     }
 }
 
