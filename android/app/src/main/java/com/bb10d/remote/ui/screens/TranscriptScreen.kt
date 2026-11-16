@@ -329,49 +329,22 @@ private fun TranscriptScreenBody(
                                 }
                             }
                         }
+                        // In the bar at every width, as on the web: how the
+                        // next turn runs, and the host terminal. The rest is
+                        // what you do now and then, under More.
+                        IconButton(onClick = { showOptions = true }) {
+                            Icon(Icons.Outlined.Tune, contentDescription = "Session options")
+                        }
+                        if (showLiveTui) {
+                            IconButton(onClick = onLiveTui) {
+                                Icon(Icons.Outlined.Terminal, contentDescription = "Live TUI")
+                            }
+                        }
                         Box {
                             IconButton(onClick = { menuOpen = true }) {
                                 Icon(Icons.Outlined.MoreVert, contentDescription = "More")
                             }
                             DropdownMenu(menuOpen, onDismissRequest = { menuOpen = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Refresh") },
-                                    leadingIcon = { Icon(Icons.Outlined.Refresh, null) },
-                                    onClick = { menuOpen = false; vm.refresh() },
-                                )
-                                if (showLiveTui) {
-                                    DropdownMenuItem(
-                                        text = { Text("Live TUI") },
-                                        leadingIcon = { Icon(Icons.Outlined.Terminal, null) },
-                                        onClick = {
-                                            menuOpen = false
-                                            onLiveTui()
-                                        },
-                                    )
-                                }
-                                // Adds the agent's working steps (tool calls,
-                                // results, thinking) under each message. This
-                                // session only, off by default — web parity.
-                                DropdownMenuItem(
-                                    text = { Text(if (processView) "Process view ✓" else "Process view") },
-                                    leadingIcon = { Icon(Icons.Outlined.Timeline, null) },
-                                    enabled = ref.sessionId.isNotEmpty(),
-                                    onClick = {
-                                        menuOpen = false
-                                        vm.setProcessView(!processView)
-                                    },
-                                )
-                                if (profile?.share == true) {
-                                    DropdownMenuItem(
-                                        text = { Text("Share link") },
-                                        leadingIcon = { Icon(Icons.Outlined.Share, null) },
-                                        enabled = ref.sessionId.isNotEmpty() && !share.busy,
-                                        onClick = {
-                                            menuOpen = false
-                                            vm.shareSession()
-                                        },
-                                    )
-                                }
                                 // Only where it can work: a daemon that has
                                 // the route, and a session with a folder.
                                 if (profile?.caps?.changes == true &&
@@ -386,12 +359,32 @@ private fun TranscriptScreenBody(
                                         },
                                     )
                                 }
+                                if (profile?.share == true) {
+                                    DropdownMenuItem(
+                                        text = { Text("Share link") },
+                                        leadingIcon = { Icon(Icons.Outlined.Share, null) },
+                                        enabled = ref.sessionId.isNotEmpty() && !share.busy,
+                                        onClick = {
+                                            menuOpen = false
+                                            vm.shareSession()
+                                        },
+                                    )
+                                }
                                 DropdownMenuItem(
-                                    text = { Text("Session options") },
-                                    leadingIcon = { Icon(Icons.Outlined.Tune, null) },
+                                    text = { Text("Refresh") },
+                                    leadingIcon = { Icon(Icons.Outlined.Refresh, null) },
+                                    onClick = { menuOpen = false; vm.refresh() },
+                                )
+                                // Adds the agent's working steps (tool calls,
+                                // results, thinking) under each message. This
+                                // session only, off by default — web parity.
+                                DropdownMenuItem(
+                                    text = { Text(if (processView) "Process view ✓" else "Process view") },
+                                    leadingIcon = { Icon(Icons.Outlined.Timeline, null) },
+                                    enabled = ref.sessionId.isNotEmpty(),
                                     onClick = {
                                         menuOpen = false
-                                        showOptions = true
+                                        vm.setProcessView(!processView)
                                     },
                                 )
                                 DropdownMenuItem(
@@ -403,7 +396,7 @@ private fun TranscriptScreenBody(
                                     },
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("Session id") },
+                                    text = { Text("Copy session id") },
                                     leadingIcon = { Icon(Icons.Outlined.Tag, null) },
                                     onClick = {
                                         menuOpen = false

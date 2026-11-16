@@ -2,6 +2,15 @@ package com.bb10d.remote.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +31,7 @@ import androidx.compose.ui.semantics.stateDescription
 import com.bb10d.remote.data.ConnState
 import com.bb10d.remote.ui.components.connLabel
 import com.bb10d.remote.ui.components.connTint
+import com.bb10d.remote.ui.components.rememberClip
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -140,24 +150,40 @@ fun SessionsScreen(
                                     vm.clearQuery()
                                 },
                             )
+                        } else if (profileState.profiles.isNotEmpty()) {
+                            // Which sessions: two views of one list, so one
+                            // switch that names both. It is the title: this
+                            // screen is the list, and the switch says which.
+                            FocusSwitch(
+                                focusMode = settings.focusMode,
+                                // Only once the rows came from a Focus fetch,
+                                // or the count flashes the All list's length.
+                                count = if (settings.focusMode && state.focusRows &&
+                                    !state.loading
+                                ) rows.size else 0,
+                                onChange = vm::setFocusMode,
+                            )
                         } else {
-                            Column {
-                                Text("Sessions", fontWeight = FontWeight.SemiBold)
-                                val subtitle = subtitleFor(rows.size, working.size)
-                                if (subtitle.isNotEmpty()) {
-                                    Text(
-                                        subtitle,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = pal.dim,
-                                    )
-                                }
-                            }
+                            Text("Sessions", fontWeight = FontWeight.SemiBold)
                         }
                     },
                     actions = {
                         if (!searching) {
                             IconButton(onClick = { searching = true }) {
                                 Icon(Icons.Outlined.Search, contentDescription = "Search")
+                            }
+                            // On which daemon: one button and a menu, however
+                            // many daemons there are.
+                            if (profileState.profiles.size >= 2) {
+                                DaemonFilter(
+                                    profiles = profileState.profiles.map {
+                                        Triple(it.id, it.displayName, it.provider)
+                                    },
+                                    selected = profileFilter,
+                                    conn = conn,
+                                    problems = state.problems.toMap(),
+                                    onSelect = vm::setProfileFilter,
+                                )
                             }
                         }
                         Box {
@@ -192,25 +218,10 @@ fun SessionsScreen(
                         containerColor = MaterialTheme.colorScheme.background,
                     ),
                 )
-                // Always shown now: the Focus/All switch lives here, and it has
-                // to be reachable with a single daemon configured too.
-                if (profileState.profiles.isNotEmpty() || projectFilter != null) {
-                    FilterRow(
-                        profiles = profileState.profiles.map {
-                            Triple(it.id, it.displayName, it.provider)
-                        },
-                        selected = profileFilter,
-                        project = projectFilter,
-                        focusMode = settings.focusMode,
-                        // Only once the rows actually came from a Focus
-                        // fetch — otherwise the chip flashes the All count.
-                        focusCount = if (settings.focusMode && state.focusRows &&
-                            !state.loading
-                        ) rows.size else 0,
-                        onBoardMode = vm::setFocusMode,
-                        onSelect = vm::setProfileFilter,
-                        onClearProject = { vm.setProjectFilter(null) },
-                    )
+                // Only when a project filter is on: it is the one filter that
+                // has no home in the bar above.
+                projectFilter?.let { project ->
+                    ProjectFilterRow(project) { vm.setProjectFilter(null) }
                 }
                 Hairline()
             }
@@ -241,9 +252,14 @@ fun SessionsScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            val problems = state.problems.map { (id, msg) ->
-                (profileState.byId(id)?.displayName ?: "Daemon") to msg
-            }
+            // A dead daemon must never read as "it has no sessions". With
+            // several daemons the daemon button (its red dot, its menu) and
+            // the line under the list say which and why; with one there is no
+            // such button, so it is said in a banner here.
+            val problems = if (profileState.profiles.size >= 2) emptyList() else
+                state.problems.map { (id, msg) ->
+                    (profileState.byId(id)?.displayName ?: "Daemon") to msg
+                }
             when {
                 profileState.profiles.isEmpty() -> EmptyState(
                     title = "No daemons yet",
@@ -261,12 +277,12 @@ fun SessionsScreen(
                     ProblemList(problems, onProfiles)
                     EmptyState(
                         title = when {
-                            problems.isNotEmpty() -> "Nothing to show"
+                            state.problems.isNotEmpty() -> "Nothing to show"
                             query.isBlank() -> "Nothing here yet"
                             else -> "No matches"
                         },
                         body = when {
-                            problems.isNotEmpty() ->
+                            state.problems.isNotEmpty() ->
                                 "No daemon in this view returned any sessions."
                             query.isBlank() ->
                                 "Start a session and it will show up here, whichever daemon " +
@@ -381,13 +397,6 @@ private fun ConnLine(daemons: List<Pair<String, ConnState?>>, onRetry: () -> Uni
     }
 }
 
-private fun subtitleFor(count: Int, working: Int): String = when {
-    working > 0 && count > 0 -> "$count · $working working"
-    working > 0 -> "$working working"
-    count > 0 -> "$count"
-    else -> ""
-}
-
 @Composable
 private fun SearchField(value: String, onValueChange: (String) -> Unit, onClose: () -> Unit) {
     val focus = remember { FocusRequester() }
@@ -417,84 +426,198 @@ private fun SearchField(value: String, onValueChange: (String) -> Unit, onClose:
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Focus | All. A two-way switch rather than a "Focus" chip beside an "All"
+ * chip: the chip never said what the other choice was, and the "All" next to
+ * it meant all daemons.
+ */
 @Composable
-private fun FilterRow(
+private fun FocusSwitch(focusMode: Boolean, count: Int, onChange: (Boolean) -> Unit) {
+    val pal = palette
+    val shape = RoundedCornerShape(50)
+    Row(
+        Modifier
+            .clip(shape)
+            .border(1.dp, pal.hairline, shape)
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SwitchSide("Focus", focusMode, count) { if (!focusMode) onChange(true) }
+        SwitchSide("All", !focusMode, 0) { if (focusMode) onChange(false) }
+    }
+}
+
+@Composable
+private fun SwitchSide(label: String, selected: Boolean, count: Int, onClick: () -> Unit) {
+    val pal = palette
+    val shape = RoundedCornerShape(50)
+    Row(
+        Modifier
+            .clip(shape)
+            .background(if (selected) pal.accent.copy(alpha = 0.18f) else Color.Transparent)
+            .selectable(selected = selected, role = Role.Tab, onClick = onClick)
+            .heightIn(min = 36.dp)
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (selected) pal.accent else pal.dim,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        )
+        if (count > 0) {
+            Spacer(Modifier.width(6.dp))
+            Text(
+                count.toString(),
+                style = MaterialTheme.typography.labelSmall,
+                color = pal.accent,
+                modifier = Modifier
+                    .clip(shape)
+                    .background(pal.accent.copy(alpha = 0.22f))
+                    .padding(horizontal = 6.dp, vertical = 1.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Which daemon's sessions to show. A funnel while it is every daemon, the
+ * picked daemon's name in its colour otherwise; the menu says how each one is
+ * doing. It replaces a chip per daemon, which scrolled out of sight from the
+ * third on.
+ */
+@Composable
+private fun DaemonFilter(
     profiles: List<Triple<String, String, String>>,
     selected: String?,
-    project: ProjectFilter?,
-    focusMode: Boolean,
-    focusCount: Int,
-    onBoardMode: (Boolean) -> Unit,
+    conn: Map<String, ConnState>,
+    problems: Map<String, String>,
     onSelect: (String?) -> Unit,
-    onClearProject: () -> Unit,
 ) {
-    androidx.compose.foundation.lazy.LazyRow(
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        // Focus / All comes first: it decides what the rest of the row filters.
-        item {
-            FilterChip(
-                selected = focusMode,
-                onClick = { onBoardMode(!focusMode) },
-                label = {
-                    Text(
-                        if (focusMode && focusCount > 0) "Focus · $focusCount" else "Focus",
-                    )
-                },
-                leadingIcon = {
+    val pal = palette
+    var open by remember { mutableStateOf(false) }
+    val picked = profiles.firstOrNull { it.first == selected }
+    Box {
+        if (picked == null) {
+            IconButton(onClick = { open = true }) {
+                Box {
                     Icon(
-                        Icons.Outlined.Check,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
+                        Icons.Outlined.FilterList,
+                        contentDescription = "Showing every daemon. Choose one",
                     )
-                },
-            )
-        }
-        item {
-            FilterChip(
-                selected = selected == null,
-                onClick = { onSelect(null) },
-                label = { Text("All") },
-            )
-        }
-        items(profiles, key = { it.first }) { (id, name, provider) ->
-            val accent = Accent.forProvider(provider)
-            FilterChip(
-                selected = selected == id,
-                onClick = { onSelect(if (selected == id) null else id) },
-                label = { Text(name) },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = accent.tint.copy(alpha = 0.2f),
-                    selectedLabelColor = accent.tint,
-                ),
-            )
-        }
-        if (project != null) {
-            item {
-                FilterChip(
-                    selected = true,
-                    onClick = onClearProject,
-                    label = { Text(project.name) },
-                    trailingIcon = {
-                        Icon(
-                            Icons.Outlined.Close,
-                            contentDescription = "Clear project filter",
-                            modifier = Modifier.size(16.dp),
+                    // One of them cannot be reached: say so before the menu is open.
+                    if (problems.isNotEmpty()) {
+                        Box(
+                            Modifier
+                                .align(Alignment.TopEnd)
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(pal.danger),
                         )
-                    },
-                    leadingIcon = {
-                        Icon(
-                            Icons.AutoMirrored.Outlined.List,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    },
+                    }
+                }
+            }
+        } else {
+            val tint = Accent.forProvider(picked.third).tint
+            val shape = RoundedCornerShape(8.dp)
+            Row(
+                Modifier
+                    .padding(horizontal = 4.dp)
+                    .clip(shape)
+                    .background(tint.copy(alpha = 0.16f))
+                    .border(1.dp, tint.copy(alpha = 0.45f), shape)
+                    .clickable(onClickLabel = "choose a daemon") { open = true }
+                    .heightIn(min = 36.dp)
+                    .padding(start = 10.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    picked.second,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = tint,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 96.dp),
+                )
+                Icon(
+                    Icons.Outlined.ArrowDropDown,
+                    contentDescription = null,
+                    tint = tint,
+                    modifier = Modifier.size(18.dp),
                 )
             }
         }
+        DropdownMenu(open, onDismissRequest = { open = false }) {
+            @Composable
+            fun dot(color: Color) = Box(
+                Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(color),
+            )
+            DropdownMenuItem(
+                text = { Text("All daemons") },
+                leadingIcon = { dot(pal.dim) },
+                trailingIcon = {
+                    if (selected == null) Icon(Icons.Outlined.Check, contentDescription = "selected")
+                },
+                onClick = { open = false; onSelect(null) },
+            )
+            profiles.forEach { (id, name, provider) ->
+                val problem = problems[id]
+                val state = conn[id]
+                val hint = problem ?: connLabel(state)
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(name)
+                            if (hint.isNotEmpty()) {
+                                Text(
+                                    hint,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (problem != null) pal.danger else connTint(state),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    },
+                    leadingIcon = { dot(Accent.forProvider(provider).tint) },
+                    trailingIcon = {
+                        if (selected == id) Icon(Icons.Outlined.Check, contentDescription = "selected")
+                    },
+                    onClick = { open = false; onSelect(id) },
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ProjectFilterRow(project: ProjectFilter, onClear: () -> Unit) {
+    Row(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+        FilterChip(
+            selected = true,
+            onClick = onClear,
+            label = { Text(project.name) },
+            trailingIcon = {
+                Icon(
+                    Icons.Outlined.Close,
+                    contentDescription = "Clear project filter",
+                    modifier = Modifier.size(16.dp),
+                )
+            },
+            leadingIcon = {
+                Icon(
+                    Icons.AutoMirrored.Outlined.List,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+            },
+        )
     }
 }
 
@@ -516,6 +639,7 @@ private fun SessionActionsDialog(
     onDismiss: () -> Unit,
 ) {
     val pal = palette
+    val clip = rememberClip()
     var title by remember(row.ref.key) { mutableStateOf(row.session.title) }
     var note by remember(row.ref.key) { mutableStateOf<String?>(null) }
     val member = row.session.focus
@@ -553,6 +677,14 @@ private fun SessionActionsDialog(
                         modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("Regenerate from transcript")
+                }
+                if (row.ref.sessionId.isNotEmpty()) {
+                    TextButton(onClick = { clip.copy(row.ref.sessionId); onDismiss() }) {
+                        Icon(Icons.Outlined.ContentCopy, contentDescription = null,
+                            modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Copy session id")
+                    }
                 }
                 TextButton(onClick = { onBoard(!member); onDismiss() }) {
                     Icon(
@@ -703,20 +835,19 @@ private fun SessionCard(
                     working -> stateDescription = "working"
                 }
             }
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
-        Row(verticalAlignment = Alignment.Top) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             if (working) {
-                Box(Modifier.padding(top = 6.dp, end = 8.dp)) {
-                    WorkingPulse(accent.tint)
-                }
+                WorkingPulse(accent.tint, Modifier.padding(end = 8.dp))
             }
             Text(
                 // Don't echo attachment filenames — the transcript chip already shows them.
                 text = listTitle(row.session),
                 style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 2,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
@@ -728,72 +859,88 @@ private fun SessionCard(
             )
         }
 
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(5.dp))
 
-        if (blocked) {
-            Spacer(Modifier.height(6.dp))
-            Row(
-                Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(pal.warn.copy(alpha = 0.16f))
-                    .padding(horizontal = 8.dp, vertical = 3.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                WorkingPulse(pal.warn, size = 6)
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    // The daemon's word for it, as in Focus and on the web.
-                    text = (com.bb10d.remote.ui.theme.DaemonVocabulary.focusLabel("needs_answer")
-                        ?: "needs answer").replaceFirstChar { it.uppercase() },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = pal.warn,
-                )
-            }
-        }
-
+        // One line: which daemon, where, what state it is in, and a short id
+        // at the far end. Folder and branch are words, not pills, and give
+        // way (they share what is left) so the state and the id are never cut.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            ProviderChip(row.provider, row.profileName)
-            val project = row.session.cwd.trimEnd('/').substringAfterLast('/')
-            if (project.isNotEmpty()) {
-                Spacer(Modifier.width(6.dp))
-                MetaPill(project)
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                ProviderChip(row.provider, row.profileName, Modifier.widthIn(max = 132.dp))
+                val project = row.session.cwd.trimEnd('/').substringAfterLast('/')
+                if (project.isNotEmpty()) {
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        project,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        // The folder keeps more of its name than the branch.
+                        modifier = Modifier.weight(2f, fill = false),
+                    )
+                }
+                if (row.session.gitBranch.isNotEmpty()) {
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        "⑂ ${row.session.gitBranch}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = pal.dim,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
+                // The state tag, in the daemon's words. "Needs answer" shows in
+                // either view; the rest only in Focus, where the row was
+                // enrolled (in All it is noise). Derived from the live status
+                // stream, so a turn ending is visible without a refresh.
+                val focusState = liveFocusState(row.session.focusState, working, blocked)
+                if (blocked) {
+                    Spacer(Modifier.width(7.dp))
+                    FocusPill("needs_answer")
+                } else if (showFocusState && focusState.isNotEmpty()) {
+                    Spacer(Modifier.width(7.dp))
+                    // A turn that ended while we watched the stream is unread
+                    // by definition: you were looking at the list.
+                    FocusPill(
+                        focusState,
+                        unread = row.session.focusUnread ||
+                            row.session.focusState == "working",
+                    )
+                }
             }
-            if (row.session.gitBranch.isNotEmpty()) {
-                Spacer(Modifier.width(6.dp))
-                MetaPill("⑂ ${row.session.gitBranch}")
-            }
-            // Focus state tag — one more pill on the same row. Focus mode only:
-            // in the All list it is noise on rows the human never enrolled.
-            // Suppressed when the card above already says "waiting for your
-            // answer", which is the same fact in stronger words.
-            // Derived from the live status stream, not the value fetched with
-            // the list, so a turn ending is visible without a manual refresh.
-            val focusState = liveFocusState(row.session.focusState, working, blocked)
-            if (showFocusState && focusState.isNotEmpty() && !blocked) {
-                Spacer(Modifier.width(6.dp))
-                // A turn that ended while we watched the stream is unread by
-                // definition — you were looking at the list, not the transcript.
-                FocusPill(
-                    focusState,
-                    unread = row.session.focusUnread ||
-                        row.session.focusState == "working",
+            // Enough of the id to tell two sessions apart. Long-press the row
+            // to copy all of it.
+            if (row.ref.sessionId.isNotEmpty()) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    row.ref.sessionId.take(8),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = pal.dim.copy(alpha = 0.75f),
+                    maxLines = 1,
                 )
             }
         }
 
         val preview = listPreview(row.session, searching)
         if (preview.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(5.dp))
             Text(
-                text = preview.replace('\n', ' ').trim(),
+                // One line of what was last said, as prose: the markdown marks
+                // of a reply ("**Progress:**") are noise at this size.
+                text = preview.replace(MARKDOWN_MARKS, "").replace('\n', ' ').trim(),
                 style = MaterialTheme.typography.bodySmall,
                 color = pal.dim,
-                maxLines = 2,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
     }
 }
+
+private val MARKDOWN_MARKS = Regex("""\*\*|__|`""")
 
 /**
  * The focus tag as of *now*, not as of the last list fetch.
