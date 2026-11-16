@@ -82,6 +82,19 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a shorter file is scanned from the top",
           s._scan_session(path) == (0, "rewritten", ""), s._scan_session(path))
 
+    # A rewind cuts the file in place (same inode) and the next turn grows it
+    # past where the last scan stopped: nothing from before may be kept.
+    path.write_text(user("kept question") + user("old summary", isCompactSummary=True)
+                    + assistant("z" * 3000))
+    check("before the rewind", s._scan_session(path) == (1, "kept question", "old summary"))
+    keep = len(user("kept question"))
+    with open(path, "r+") as f:
+        f.truncate(keep)
+        f.seek(keep)
+        f.write(assistant("w" * 6000) + user("after the rewind"))
+    check("cut in place and regrown: scanned from the top",
+          s._scan_session(path) == (0, "kept question", ""), s._scan_session(path))
+
     # Replaced by a longer file of the same name: a new inode, from the top.
     other = Path(tmp) / "swap.jsonl"
     other.write_text(user("replaced") + assistant("x" * 500))

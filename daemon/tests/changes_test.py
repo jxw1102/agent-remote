@@ -93,7 +93,13 @@ def main():
     check("binary file is flagged, not counted",
           by.get("blob.bin", {}).get("binary") is True and by["blob.bin"]["added"] == 0,
           by.get("blob.bin"))
-    check("totals add up", (got["added"], got["removed"]) == (2, 2), (got["added"], got["removed"]))
+    check("totals add up, the new file's line included",
+          (got["added"], got["removed"]) == (3, 2), (got["added"], got["removed"]))
+    check("a new file is shown as a diff against nothing",
+          by["notes/new file.md"]["added"] == 1
+          and "diff --git a/notes/new file.md b/notes/new file.md" in got["diff"]
+          and "+# hi" in got["diff"], got["diff"][-300:])
+    check("nothing to publish to without an origin", got["can_publish"] is False)
     check("diff covers staged and unstaged together",
           "+z = 4" in got["diff"] and "-bye" in got["diff"]
           and "rename to new name.txt" in got["diff"], got["diff"][:400])
@@ -132,6 +138,47 @@ def main():
           len(got["diff"]))
     check("file list still complete",
           any(f["path"] == "big.txt" and f["added"] == 40000 for f in got["files"]))
+
+    print("publishing a branch:")
+    bare = os.path.join(tmp, "origin.git")
+    git(tmp, "init", "-q", "--bare", bare)
+    pub = os.path.join(tmp, "pub")
+    os.makedirs(pub)
+    git(pub, "init", "-q", "-b", "main")
+    write(pub, "a.txt", "one\n")
+    check("no commit yet: nothing to publish",
+          changes.collect(pub)["can_publish"] is False)
+    git(pub, "add", "-A")
+    git(pub, "commit", "-q", "-m", "first")
+    check("a branch with commits but no origin cannot be published",
+          changes.collect(pub)["can_publish"] is False)
+    git(pub, "remote", "add", "origin", bare)
+    check("with an origin and no upstream it can",
+          changes.collect(pub)["can_publish"] is True)
+    git(pub, "push", "-q", "-u", "origin", "main")
+    got = changes.collect(pub)
+    check("once it has an upstream there is nothing to publish",
+          got["can_publish"] is False and got["upstream"] == "origin/main", got)
+    git(pub, "checkout", "-q", "--detach")
+    got = changes.collect(pub)
+    check("a detached HEAD cannot be published",
+          got["can_publish"] is False and got["branch"] == "HEAD", got)
+
+    print("git that cannot answer:")
+    real = changes._git
+
+    def slow(cwd, args, timeout=changes.GIT_TIMEOUT):
+        return (-2, b"") if args and args[0] == "status" else real(cwd, args, timeout)
+
+    changes._git = slow
+    try:
+        try:
+            changes.collect(repo)
+            check("a slow status is an error, not 'not a repository'", False)
+        except changes.ChangesError as e:
+            check("a slow status is an error, not 'not a repository'", "status" in str(e), e)
+    finally:
+        changes._git = real
 
     print()
     if failures:

@@ -3053,7 +3053,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not cwd or not os.path.isdir(cwd):
             self._send_json({"ok": True, "repo": False, "cwd": cwd or ""})
             return
-        payload = changes.collect(cwd)
+        try:
+            payload = changes.collect(cwd)
+        except changes.ChangesError as e:
+            self._error(504, str(e))
+            return
         payload["ok"] = True
         payload["cwd"] = cwd
         self._send_json(payload)

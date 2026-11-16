@@ -2619,9 +2619,15 @@ function splitDiff(text) {
   return out;
 }
 
-function diffLineClass(line) {
+/**
+ * What kind of line this is. `inHunk` is false for a file's header, the only
+ * place "--- a/x" and "+++ b/x" are names: after the first "@@", a line that
+ * starts "---" is a removed line whose text starts "--" (a SQL comment, a
+ * Markdown rule), and it must be shown as removed.
+ */
+function diffLineClass(line, inHunk) {
   if (line.startsWith("@@")) return "hunk";
-  if (line.startsWith("+++") || line.startsWith("---")) return "meta";
+  if (!inHunk) return "meta";
   if (line.startsWith("+")) return "add";
   if (line.startsWith("-")) return "del";
   if (line.startsWith(" ")) return "";
@@ -2694,7 +2700,7 @@ function renderSide() {
         const target = anchors.get(f.path);
         if (target) target.scrollIntoView({ block: "start" });
       });
-      // Untracked files have no diff section to jump to.
+      // No section to jump to: binary, too large, or past the diff's cap.
       row.disabled = !sections.some((sec) => sec.path === f.path);
       li.appendChild(row);
       list.appendChild(li);
@@ -2707,9 +2713,11 @@ function renderSide() {
       const box = el("section", "diff-file");
       box.appendChild(el("div", "diff-name", sec.path));
       const pre = el("pre", "diff-lines");
+      let inHunk = false;
       sec.lines.forEach((line) => {
-        if (/^(index |similarity index |new file mode|deleted file mode|old mode|new mode)/.test(line)) return;
-        const cls = diffLineClass(line);
+        if (line.startsWith("@@")) inHunk = true;
+        if (!inHunk && /^(index |similarity index |new file mode|deleted file mode|old mode|new mode)/.test(line)) return;
+        const cls = diffLineClass(line, inHunk);
         pre.appendChild(el("span", "diff-line" + (cls ? " " + cls : ""), line || " "));
       });
       box.appendChild(pre);
@@ -2724,7 +2732,7 @@ function renderSide() {
   body.scrollTop = keepScroll;
 
   // Git actions. Each one says exactly what it will run.
-  if (!files.length && !d.ahead) return;
+  if (!files.length && !d.ahead && !d.can_publish) return;
   foot.classList.remove("hidden");
   if (side.form) {
     const msg = el("textarea");
@@ -2759,8 +2767,10 @@ function renderSide() {
     commit.addEventListener("click", () => { side.form = true; renderSide(); });
     foot.appendChild(commit);
   }
-  if (d.ahead || !d.upstream) {
-    // No upstream yet: publish the branch to origin and track it.
+  // Push what is ahead of the upstream; or, for a branch that has none yet
+  // and somewhere to go (the daemon says so: not a detached HEAD, not a
+  // repository without an origin), publish it and track it.
+  if ((d.upstream && d.ahead) || d.can_publish) {
     const cmd = d.upstream ? "git push" : "git push -u origin HEAD";
     const push = el("button", null, d.upstream ? `Push ${d.ahead}` : "Publish branch");
     push.type = "button";
@@ -2798,7 +2808,9 @@ async function runGit(command) {
     out = `$ ${command.split(" -m ")[0]}\n${e.message || "failed"}`;
   }
   side.busy = false;
-  if (gen !== side.gen && !side.open) return;
+  // Another session was opened, or the pane closed, while this ran: its
+  // output belongs to neither.
+  if (gen !== side.gen || !side.open) return;
   side.out = out;
   loadChanges();
 }

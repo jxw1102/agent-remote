@@ -35,6 +35,23 @@ class DiffRowsTest {
     }
 
     @Test
+    fun linesThatStartWithDashesOrPlusesAreChangesInsideAHunk() {
+        val sql = """
+            diff --git a/q.sql b/q.sql
+            --- a/q.sql
+            +++ b/q.sql
+            @@ -1,3 +1,3 @@
+             select 1;
+            --- drop legacy table
+            +++count;
+        """.trimIndent() + "\n"
+        val kinds = diffRows(sql).filterIsInstance<DiffRow.Line>().joinToString("") { it.kind.toString() }
+        // The header's --- and +++ are names; the same marks after @@ are a
+        // removed "-- drop legacy table" and an added "++count;".
+        assertEquals("mm@ -+", kinds)
+    }
+
+    @Test
     fun emptyDiffHasNoRows() {
         assertEquals(emptyList<DiffRow>(), diffRows(""))
     }

@@ -560,6 +560,7 @@ data class ChangesDto(
     val upstream: String = "",
     val ahead: Int = 0,
     val behind: Int = 0,
+    @SerialName("can_publish") val canPublish: Boolean = false,
     val files: List<ChangedFileDto> = emptyList(),
     @SerialName("more_files") val moreFiles: Int = 0,
     val added: Int = 0,

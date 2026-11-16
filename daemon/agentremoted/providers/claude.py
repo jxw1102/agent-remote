@@ -56,6 +56,8 @@ log = logging.getLogger(__name__)
 # How much we read from the head/tail of a transcript when building the
 # session list. Enough for metadata without parsing multi-MB files.
 _HEAD_BYTES = 64 * 1024
+# How much of what _scan_session last read it re-checks before carrying on.
+_SCAN_TAIL_BYTES = 256
 _TAIL_BYTES = 64 * 1024
 # Window for the "is this the user's own session" check (see
 # ClaudeStore._is_user_session). Generous: the whole point is that anything
@@ -1401,20 +1403,28 @@ class ClaudeStore:
             memo = self._scan_memo.get(path.stem)
             if memo and memo["key"] == key:
                 return memo["result"]
-            if (memo and memo["ino"] == st.st_ino
-                    and memo["offset"] <= st.st_size):
-                offset = memo["offset"]
-                compactions, first, last_summary = memo["result"]
-            else:       # new to us, or replaced / cut short: from the top
-                offset = 0
-                compactions, first, last_summary = 0, "", ""
+            offset = 0
+            compactions, first, last_summary = 0, "", ""
+            tail = b""
             try:
                 with open(path, "rb") as f:
+                    # Carry on from last time only if what was read is still
+                    # there. A rewind cuts the file short in place and the
+                    # next turn can grow it past the old offset again; the
+                    # bytes just before the offset tell the two apart.
+                    if (memo and memo["ino"] == st.st_ino
+                            and memo["offset"] <= st.st_size):
+                        f.seek(memo["offset"] - len(memo["tail"]))
+                        if f.read(len(memo["tail"])) == memo["tail"]:
+                            offset = memo["offset"]
+                            compactions, first, last_summary = memo["result"]
+                            tail = memo["tail"]
                     f.seek(offset)
                     for raw in f:
                         if not raw.endswith(b"\n"):
                             break       # still being written: next time
                         offset += len(raw)
+                        tail = (tail + raw)[-_SCAN_TAIL_BYTES:]
                         # Only user records count; skip the rest unparsed.
                         if self._scan_marker and self._scan_marker not in raw:
                             continue
@@ -1435,7 +1445,7 @@ class ClaudeStore:
             result = (compactions, first, last_summary)
             self._scan_memo[path.stem] = {
                 "key": key, "ino": st.st_ino, "offset": offset,
-                "result": result}
+                "tail": tail, "result": result}
             return result
 
     def _is_user_session(self, path: Path) -> bool:

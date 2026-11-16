@@ -140,7 +140,18 @@ internal fun Composer(
     // the end; with a plain String the caret stayed where it was, in the
     // middle of the command just inserted.
     var field by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
+    // What was typed here and not yet seen coming back as `text`. `text`
+    // arrives a moment after it is sent up, so it can still be "a" when the
+    // field already says "ab"; taking that for an outside change put "a" back
+    // and dropped the "b" (and broke an IME composition).
+    val sentUp = remember { ArrayDeque<String>() }
     LaunchedEffect(text) {
+        val at = sentUp.indexOf(text)
+        if (at >= 0) {
+            repeat(at + 1) { sentUp.removeFirst() }
+            return@LaunchedEffect
+        }
+        sentUp.clear()
         if (text != field.text) field = TextFieldValue(text, TextRange(text.length))
     }
     val queues = running && !interactive
@@ -161,7 +172,13 @@ internal fun Composer(
                 value = field,
                 onValueChange = {
                     field = it
-                    if (it.text != text) onText(it.text)
+                    if (it.text != text || sentUp.isNotEmpty()) {
+                        if (sentUp.lastOrNull() != it.text) {
+                            if (sentUp.size >= 16) sentUp.removeFirst()
+                            sentUp.addLast(it.text)
+                        }
+                        onText(it.text)
+                    }
                 },
                 placeholder = {
                     Text(

@@ -7,7 +7,12 @@ to the repository; commit and push stay explicit actions the person takes.
 Everything goes through `git` with a fixed argument list (no shell), with the
 repository's own hooks into diffing switched off: an external diff driver, a
 textconv filter or an fsmonitor command are all programs named by the repo's
-config, and looking at a diff must not run them.
+config, and looking at a diff should not run them.
+
+Not switched off: clean filters (`filter.<name>.clean` / `.process`, which is
+how git-lfs and git-crypt work). git runs them to tell whether a file
+differs, and without them every filtered file would read as modified. They
+are the same programs any `git status` in that folder already runs.
 """
 
 import os
@@ -17,6 +22,14 @@ import subprocess
 MAX_DIFF_BYTES = 400 * 1024
 MAX_FILES = 500
 GIT_TIMEOUT = 10
+# New files have no diff against the last commit, so they are read one by
+# one; this many at most, and none larger than this.
+MAX_UNTRACKED_DIFFS = 40
+MAX_UNTRACKED_BYTES = 200 * 1024
+
+
+class ChangesError(Exception):
+    """git could not answer (too slow, or failed): not the same as "not a repo"."""
 
 _SAFE = ["-c", "core.fsmonitor=false", "-c", "core.quotepath=false",
          "-c", "diff.external=", "-c", "color.ui=false"]
@@ -36,9 +49,41 @@ def _git(cwd, args, timeout=GIT_TIMEOUT):
     try:
         out = subprocess.run(["git"] + _SAFE + args, cwd=cwd, env=env,
                              capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return -2, b""
     except (OSError, subprocess.SubprocessError):
         return -1, b""
     return out.returncode, out.stdout
+
+
+def _untracked_diff(root, path):
+    """(diff bytes, added lines, binary) for a file git does not track yet.
+
+    Compared with nothing, the way `git diff` would show it once added. This
+    reads the file and runs no filter on it.
+    """
+    full = os.path.join(root, path)
+    try:
+        if os.path.islink(full) or not os.path.isfile(full) \
+                or os.path.getsize(full) > MAX_UNTRACKED_BYTES:
+            return b"", 0, False
+    except OSError:
+        return b"", 0, False
+    # Exit code 1 means "they differ", which is the point.
+    code, out = _git(root, ["diff", "--no-index", "--no-color", "--no-ext-diff",
+                            "--no-textconv", "--", os.devnull, path], timeout=5)
+    if code not in (0, 1) or not out:
+        return b"", 0, False
+    if b"\nBinary files " in out or out.startswith(b"Binary files "):
+        return out, 0, True
+    added = 0
+    in_hunk = False
+    for line in out.split(b"\n"):
+        if line.startswith(b"@@"):
+            in_hunk = True
+        elif in_hunk and line.startswith(b"+"):
+            added += 1
+    return out, added, False
 
 
 def _text(raw):
@@ -69,17 +114,24 @@ def collect(cwd):
     """The working-tree changes under `cwd`, as a JSON-ready dict.
 
     {"repo": False} when the folder is not inside a git work tree (or git is
-    missing): the client says so instead of showing an empty diff.
+    missing): the client says so instead of showing an empty diff. Raises
+    ChangesError when it is a repository but git could not answer, so a slow
+    repository is never reported as "not a repository".
     """
     code, out = _git(cwd, ["rev-parse", "--show-toplevel"], timeout=5)
+    if code == -2:
+        raise ChangesError("git did not answer in time")
     if code != 0:
         return {"repo": False}
     root = _text(out).strip()
 
     code, out = _git(cwd, ["status", "--porcelain=v1", "--branch", "-z",
                            "--untracked-files=all"])
+    if code == -2:
+        raise ChangesError(
+            "git status took longer than %d s in this folder" % GIT_TIMEOUT)
     if code != 0:
-        return {"repo": False}
+        raise ChangesError("git status failed in this folder")
     branch, upstream, ahead, behind = "", "", 0, 0
     files = {}
     order = []
@@ -148,6 +200,30 @@ def collect(cwd):
     code, out = _git(cwd, ["diff", "--no-color", "-M", "--no-ext-diff",
                            "--no-textconv"] + base)
     diff = out if code == 0 else b""
+    # Files git does not track yet are part of what a commit would take
+    # (the clients' Commit stages everything), so they are shown too: each
+    # one as a diff against nothing, while there is room.
+    read = 0
+    for path in order:
+        info = files[path]
+        if info["status"] != "untracked":
+            continue
+        if read >= MAX_UNTRACKED_DIFFS or len(diff) > MAX_DIFF_BYTES:
+            break
+        read += 1
+        # status lists paths from the top of the work tree.
+        part, added, binary = _untracked_diff(root, path)
+        info["added"] = added
+        info["binary"] = binary
+        if part and not binary:
+            diff += (b"" if not diff or diff.endswith(b"\n") else b"\n") + part
+
+    # Publishing only makes sense for a real branch with commits, no upstream
+    # yet, and an `origin` to publish to.
+    can_publish = bool(
+        has_head and branch and branch != "HEAD" and not upstream
+        and _git(cwd, ["remote", "get-url", "origin"], timeout=5)[0] == 0)
+
     truncated = len(diff) > MAX_DIFF_BYTES
     if truncated:
         cut = diff.rfind(b"\n", 0, MAX_DIFF_BYTES)
@@ -161,6 +237,7 @@ def collect(cwd):
         "upstream": upstream,
         "ahead": ahead,
         "behind": behind,
+        "can_publish": can_publish,
         "files": listed,
         "more_files": max(0, len(order) - MAX_FILES),
         "added": sum(f["added"] for f in files.values()),

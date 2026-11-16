@@ -231,13 +231,28 @@ private fun TranscriptScreenBody(
     // Where the reader was BEFORE the newest row was added; by the time the
     // effect below runs, the list already contains it.
     val wasReadingBack = remember { booleanArrayOf(false) }
+    // True while the list is being scrolled to new output by the effect
+    // below. A row that has just arrived is under the screen until that
+    // scroll reaches it, which looks exactly like the reader having scrolled
+    // away; a second row arriving meanwhile was taken for that and the
+    // transcript stopped following.
+    val following = remember { booleanArrayOf(false) }
     val lastId = ui.items.lastOrNull()?.id
     LaunchedEffect(lastId) {
         if (ui.items.isEmpty()) return@LaunchedEffect
-        if (wasReadingBack[0]) unseen = true
-        else listState.animateScrollToItem(ui.items.lastIndex)
+        if (wasReadingBack[0]) {
+            unseen = true
+            return@LaunchedEffect
+        }
+        following[0] = true
+        try {
+            listState.animateScrollToItem(ui.items.lastIndex)
+        } finally {
+            following[0] = false
+        }
     }
     LaunchedEffect(awayFromLatest, behindLatest, lastId) {
+        if (following[0]) return@LaunchedEffect
         wasReadingBack[0] = awayFromLatest || behindLatest
         if (!wasReadingBack[0]) unseen = false
     }

@@ -60,19 +60,25 @@ internal sealed interface DiffRow {
 internal fun diffRows(diff: String): List<DiffRow> {
     val out = ArrayList<DiffRow>()
     var inFile = false
+    // False in a file's header, the only place "--- a/x" and "+++ b/x" are
+    // names. After the first "@@", a line starting "---" is a removed line
+    // whose text starts "--" (a SQL comment, a Markdown rule).
+    var inHunk = false
     for (line in diff.split('\n')) {
         if (line.startsWith("diff --git ")) {
             val path = Regex("^diff --git a/(.*) b/(.*)$").find(line)?.groupValues?.get(2)
                 ?: line.removePrefix("diff --git ")
             out += DiffRow.File(path)
             inFile = true
+            inHunk = false
             continue
         }
         if (!inFile) continue
-        if (HIDDEN_META.any { line.startsWith(it) }) continue
+        if (line.startsWith("@@")) inHunk = true
+        if (!inHunk && HIDDEN_META.any { line.startsWith(it) }) continue
         val kind = when {
             line.startsWith("@@") -> '@'
-            line.startsWith("+++") || line.startsWith("---") -> 'm'
+            !inHunk -> 'm'
             line.startsWith("+") -> '+'
             line.startsWith("-") -> '-'
             line.startsWith(" ") || line.isEmpty() -> ' '
@@ -236,7 +242,8 @@ internal fun ChangesSheet(
         }
 
         // Git actions. Each one says what it will do.
-        if (data != null && data.repo && (data.files.isNotEmpty() || data.ahead > 0 || data.upstream.isEmpty())) {
+        val canPush = data != null && ((data.upstream.isNotEmpty() && data.ahead > 0) || data.canPublish)
+        if (data != null && data.repo && (data.files.isNotEmpty() || canPush)) {
             Hairline()
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                 if (data.files.isNotEmpty()) {
@@ -261,7 +268,9 @@ internal fun ChangesSheet(
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (data.ahead > 0 || data.upstream.isEmpty()) {
+                    // Publish only where the daemon says there is somewhere
+                    // to publish to (not a detached HEAD, not without an origin).
+                    if (canPush) {
                         TextButton(onClick = { confirmPush = true }, enabled = !ui.busy) {
                             Text(if (data.upstream.isEmpty()) "Publish branch" else "Push ${data.ahead}")
                         }

@@ -19,6 +19,26 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.25.0** Changes, after review. `GET /api/sessions/<id>/changes` now
+shows files git does not track yet as a diff against nothing, with their line
+counts (up to 40 files of 200 KB each): a client's Commit stages everything,
+so a new file must be reviewable too. `can_publish` says whether "publish this
+branch" makes sense (a real branch with commits, no upstream, an `origin`);
+clients offered it on a detached HEAD and in repositories with no remote. A
+`git status` that times out or fails is a 504 with the reason, where it used
+to be reported as "not a git repository". The transcript scan of 2.24.1
+re-checks the bytes before its saved offset, so a transcript rewound in
+place and regrown is scanned from the top rather than from a stale offset.
+Correction to the 2.24.0 note below: external diff drivers, textconv and
+fsmonitor are off, but clean filters named by the repository (git-lfs,
+git-crypt) still run, as they do for any `git status` there; without them
+every filtered file would read as modified. Web and Android 1.7.10: lines
+that start `---` or `+++` inside a hunk are shown as removed or added (they
+were dimmed as file names); Web: a git command's output is not shown under
+another session. Changes is on Web and Android; BlackBerry 10 and the pager
+do not show it (deferred: neither has a view that fits a diff, and neither
+is built in this tree's CI).
+
 **2.24.1** A long transcript no longer stalls the daemon. Finding a
 session's title source re-read the whole transcript whenever the file had
 changed, with no limit on how many requests did so at once. On a 245 MB
@@ -38,8 +58,8 @@ behind), each changed file with its status and added/removed line counts, and
 the diff against `HEAD` (staged and unstaged together, capped at 400 KB with
 `truncated`). `{"repo": false}` when the folder is not a git work tree.
 Read-only: git runs with a fixed argument list and with external diff
-drivers, textconv filters and fsmonitor switched off, so looking at a diff
-cannot run a program named by the repository's config. Not available to
+drivers, textconv filters and fsmonitor switched off (clean filters still
+run, see 2.25.0). Not available to
 isolated guest accounts. `/api/ping` advertises `changes: true`. Covered by
 `tests/changes_test.py`.
 
