@@ -3343,7 +3343,14 @@ function updateLiveTuiCapture() {
   const on = !!state.liveTuiKeys;
   const chip = $("btn-tui-capture");
   if (chip) {
-    chip.textContent = on ? "Keys: TUI" : "Keys: text field";
+    // Two spellings: the long one, and a short one for a narrow window
+    // where the chip shares a row with the soft keys.
+    chip.textContent = "";
+    chip.append(el("span", "cap-long", on ? "Keys: TUI" : "Keys: text field"),
+                el("span", "cap-short", on ? "Keys ✓" : "Keys"));
+    chip.setAttribute("aria-label", on
+      ? "Keystrokes go to the host terminal"
+      : "Keystrokes go to the text field");
     chip.setAttribute("aria-pressed", on ? "true" : "false");
     chip.classList.toggle("on", on);
   }
