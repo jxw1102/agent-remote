@@ -6267,8 +6267,11 @@ async function openInbox() {
         const del = el("button", "danger", isDir ? "Delete folder" : "Delete");
         del.type = "button";
         del.addEventListener("click", async () => {
-          if (isDir && !window.confirm(
-            `Delete folder “${row.file.name}” on the host? All files inside are removed.`)) {
+          // Files too: it is gone from the host for good, one click away
+          // from Download.
+          if (!window.confirm(isDir
+            ? `Delete folder “${row.file.name}” on the host? All files inside are removed.`
+            : `Delete “${row.file.name}” on the host? It cannot be brought back.`)) {
             return;
           }
           try {
