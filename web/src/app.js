@@ -1962,7 +1962,7 @@ function renderFilters() {
   const daemons = active.length >= 2 ? active.map((p) => {
     const feed = state.feeds[p.id];
     return [p.id, p.name || p.baseUrl, profileHostAccent(p), (feed && feed.error) || "",
-            connOf(p.id), p.host || "", p.version || ""];
+            connOf(p.id), p.version || ""];
   }) : [];
   const sig = JSON.stringify([hasFocus, focusOn, carried, state.focusTally || "",
                               state.filter, daemons]);
@@ -2079,10 +2079,10 @@ function renderFilters() {
     pop.appendChild(item(null, "All daemons",
       up === daemons.length ? "live" : (up ? "reconnecting" : "offline"),
       up === daemons.length ? `${up} connected` : `${up} of ${daemons.length} connected`, ""));
-    daemons.forEach(([id, name, _accent, error, conn, host, version]) => {
+    daemons.forEach(([id, name, _accent, error, conn, version]) => {
       const st = stateOf(error, conn);
-      const detail = error
-        || [host, version ? "v" + version : ""].filter(Boolean).join(" · ");
+      // The name says which daemon it is; where it lives is in Daemons.
+      const detail = error || (version ? "v" + version : "");
       pop.appendChild(item(id, name, st, CONN_WORD[st] || st, detail));
     });
     dbox.appendChild(pop);

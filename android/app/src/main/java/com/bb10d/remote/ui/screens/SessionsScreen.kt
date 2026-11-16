@@ -186,7 +186,7 @@ fun SessionsScreen(
                                     profiles = profileState.enabled.map {
                                         DaemonChoice(
                                             it.id, it.displayName, it.provider,
-                                            it.hostLabel, it.caps.version,
+                                            it.caps.version,
                                         )
                                     },
                                     selected = profileFilter,
@@ -510,7 +510,6 @@ private data class DaemonChoice(
     val id: String,
     val name: String,
     val provider: String,
-    val host: String,
     val version: String,
 )
 
@@ -674,9 +673,10 @@ private fun DaemonFilter(
                     name = p.name,
                     state = state,
                     word = connWord(state),
+                    // The name says which daemon it is; its address is in
+                    // Profiles for when that is the question.
                     detail = problems[p.id]
-                        ?: listOf(p.host, if (p.version.isNotEmpty()) "v${p.version}" else "")
-                            .filter { it.isNotEmpty() }.joinToString(" · "),
+                        ?: if (p.version.isNotEmpty()) "v${p.version}" else "",
                 )
             }
         }
