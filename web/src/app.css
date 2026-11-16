@@ -252,8 +252,9 @@ a { color: var(--accent); }
   overflow: hidden;
 }
 .row-meta > .tag { flex: none; }
-/* A long daemon name gives way too, before the state tag or the id is cut. */
-.row-meta > .tag.host { flex: 0 1 auto; min-width: 3ch; max-width: 42%; overflow: hidden; text-overflow: ellipsis; }
+/* A long daemon name is cut at a share of the row; a short one is never
+   squeezed by the folder and branch beside it. */
+.row-meta > .tag.host { flex: 0 0 auto; max-width: 42%; overflow: hidden; text-overflow: ellipsis; }
 .row-folder, .row-branch {
   min-width: 0;
   overflow: hidden;
@@ -411,11 +412,42 @@ a { color: var(--accent); }
   background: var(--surface-2);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
-.filter-opt { width: 100%; }
-.filter-opt .pop-main { display: inline-flex; align-items: center; gap: 8px; }
-.filter-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--dim); }
-.filter-opt .pop-hint { padding-left: 16px; white-space: normal; }
-.filter-opt .filter-bad { color: var(--danger); }
+.filter-head {
+  padding: 6px 10px 4px;
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.3px;
+}
+.pop-opt.filter-opt {
+  width: 100%;
+  flex-direction: row;
+  justify-content: flex-start;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+}
+/* "All daemons" stands apart from the daemons themselves. */
+.filter-head + .filter-opt { margin-bottom: 4px; }
+.filter-head + .filter-opt + .filter-opt { position: relative; margin-top: 4px; }
+.filter-head + .filter-opt + .filter-opt::before {
+  content: "";
+  position: absolute;
+  left: 6px; right: 6px; top: -5px;
+  border-top: 1px solid var(--line);
+}
+.filter-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; text-align: left; }
+.filter-opt .pop-main { font-weight: 500; }
+.filter-opt[aria-selected="true"] .pop-main { font-weight: 600; }
+.filter-opt .pop-hint { white-space: normal; overflow-wrap: anywhere; }
+/* The state: a dot and a word in the same colour. */
+.filter-state { width: 8px; height: 8px; flex: none; margin-top: 6px; border-radius: 50%; background: var(--dim); }
+.st-live .filter-state { background: var(--ok); }
+.st-live .filter-word { color: var(--ok); }
+.st-connecting .filter-state,
+.st-reconnecting .filter-state { background: var(--attention); animation: breathe 1.6s ease-in-out infinite; }
+.st-reconnecting .filter-word { color: var(--attention); }
+.st-offline .filter-state { background: none; border: 1.5px solid var(--danger); }
+.st-offline .filter-word, .st-offline .pop-hint { color: var(--danger); }
 
 /* Row "Done" control. Lives on the row rather than the chat header so the
    gesture is where the thing is, and it is hover-only so 40 idle rows do not

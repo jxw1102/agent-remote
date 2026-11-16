@@ -11,6 +11,9 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -181,7 +184,10 @@ fun SessionsScreen(
                                 val on = profileState.enabled.map { it.id }.toSet()
                                 DaemonFilter(
                                     profiles = profileState.enabled.map {
-                                        Triple(it.id, it.displayName, it.provider)
+                                        DaemonChoice(
+                                            it.id, it.displayName, it.provider,
+                                            it.hostLabel, it.caps.version,
+                                        )
                                     },
                                     selected = profileFilter,
                                     conn = conn,
@@ -500,9 +506,25 @@ private fun SwitchSide(label: String, selected: Boolean, count: Int, onClick: ()
  * doing. It replaces a chip per daemon, which scrolled out of sight from the
  * third on.
  */
+private data class DaemonChoice(
+    val id: String,
+    val name: String,
+    val provider: String,
+    val host: String,
+    val version: String,
+)
+
+/** A daemon's standing, in a word. Never colour alone. */
+private fun connWord(state: ConnState?): String = when (state) {
+    ConnState.LIVE -> "Connected"
+    ConnState.RECONNECTING -> "Reconnecting…"
+    ConnState.OFFLINE -> "Offline"
+    ConnState.CONNECTING, null -> "Connecting…"
+}
+
 @Composable
 private fun DaemonFilter(
-    profiles: List<Triple<String, String, String>>,
+    profiles: List<DaemonChoice>,
     selected: String?,
     conn: Map<String, ConnState>,
     problems: Map<String, String>,
@@ -510,7 +532,10 @@ private fun DaemonFilter(
 ) {
     val pal = palette
     var open by remember { mutableStateOf(false) }
-    val picked = profiles.firstOrNull { it.first == selected }
+    val picked = profiles.firstOrNull { it.id == selected }
+    // A daemon whose list could not be fetched is offline whatever its
+    // stream last said.
+    fun stateOf(id: String): ConnState? = if (problems[id] != null) ConnState.OFFLINE else conn[id]
     Box {
         if (picked == null) {
             IconButton(onClick = { open = true }) {
@@ -532,7 +557,7 @@ private fun DaemonFilter(
                 }
             }
         } else {
-            val tint = Accent.forProvider(picked.third).tint
+            val tint = Accent.forProvider(picked.provider).tint
             val shape = RoundedCornerShape(8.dp)
             Row(
                 Modifier
@@ -546,7 +571,7 @@ private fun DaemonFilter(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    picked.second,
+                    picked.name,
                     style = MaterialTheme.typography.labelLarge,
                     color = tint,
                     maxLines = 1,
@@ -561,46 +586,97 @@ private fun DaemonFilter(
                 )
             }
         }
-        DropdownMenu(open, onDismissRequest = { open = false }) {
+        DropdownMenu(
+            open,
+            onDismissRequest = { open = false },
+            modifier = Modifier.widthIn(min = 272.dp, max = 340.dp),
+        ) {
+            // One entry: a dot in the colour of its state, the name, and
+            // under it the state in words, then what identifies the daemon.
             @Composable
-            fun dot(color: Color) = Box(
-                Modifier
-                    .size(8.dp)
-                    .clip(CircleShape)
-                    .background(color),
-            )
-            DropdownMenuItem(
-                text = { Text("All daemons") },
-                leadingIcon = { dot(pal.dim) },
-                trailingIcon = {
-                    if (selected == null) Icon(Icons.Outlined.Check, contentDescription = "selected")
-                },
-                onClick = { open = false; onSelect(null) },
-            )
-            profiles.forEach { (id, name, provider) ->
-                val problem = problems[id]
-                val state = conn[id]
-                val hint = problem ?: connLabel(state)
+            fun entry(
+                id: String?,
+                name: String,
+                state: ConnState?,
+                word: String,
+                detail: String,
+            ) {
+                val tint = connTint(state)
+                val chosen = selected == id
                 DropdownMenuItem(
                     text = {
-                        Column {
-                            Text(name)
-                            if (hint.isNotEmpty()) {
-                                Text(
-                                    hint,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (problem != null) pal.danger else connTint(state),
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
+                        Column(Modifier.padding(vertical = 4.dp)) {
+                            Text(
+                                name,
+                                fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                buildAnnotatedString {
+                                    withStyle(SpanStyle(color = if (state == ConnState.LIVE ||
+                                        state == ConnState.OFFLINE || state == ConnState.RECONNECTING
+                                    ) tint else pal.dim)) { append(word) }
+                                    if (detail.isNotEmpty()) append(" · $detail")
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (state == ConnState.OFFLINE) pal.danger else pal.dim,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     },
-                    leadingIcon = { dot(Accent.forProvider(provider).tint) },
-                    trailingIcon = {
-                        if (selected == id) Icon(Icons.Outlined.Check, contentDescription = "selected")
+                    leadingIcon = {
+                        // Offline is a ring, not a filled dot: shape as well as colour.
+                        Box(
+                            Modifier
+                                .size(9.dp)
+                                .clip(CircleShape)
+                                .then(
+                                    if (state == ConnState.OFFLINE) {
+                                        Modifier.border(1.5.dp, tint, CircleShape)
+                                    } else Modifier.background(tint),
+                                ),
+                        )
                     },
+                    // No empty slot on the others: the line under the name
+                    // gets that width.
+                    trailingIcon = if (chosen) {
+                        { Icon(Icons.Outlined.Check, contentDescription = "selected") }
+                    } else null,
                     onClick = { open = false; onSelect(id) },
+                )
+            }
+            Text(
+                "Show sessions from",
+                style = MaterialTheme.typography.labelSmall,
+                color = pal.dim,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 2.dp),
+            )
+            val up = profiles.count { stateOf(it.id) == ConnState.LIVE }
+            entry(
+                id = null,
+                name = "All daemons",
+                state = when (up) {
+                    profiles.size -> ConnState.LIVE
+                    0 -> ConnState.OFFLINE
+                    else -> ConnState.RECONNECTING
+                },
+                word = if (up == profiles.size) "$up connected"
+                else "$up of ${profiles.size} connected",
+                detail = "",
+            )
+            Hairline()
+            profiles.forEach { p ->
+                val state = stateOf(p.id)
+                entry(
+                    id = p.id,
+                    name = p.name,
+                    state = state,
+                    word = connWord(state),
+                    detail = problems[p.id]
+                        ?: listOf(p.host, if (p.version.isNotEmpty()) "v${p.version}" else "")
+                            .filter { it.isNotEmpty() }.joinToString(" · "),
                 )
             }
         }

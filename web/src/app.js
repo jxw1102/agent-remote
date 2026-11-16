@@ -2052,27 +2052,38 @@ function renderFilters() {
   const openMenu = ({ focus = true } = {}) => {
     const pop = el("div", "filter-pop");
     pop.setAttribute("role", "menu");
-    const item = (id, name, accent, hint, bad) => {
-      const o = el("button", "pop-opt filter-opt");
+    // One entry: a dot in the colour of its state, the name, and under it
+    // the state in words (never colour alone), then what identifies it.
+    const item = (id, name, st, word, detail) => {
+      const o = el("button", "pop-opt filter-opt st-" + st);
       o.type = "button";
       o.setAttribute("role", "menuitemradio");
       o.setAttribute("aria-checked", String((state.filter || null) === id));
       o.setAttribute("aria-selected", String((state.filter || null) === id));
-      const main = el("span", "pop-main");
-      const dot = el("span", "filter-dot");
-      if (accent) dot.style.background = accent;
-      main.append(dot, document.createTextNode(name));
-      o.appendChild(main);
-      if (hint) o.appendChild(el("span", bad ? "pop-hint filter-bad" : "pop-hint", hint));
+      o.appendChild(el("span", "filter-state"));
+      const text = el("span", "filter-text");
+      text.appendChild(el("span", "pop-main", name));
+      const hint = el("span", "pop-hint");
+      hint.appendChild(el("span", "filter-word", word));
+      if (detail) hint.appendChild(document.createTextNode(" · " + detail));
+      text.appendChild(hint);
+      o.appendChild(text);
       o.addEventListener("click", () => pick(id));
       return o;
     };
-    pop.appendChild(item(null, "All daemons", "", "", false));
-    daemons.forEach(([id, name, accent, error, conn, host, version]) => {
-      const hint = error
-        || [conn === "live" ? "" : CONN_TEXT[conn] || conn, host, version ? "v" + version : ""]
-          .filter(Boolean).join(" · ");
-      pop.appendChild(item(id, name, accent, hint, !!error));
+    // A daemon whose list could not be fetched is offline whatever its
+    // stream last said.
+    const stateOf = (error, conn) => (error ? "offline" : conn);
+    const up = daemons.filter((d) => stateOf(d[3], d[4]) === "live").length;
+    pop.appendChild(el("div", "filter-head", "Show sessions from"));
+    pop.appendChild(item(null, "All daemons",
+      up === daemons.length ? "live" : (up ? "reconnecting" : "offline"),
+      up === daemons.length ? `${up} connected` : `${up} of ${daemons.length} connected`, ""));
+    daemons.forEach(([id, name, _accent, error, conn, host, version]) => {
+      const st = stateOf(error, conn);
+      const detail = error
+        || [host, version ? "v" + version : ""].filter(Boolean).join(" · ");
+      pop.appendChild(item(id, name, st, CONN_WORD[st] || st, detail));
     });
     dbox.appendChild(pop);
     btn.setAttribute("aria-expanded", "true");
@@ -5220,6 +5231,9 @@ function syncStreams() {
 
 const CONN_TEXT = { live: "live", connecting: "connecting…",
                     reconnecting: "reconnecting…", offline: "offline" };
+// The same states as a daemon's standing in the daemon menu.
+const CONN_WORD = { live: "Connected", connecting: "Connecting…",
+                    reconnecting: "Reconnecting…", offline: "Offline" };
 
 /** The line under the session list, and the tag in the open session's header. */
 function renderConn() {
