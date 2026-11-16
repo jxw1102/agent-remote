@@ -1128,6 +1128,8 @@ async function pingProfile(profile) {
     }
     store.save();
     syncShareButton();
+    // Models, efforts and capabilities may have just arrived or changed.
+    if (state.open && state.open.profileId === profile.id) syncComposer();
     return true;
   } catch {
     return false;
@@ -2230,6 +2232,8 @@ async function openSession(row) {
   $("chat-head").classList.remove("hidden");
   syncShareButton();
   $("composer").classList.remove("hidden");
+  closePop();
+  syncComposer();
   $("chat-title").textContent = row.session.title || "Session";
   renderChatSub();
   updateLiveTuiButton();
@@ -3513,6 +3517,302 @@ function composerNote(text, isError) {
   if (!isError) composerNote._t = setTimeout(() => box.classList.add("hidden"), 2500);
 }
 
+// --------------------------------------- composer: per-turn chips, commands
+//
+// Execution, model and effort are choices about the NEXT message, so they
+// sit on the composer where the message is written. They used to be three
+// rows deep in the Options dialog, which is how a turn got sent headless by
+// someone who thought it was interactive.
+
+/** Daemon + harness the open session's next turn goes to. */
+function turnContext() {
+  if (!state.open) return null;
+  const profile = profileById(state.open.profileId);
+  if (!profile) return null;
+  return { profile, harness: sessionProvider(state.open.session, profile) || null };
+}
+
+const EXEC_HINT = {
+  interactive: "Runs in the terminal on the host. Slash commands work.",
+  headless: "Runs without a terminal. Messages queue while a turn runs.",
+};
+
+/** One entry per chip: what it is, what it can be, what it is now. */
+function turnChoices() {
+  const ctx = turnContext();
+  if (!ctx) return [];
+  const { profile, harness } = ctx;
+  const out = [];
+  const canInteractive = capOf(profile, "interactive", true, harness);
+  out.push({
+    key: "exec", label: "Execution",
+    values: canInteractive ? ["interactive", "headless"] : ["headless"],
+    current: execModeOf(profile, harness),
+    display: execModeLabel,
+    hint: (v) => EXEC_HINT[v] || "",
+    set: (v) => { profile.execMode = normalizeExecMode(v, canInteractive); },
+  });
+  const models = modelsOf(profile, harness);
+  if (capOf(profile, "can_set_model", true, harness) && models.length) {
+    out.push({
+      key: "model", label: "Model", values: models,
+      current: modelOf(profile, harness),
+      display: (v) => v, hint: () => "",
+      set: (v) => setModelFor(profile, harness, v),
+    });
+  }
+  const efforts = effortsOf(profile, harness);
+  if (capOf(profile, "can_set_effort", false, harness) && efforts.length) {
+    out.push({
+      key: "effort", label: "Effort", values: efforts,
+      current: effortOf(profile, harness),
+      display: (v) => v, hint: () => "",
+      set: (v) => setEffortFor(profile, harness, v),
+    });
+  }
+  return out;
+}
+
+// The one popup above the composer: a chip's menu, or the command list.
+const pop = {
+  kind: null,        // null | "chip" | "slash"
+  key: "",           // which chip
+  anchor: null,
+  items: [],         // slash: the commands on offer
+  index: 0,          // slash: highlighted row
+  dismissed: null,   // slash: the text Escape was pressed on
+};
+let chipSig = "";
+
+function closePop({ refocus = false } = {}) {
+  const box = $("composer-pop");
+  const anchor = pop.anchor;
+  if (pop.kind === "chip" && anchor) anchor.setAttribute("aria-expanded", "false");
+  pop.kind = null;
+  pop.key = "";
+  pop.anchor = null;
+  pop.items = [];
+  box.classList.add("hidden");
+  box.innerHTML = "";
+  $("prompt").removeAttribute("aria-activedescendant");
+  if (refocus && anchor && anchor.isConnected) anchor.focus();
+}
+
+/** Show the popup with its left edge on `anchor`, kept inside the composer. */
+function placePop(anchor) {
+  const box = $("composer-pop");
+  const host = $("composer").getBoundingClientRect();
+  box.classList.remove("hidden");
+  box.style.left = "0px";
+  const want = anchor.getBoundingClientRect().left - host.left;
+  const max = host.width - box.offsetWidth - 8;
+  box.style.left = Math.max(8, Math.min(want, max)) + "px";
+}
+
+function renderChips({ force = false } = {}) {
+  const bar = $("composer-chips");
+  const choices = turnChoices();
+  const sig = JSON.stringify(choices.map((c) => [c.key, c.current, c.values]));
+  if (!force && sig === chipSig) return;
+  chipSig = sig;
+  if (pop.kind === "chip") closePop();
+  bar.innerHTML = "";
+  bar.classList.toggle("hidden", !choices.length);
+  choices.forEach((c) => {
+    const b = el("button", "cchip");
+    b.type = "button";
+    b.dataset.key = c.key;
+    b.appendChild(el("span", "cchip-k", c.label));
+    b.appendChild(el("span", "cchip-v", c.display(c.current) || "default"));
+    const what = `${c.label}: ${c.display(c.current) || "default"}`;
+    b.title = what;
+    if (c.values.length < 2) {
+      // Nothing to choose, but still worth seeing what the turn will use.
+      b.disabled = true;
+      b.setAttribute("aria-label", what);
+    } else {
+      b.setAttribute("aria-label", what + ". Change");
+      b.setAttribute("aria-haspopup", "listbox");
+      b.setAttribute("aria-expanded", "false");
+      b.addEventListener("click", () => {
+        if (pop.kind === "chip" && pop.key === c.key) closePop();
+        else openChipMenu(c.key, b);
+      });
+    }
+    bar.appendChild(b);
+  });
+}
+
+function openChipMenu(key, anchor) {
+  const choice = turnChoices().find((c) => c.key === key);
+  const ctx = turnContext();
+  if (!choice || !ctx) return;
+  closePop();
+  const box = $("composer-pop");
+  box.setAttribute("role", "listbox");
+  box.setAttribute("aria-label", choice.label);
+  let current = null;
+  choice.values.forEach((v) => {
+    const o = el("button", "pop-opt");
+    o.type = "button";
+    o.setAttribute("role", "option");
+    o.setAttribute("aria-selected", String(v === choice.current));
+    o.appendChild(el("span", "pop-main", choice.display(v)));
+    const hint = choice.hint(v);
+    if (hint) o.appendChild(el("span", "pop-hint", hint));
+    o.addEventListener("click", () => {
+      choice.set(v);
+      store.save();
+      closePop();
+      syncComposer();
+      syncSlashMenu();
+      const again = $("composer-chips").querySelector(`[data-key="${key}"]`);
+      if (again) again.focus();
+    });
+    if (v === choice.current) current = o;
+    box.appendChild(o);
+  });
+  box.appendChild(el("div", "pop-foot",
+    `Used for every session on ${ctx.profile.name}`
+    + (ctx.profile.multi && ctx.harness && key !== "exec" ? ` · ${ctx.harness}` : "")));
+  pop.kind = "chip";
+  pop.key = key;
+  pop.anchor = anchor;
+  anchor.setAttribute("aria-expanded", "true");
+  placePop(anchor);
+  (current || box.querySelector(".pop-opt"))?.focus();
+}
+
+/** Arrow keys inside a chip's menu; Escape hands focus back to the chip. */
+function onPopKeydown(e) {
+  if (pop.kind !== "chip") return;
+  const opts = [...$("composer-pop").querySelectorAll(".pop-opt")];
+  const at = opts.indexOf(document.activeElement);
+  let to = -1;
+  if (e.key === "ArrowDown") to = (at + 1) % opts.length;
+  else if (e.key === "ArrowUp") to = (at - 1 + opts.length) % opts.length;
+  else if (e.key === "Home") to = 0;
+  else if (e.key === "End") to = opts.length - 1;
+  else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePop({ refocus: true }); return; }
+  else if (e.key === "Tab") { closePop(); return; }
+  if (to >= 0) { e.preventDefault(); opts[to].focus(); }
+}
+
+/** The commands this session's harness advertises that match what is typed. */
+function slashMatches(text) {
+  const ctx = turnContext();
+  if (!ctx || !/^\/[A-Za-z0-9_-]*$/.test(text)) return [];
+  const typed = text.toLowerCase();
+  return slashOf(ctx.profile, ctx.harness)
+    .filter((c) => c.toLowerCase().startsWith(typed));
+}
+
+/** Open, update or close the command list to match the composer text. */
+function syncSlashMenu() {
+  const prompt = $("prompt");
+  const text = prompt.value;
+  if (pop.kind === "chip") return;
+  const items = document.activeElement === prompt ? slashMatches(text) : [];
+  // Nothing to offer, or the only match is already typed out in full.
+  if (!items.length || (items.length === 1 && items[0] === text)
+      || pop.dismissed === text) {
+    if (pop.kind === "slash") closePop();
+    if (pop.dismissed !== text) pop.dismissed = null;
+    return;
+  }
+  pop.dismissed = null;
+  const ctx = turnContext();
+  const headless = execModeOf(ctx.profile, ctx.harness) !== "interactive";
+  const keep = pop.kind === "slash" ? pop.items[pop.index] : null;
+  pop.kind = "slash";
+  pop.anchor = prompt;
+  pop.items = items;
+  pop.index = Math.max(0, items.indexOf(keep));
+  const box = $("composer-pop");
+  box.innerHTML = "";
+  box.setAttribute("role", "listbox");
+  box.setAttribute("aria-label", "Commands");
+  items.forEach((cmd, i) => {
+    const o = el("div", "pop-opt");
+    o.id = "slash-opt-" + i;
+    o.setAttribute("role", "option");
+    o.appendChild(el("span", "pop-main mono", cmd));
+    // /rewind is done by the daemon itself, so it works in either mode.
+    if (headless && cmd !== "/rewind") o.appendChild(el("span", "pop-hint", "needs Interactive"));
+    // mousedown, not click: keep the caret in the composer.
+    o.addEventListener("mousedown", (e) => { e.preventDefault(); pickSlash(cmd); });
+    box.appendChild(o);
+  });
+  box.appendChild(el("div", "pop-foot", "↑↓ choose · Enter or Tab fill in · Esc close"));
+  paintSlashIndex();
+  placePop(prompt);
+}
+
+function paintSlashIndex() {
+  const box = $("composer-pop");
+  [...box.querySelectorAll(".pop-opt")].forEach((o, i) => {
+    o.setAttribute("aria-selected", String(i === pop.index));
+    if (i === pop.index) {
+      $("prompt").setAttribute("aria-activedescendant", o.id);
+      o.scrollIntoView({ block: "nearest" });
+    }
+  });
+}
+
+function pickSlash(cmd) {
+  const prompt = $("prompt");
+  prompt.value = cmd + " ";
+  closePop();
+  prompt.dispatchEvent(new Event("input"));
+  prompt.focus();
+  prompt.setSelectionRange(prompt.value.length, prompt.value.length);
+}
+
+/**
+ * Keys the command list takes from the composer. Returns true when the key
+ * was used, so Enter fills in a command instead of sending half of one.
+ */
+function slashKeydown(e) {
+  if (pop.kind !== "slash" || !pop.items.length) return false;
+  const n = pop.items.length;
+  if (e.key === "ArrowDown") pop.index = (pop.index + 1) % n;
+  else if (e.key === "ArrowUp") pop.index = (pop.index - 1 + n) % n;
+  else if (e.key === "Escape") {
+    pop.dismissed = $("prompt").value;
+    closePop();
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  } else if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+    const cmd = pop.items[pop.index];
+    // The command is already typed in full: Enter means send it.
+    if (e.key === "Enter" && cmd === $("prompt").value) { closePop(); return false; }
+    e.preventDefault();
+    pickSlash(cmd);
+    return true;
+  } else return false;
+  e.preventDefault();
+  paintSlashIndex();
+  return true;
+}
+
+/** Send says what it will do: a headless turn in progress queues the message. */
+function syncSendButton() {
+  const ctx = turnContext();
+  const running = !!(state.job && jobBelongsToOpen(state.job));
+  const queues = running && ctx
+    && execModeOf(ctx.profile, ctx.harness) !== "interactive";
+  const b = $("btn-send");
+  b.textContent = queues ? "Queue" : "Send";
+  b.title = queues ? "Runs after the current turn"
+    : (running ? "Typed into the running session" : "");
+}
+
+function syncComposer() {
+  renderChips();
+  syncSendButton();
+}
+
 /**
  * The composer's contract, same as the apps:
  *  - `!cmd` runs a shell command on the daemon in this session's folder;
@@ -3539,7 +3839,8 @@ async function send(text) {
 
   if (/^\/[A-Za-z][A-Za-z0-9_-]*$/.test(raw.split(" ")[0])) {
     const cmd = raw.split(" ")[0];
-    const interactive = execModeOf(profile) === "interactive";
+    const interactive = execModeOf(profile,
+      sessionProvider(state.open && state.open.session, profile)) === "interactive";
     // /rewind never reaches the harness — the daemon rewinds the session
     // journal itself (≥ 2.5) — so it is exempt from the interactive-only
     // rule. The advertised-list check below still gates it (old daemons
@@ -3567,7 +3868,8 @@ async function send(text) {
   appendLive({ role: "user", text: raw }, paint);
 
   if (job) {
-    const interactive = execModeOf(profile) === "interactive";
+    const interactive = execModeOf(profile,
+      sessionProvider(state.open && state.open.session, profile)) === "interactive";
     const jobId = job.id;
     try {
       await call(profile, `/api/jobs/${jobId}/${interactive ? "input" : "queue"}`,
@@ -3644,7 +3946,7 @@ async function runShell(command) {
     const harness = sessionProvider(state.open && state.open.session, profile);
     const started = await call(profile,
       `/api/sessions/${encodeURIComponent(openSessionId)}/continue`,
-      { method: "POST", body: { prompt, permission_mode: wireExecMode(execModeOf(profile)),
+      { method: "POST", body: { prompt, permission_mode: wireExecMode(execModeOf(profile, harness)),
                                 model: modelOf(profile, harness),
                                 effort: effortOf(profile, harness) } });
     if (started && started.job_id && isOpenStill(openGen, openProfileId, openSessionId)) {
@@ -3784,6 +4086,7 @@ function attachJob(jobId, sessionId = null, { adopted = false } = {}) {
   chimeLastStatusMs = 0;
   renderBanner();
   setIconIdle($("btn-stop"), false);
+  syncSendButton();
   state.jobTimer = setInterval(pollJob, 250);
   pollJob();
 }
@@ -3797,6 +4100,7 @@ function detachJobWatch() {
   state.jobLastFetch = 0;
   // Keep the 34×34 Stop slot empty — do not collapse the row.
   setIconIdle($("btn-stop"), true);
+  syncSendButton();
 }
 
 function stopJobWatch() {
@@ -6070,43 +6374,16 @@ function openOptions() {
       // Open session's harness (multi tags each row); else profile default.
       const harness = sessionProvider(state.open && state.open.session, profile)
         || (profileHarnesses(profile)[0] || profile.provider || "");
-      const canInteractive = capOf(profile, "interactive", true, harness || null);
-      const modes = canInteractive ? ["interactive", "headless"] : ["headless"];
-      group("Execution", modes,
-        normalizeExecMode(execModeOf(profile, harness || null), canInteractive),
-        (v) => { profile.execMode = normalizeExecMode(v, canInteractive); },
-        execModeLabel);
-      body.appendChild(el("div", "help",
-        "Both modes auto-run tools (no permission prompts on the phone)."));
-      const models = modelsOf(profile, harness || null);
-      // BB Session sheet parity: show what the OPEN session last used.
+      // Execution, model and effort are per message: they are chips on the
+      // composer now, not rows in here.
       const sessionModel = String(
         (state.open.session && state.open.session.model) || "").trim();
-      // The picker is about this session: keep a model the CLI list omits
-      // (e.g. a CodeBuddy session on a model the help text does not list).
-      const modelOptions = (sessionModel && sessionModel !== "default"
-        && !models.includes(sessionModel))
-        ? [...models, sessionModel] : models;
       if (sessionModel && sessionModel !== "default" && sessionModel !== "interactive") {
         body.appendChild(el("div", "help",
           `This session last ran on ${sessionModel}`));
       }
-      if (capOf(profile, "can_set_model", true, harness || null) && modelOptions.length) {
-        // Prefer an explicit choice; otherwise show what the session ran on
-        // instead of the first list entry ("default" for CodeBuddy).
-        const stored = ((profile.modelByHarness || {})[
-          (harness || "").toLowerCase()] || "");
-        const cur = stored && modelOptions.includes(stored) ? stored
-          : (sessionModel && modelOptions.includes(sessionModel) ? sessionModel
-            : modelOf(profile, harness || null));
-        group("Model", modelOptions, cur,
-          (v) => { setModelFor(profile, harness || null, v); });
-      }
-      const efforts = effortsOf(profile, harness || null);
-      if (capOf(profile, "can_set_effort", false, harness || null) && efforts.length) {
-        const curE = effortOf(profile, harness || null);
-        group("Reasoning effort", efforts, curE, (v) => { setEffortFor(profile, harness || null, v); });
-      }
+      body.appendChild(el("div", "help",
+        "Execution, model and effort are set on the message box, under the transcript."));
       const toggle = (label, checked, onChange) => {
         const f = el("div", "field");
         const cb = el("label");
@@ -6310,9 +6587,20 @@ function wire() {
     prompt.style.height = Math.min(Math.max(prompt.scrollHeight, 38), 220) + "px";
   };
   prompt.addEventListener("input", grow);
+  prompt.addEventListener("input", syncSlashMenu);
+  prompt.addEventListener("focus", syncSlashMenu);
+  prompt.addEventListener("blur", () => { if (pop.kind === "slash") closePop(); });
+  $("composer-pop").addEventListener("keydown", onPopKeydown);
+  // A click anywhere else closes a chip's menu.
+  document.addEventListener("mousedown", (e) => {
+    if (pop.kind !== "chip") return;
+    if ($("composer-pop").contains(e.target) || (pop.anchor && pop.anchor.contains(e.target))) return;
+    closePop();
+  });
   prompt.addEventListener("keydown", (e) => {
     // Enter that confirms an IME candidate (CJK input) is not a send.
     if (e.isComposing || e.keyCode === 229) return;
+    if (slashKeydown(e)) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       const text = prompt.value;

@@ -191,11 +191,15 @@
 
     <div id="composer" class="composer hidden">
       <div id="composer-note" class="composer-note hidden"></div>
+      <div id="composer-pop" class="composer-pop hidden"></div>
+      <div id="composer-chips" class="composer-chips" role="group"
+           aria-label="How the next message runs"></div>
       <div class="composer-row">
         <button id="btn-attach" type="button" title="Attach a file">+</button>
         <input id="file-attach" type="file" multiple hidden>
         <textarea id="prompt" rows="1" spellcheck="false"
-                  placeholder="Message, /command or !shell · Enter sends"></textarea>
+                  placeholder="Message, /command or !shell · Enter sends"
+                  aria-controls="composer-pop"></textarea>
         <button id="btn-send" class="primary" type="button">Send</button>
       </div>
     </div>
