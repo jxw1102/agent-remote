@@ -6958,6 +6958,29 @@ function wire() {
   $("btn-new").addEventListener("click", openNewSession);
   $("btn-inbox").addEventListener("click", openInbox);
   $("btn-usage").addEventListener("click", openUsage);
+  // Narrow windows: the occasional actions are a menu under "More".
+  const more = $("chat-more"), moreBtn = $("btn-more");
+  const setMore = (open) => {
+    more.classList.toggle("open", open);
+    moreBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  moreBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = !more.classList.contains("open");
+    setMore(open);
+    if (open) more.querySelector("button:not(.hidden)")?.focus();
+  });
+  more.addEventListener("click", () => setMore(false));
+  document.addEventListener("click", () => setMore(false));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && more.classList.contains("open")) {
+      setMore(false);
+      moreBtn.focus();
+    }
+  });
+  $("btn-copy-id").addEventListener("click", () => {
+    if (state.open && state.open.sessionId) copySessionId(state.open.sessionId);
+  });
   $("btn-options").addEventListener("click", openOptions);
   $("btn-rename").addEventListener("click", openRename);
   $("btn-share")?.addEventListener("click", openShare);

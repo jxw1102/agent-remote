@@ -466,6 +466,9 @@ button.tag.session-id-tag:hover {
   padding: 6px 8px;
 }
 .chat-actions { display: flex; gap: 6px; flex: none; align-items: center; }
+/* With room, the group is just more buttons in the row. */
+.chat-more { display: contents; }
+.icon-btn.more-btn, .icon-btn.menu-only { display: none; }
 /* Square icon controls in the chat header (options / refresh / stop / Live TUI). */
 button.icon-btn {
   display: inline-flex;
@@ -1755,6 +1758,56 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   }
   .side-head .back-btn { display: inline-flex; }
   #side-close { display: none; }
+  /* One row: who you are talking to, what you do most. Seven buttons
+     took a second row and spread across it; the ones used now and then
+     (options, rename, share, reload, copy id) are a menu under "More". */
+  .chat-head { gap: 8px; }
+  .chat-title { flex: 1 1 0; }
+  .chat-sub { flex-wrap: nowrap; }
+  .chat-sub > * { flex: none; }
+  .chat-sub > .chat-cwd { flex: 0 1 auto; }
+  .chat-sub button.session-id { display: none; }
+  .chat-actions { position: relative; gap: 4px; }
+  /* Idle buttons give their place to the title; Stop comes in on the far
+     side so nothing under a finger moves when a turn starts. */
+  .chat-actions .icon-btn.icon-idle { display: none; }
+  #btn-stop { order: -1; }
+  .icon-btn.more-btn { display: inline-flex; }
+  .chat-more {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 20;
+    flex-direction: column;
+    min-width: 210px;
+    max-height: calc(100dvh - 80px);
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface-2);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  }
+  .chat-more.open { display: flex; }
+  .chat-more .icon-btn, .chat-more .icon-btn.menu-only {
+    display: flex;
+    justify-content: flex-start;
+    gap: 12px;
+    width: auto;
+    height: auto;
+    min-height: 40px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 7px;
+    background: none;
+    color: var(--text);
+    font-size: 14px;
+  }
+  .chat-more .icon-btn svg { color: var(--dim); flex: none; }
+  .chat-more .icon-btn::after { content: attr(aria-label); }
+  .chat-more .icon-btn:hover:not(:disabled),
+  .chat-more .icon-btn:focus-visible { background: var(--surface-3); color: var(--text); }
 }
 @media (max-width: 720px) {
   .app, .app.with-side { grid-template-columns: 1fr; grid-template-rows: 1fr; }
@@ -1764,14 +1817,24 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   .icon-btn.back-btn { display: inline-flex; flex: none; margin-right: 2px; }
   .pane-list { border-right: 0; }
   .thread { padding: 0 14px; }
-  /* Two rows: who you are talking to, then what you can do about it. Six
-     finger-sized buttons beside the title left no room for the title. */
-  .chat-head { flex-wrap: wrap; row-gap: 6px; padding: 8px 10px; }
-  .chat-title { flex: 1 1 0; }
-  .chat-actions { flex: 1 0 100%; justify-content: space-between; }
+  .chat-head { padding: 8px 10px; }
   .composer { padding-left: 12px; padding-right: 12px; }
   .gate { padding-left: 12px; padding-right: 12px; }
   .gate-foot .help { flex: 1 0 100%; }
+}
+
+/* A short window (a phone on its side, a small floating window): the list
+   header was half the height. The name goes, and the count shares a row
+   with the filters. */
+@media (max-height: 520px) {
+  .list-head { display: flex; flex-wrap: wrap; align-items: center; column-gap: 8px; padding-top: 8px; padding-bottom: 8px; }
+  .list-head > * { flex: 1 0 100%; }
+  .list-head > .brand { display: none; }
+  .list-head > .head-actions { margin-bottom: 6px; }
+  .list-head > .search { margin-bottom: 6px; }
+  .list-head > .filters { flex: 1 1 0; min-width: 0; }
+  .list-head > .list-status { flex: none; margin-top: 0; }
+  .list-head > .list-status:has(.err) { flex: 1 0 100%; margin-top: 6px; }
 }
 
 /* Phones: keep clear of the notch and the home indicator, and let the page
