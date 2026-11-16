@@ -141,6 +141,8 @@ data class PingDto(
     val share: Boolean = false,
     /** GET /api/sessions/<id>/file — host files the agent linked (≥ 2.20). */
     @SerialName("linked_files") val linkedFiles: Boolean = false,
+    /** 1: Live TUI frames pushed over SSE (agentremoted ≥ 2.22); 0: poll. */
+    @SerialName("tui_stream") val tuiStream: Int = 0,
     /** Chunked POST /api/attachments (agentremoted ≥ 2.8.6). */
     @SerialName("chunked_upload") val chunkedUpload: Boolean = false,
     @SerialName("max_upload_mb") val maxUploadMb: Int = 16,
@@ -569,6 +571,8 @@ data class Caps(
     val share: Boolean = false,
     /** Host files the agent linked (agentremoted >= 2.20). */
     val linkedFiles: Boolean = false,
+    /** Live TUI frames are pushed, not polled (agentremoted >= 2.22). */
+    val tuiStream: Boolean = false,
     /** Chunked attachments (agentremoted >= 2.8.6). */
     val chunkedUpload: Boolean = false,
     /** Largest attachment the daemon accepts (ping max_upload_mb). */
@@ -712,6 +716,7 @@ data class Caps(
             focus = ping.focus,
             share = ping.share,
             linkedFiles = ping.linkedFiles,
+            tuiStream = ping.tuiStream > 0 || ping.caps["tui_stream"] == true,
             chunkedUpload = ping.chunkedUpload || ping.caps["chunked_upload"] == true,
             maxUploadMb = ping.maxUploadMb.takeIf { it > 0 } ?: 16,
             providers = ping.providers,

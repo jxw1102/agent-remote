@@ -820,5 +820,11 @@ class DaemonClient(
     /** The URL the SSE status stream lives on, for [StatusStream]. */
     fun statusUrl(): HttpUrl = url("sse/status")
 
+    /** Live TUI frames, pushed when the pane changes (agentremoted ≥ 2.22). */
+    fun tuiStreamUrl(sessionId: String, ansi: Boolean = true): HttpUrl = url(
+        "sse/sessions/$sessionId/tui",
+        if (ansi) mapOf("ansi" to "1") else emptyMap(),
+    )
+
     fun authHeader(): Pair<String, String> = "X-Auth-Token" to token
 }

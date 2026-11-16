@@ -7,7 +7,9 @@ input and builds capture payloads.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import threading
 import time
 
 # Pane geometry every interactive harness launches its tmux window with.
@@ -335,16 +337,17 @@ def capture_session(mgr, session_id: str, *, ansi: bool = False) -> dict:
         return frame_payload(session_id, "", False,
                              error="no interactive TUI for this session",
                              ansi=ansi)
-    alive = mgr._tmux_alive(tui.name)
-    if not alive:
-        return frame_payload(session_id, "", False,
-                             error="the host TUI has exited",
-                             ansi=ansi)
     want_ansi = bool(ansi)
     try:
         text = mgr._pane_text(tui.name, ansi=want_ansi) or ""
     except TypeError:
         text = mgr._pane_text(tui.name) or ""
+    # One tmux call per frame, not two: a live pane always captures at least
+    # its row breaks, so only an empty capture is worth asking "is it alive?".
+    if not text and not mgr._tmux_alive(tui.name):
+        return frame_payload(session_id, "", False,
+                             error="the host TUI has exited",
+                             ansi=ansi)
     if not want_ansi:
         text = plain_tui_text(text)
     text = trim_blank_tail(text)
@@ -353,6 +356,102 @@ def capture_session(mgr, session_id: str, *, ansi: bool = False) -> dict:
     if job is not None:
         job_id = getattr(job, "id", "") or ""
     return frame_payload(session_id, text, True, job_id=job_id, ansi=want_ansi)
+
+
+# ---- frame stream ---------------------------------------------------------
+#
+# Clients used to poll GET …/tui every 400 ms, so a keystroke was echoed up
+# to 400 ms late, plus a request round trip, however fast the link was. The
+# stream turns that around: the daemon watches the pane and pushes a frame
+# the moment it changes.
+#
+# Watching means running `tmux capture-pane`, which is a process per look, so
+# the rate follows what is happening: fast right after a key was sent or the
+# pane moved, slower while it sits still.
+
+STREAM_FAST_S = 0.04        # just typed, or the pane just changed
+STREAM_FAST_FOR_S = 2.0
+STREAM_WARM_S = 0.12        # active a moment ago
+STREAM_WARM_FOR_S = 15.0
+STREAM_IDLE_S = 0.35        # nothing moving
+STREAM_DETACHED_S = 0.5     # no TUI yet: waiting for one to be launched
+STREAM_KEEPALIVE_S = 15.0
+STREAM_REDRAW_S = 0.015     # let the TUI draw before looking, after a key
+
+_wake = threading.Condition()
+_wake_gen = 0
+
+
+def poke() -> None:
+    """A key just went into some pane: every open stream looks again now."""
+    global _wake_gen
+    with _wake:
+        _wake_gen += 1
+        _wake.notify_all()
+
+
+def _stream_interval(attached: bool, quiet_for: float) -> float:
+    if not attached:
+        return STREAM_DETACHED_S
+    if quiet_for < STREAM_FAST_FOR_S:
+        return STREAM_FAST_S
+    if quiet_for < STREAM_WARM_FOR_S:
+        return STREAM_WARM_S
+    return STREAM_IDLE_S
+
+
+def serve_stream(handler, capture_fn, *, max_seconds: float = 0.0) -> None:
+    """Write pane frames as SSE until the client disconnects.
+
+    ``capture_fn()`` returns a frame dict (see frame_payload). A frame is
+    written when the pane, its job or its attached state changed; otherwise
+    a ``:`` keepalive every 15 s, which is also how a client that went away
+    is noticed. Runs on the request's own thread.
+    """
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("Connection", "keep-alive")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Vary", "Origin")
+    handler.end_headers()
+
+    started = time.time()
+    last_key = None
+    last_change = started
+    last_write = started
+    seen_gen = _wake_gen
+    try:
+        while True:
+            frame = capture_fn()
+            now = time.time()
+            key = (frame.get("attached"), frame.get("seq"),
+                   frame.get("job_id"), frame.get("error"))
+            if key != last_key:
+                handler.wfile.write(
+                    ("data: %s\n\n" % json.dumps(frame)).encode("utf-8"))
+                handler.wfile.flush()
+                last_key = key
+                last_change = last_write = now
+            elif now - last_write >= STREAM_KEEPALIVE_S:
+                handler.wfile.write(b":\n\n")
+                handler.wfile.flush()
+                last_write = now
+            if max_seconds and now - started >= max_seconds:
+                return
+            wait = _stream_interval(bool(frame.get("attached")),
+                                    now - last_change)
+            with _wake:
+                if _wake_gen == seen_gen:
+                    _wake.wait(wait)
+                poked = _wake_gen != seen_gen
+                seen_gen = _wake_gen
+            if poked:
+                last_change = time.time()
+                time.sleep(STREAM_REDRAW_S)
+    except (OSError, BrokenPipeError):
+        pass
 
 
 def send_to_session(mgr, session_id: str, keys=None, text: str = "") -> str:
@@ -364,8 +463,15 @@ def send_to_session(mgr, session_id: str, keys=None, text: str = "") -> str:
     tui = _find_tui(mgr, session_id)
     if tui is None:
         return "no interactive TUI for this session"
-    if not mgr._tmux_alive(tui.name):
-        return "the host TUI has exited"
+
+    def failed(r, what):
+        # No "is it alive?" call before every key: tmux says so when it is not.
+        if not mgr._tmux_alive(tui.name):
+            return "the host TUI has exited"
+        err = ""
+        if getattr(r, "stderr", None):
+            err = r.stderr.decode("utf-8", errors="replace")[:200]
+        return "tmux send-keys failed: %s" % (err or what)
 
     tokens = map_keys(keys)
     literal = text if isinstance(text, str) else ""
@@ -377,10 +483,7 @@ def send_to_session(mgr, session_id: str, keys=None, text: str = "") -> str:
             # -l: literal, no key-name interpretation
             r = mgr._tmux("send-keys", "-l", "-t", tui.name, literal)
             if getattr(r, "returncode", 0) not in (0, None):
-                err = ""
-                if getattr(r, "stderr", None):
-                    err = r.stderr.decode("utf-8", errors="replace")[:200]
-                return "tmux send-keys failed: %s" % (err or "error")
+                return failed(r, "error")
             if tokens:
                 settle = getattr(mgr, "tui_text_settle_s", TEXT_SETTLE_S)
                 if float(settle or 0.0) > 0:
@@ -392,10 +495,9 @@ def send_to_session(mgr, session_id: str, keys=None, text: str = "") -> str:
                     else ["-t", tui.name, tok])
             r = mgr._tmux("send-keys", *args)
             if getattr(r, "returncode", 0) not in (0, None):
-                err = ""
-                if getattr(r, "stderr", None):
-                    err = r.stderr.decode("utf-8", errors="replace")[:200]
-                return "tmux send-keys failed: %s" % (err or tok)
+                return failed(r, tok)
     except Exception as e:  # noqa: BLE001
         return "tmux input failed: %s" % e
+    finally:
+        poke()   # open frame streams look at the pane now, not on their timer
     return ""

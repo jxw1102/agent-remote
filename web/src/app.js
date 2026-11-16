@@ -266,6 +266,7 @@ const state = {
   jobFails: 0,
   liveTui: false,        // Live TUI mode open
   liveTuiTimer: null,
+  liveTuiStream: null,   // EventSource of pushed frames (daemon ≥ 2.22)
   liveTuiSeq: 0,
   liveTuiKeys: false,    // pane has keyboard focus
   liveTuiCols: 0,        // host pane width in columns (frame.cols)
@@ -1108,6 +1109,8 @@ async function pingProfile(profile) {
     profile.share = !!ping.share;
     // Linked host files (agentremoted ≥ 2.20): /api/sessions/<id>/file.
     profile.linkedFiles = !!ping.linked_files;
+    // Live TUI frames pushed over SSE + ordered key batches (agentremoted ≥ 2.22).
+    profile.tuiStream = !!ping.tui_stream;
     profile.chunkedUpload = !!ping.chunked_upload
       || !!(ping.caps && ping.caps.chunked_upload);
     if (typeof ping.max_upload_mb === "number" && ping.max_upload_mb > 0) {
@@ -2515,17 +2518,68 @@ function openLiveTui() {
   // straight back.
   focusLiveTuiPane();
   updateLiveTuiCapture();
-  pollLiveTui(true);
+  startLiveTuiFeed();
+}
+
+/**
+ * Where frames come from. A daemon ≥ 2.22 pushes one the moment the pane
+ * changes (GET /sse/sessions/<id>/tui), so an echo is one hop behind the
+ * key. Older daemons are polled every 400 ms, as before.
+ */
+function startLiveTuiFeed() {
+  stopLiveTuiFeed();
+  const open = state.open;
+  const profile = open && profileById(open.profileId);
+  if (!profile) return;
+  if (!profile.tuiStream || typeof EventSource === "undefined") {
+    pollLiveTui(true);
+    state.liveTuiTimer = setInterval(() => pollLiveTui(false), 400);
+    return;
+  }
+  const gen = state.openGen;
+  const { profileId, sessionId } = open;
+  // EventSource cannot send headers; the daemon takes the token in the query
+  // on its stream endpoints (same as /sse/status).
+  const src = new EventSource(profile.baseUrl.replace(/\/+$/, "")
+    + `/sse/sessions/${encodeURIComponent(sessionId)}/tui?ansi=1&token=`
+    + encodeURIComponent(profile.token));
+  state.liveTuiStream = src;
+  let first = true;
+  src.onmessage = (ev) => {
+    if (state.liveTuiStream !== src) return;
+    if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) { src.close(); return; }
+    let frame = null;
+    try { frame = JSON.parse(ev.data); } catch { return; }
+    paintLiveTuiFrame(frame, first);
+    first = false;
+  };
+  src.onerror = () => {
+    if (state.liveTuiStream !== src) return;
+    if (src.readyState === EventSource.CLOSED) {
+      // Refused outright (an old proxy, a daemon swapped under us): poll.
+      state.liveTuiStream = null;
+      pollLiveTui(true);
+      state.liveTuiTimer = setInterval(() => pollLiveTui(false), 400);
+      return;
+    }
+    $("live-tui-status").textContent = "Host TUI · reconnecting…";
+    $("live-tui-status").classList.remove("live");
+    first = true;   // repaint whatever comes back, even if it looks the same
+  };
+}
+
+function stopLiveTuiFeed() {
   clearInterval(state.liveTuiTimer);
-  state.liveTuiTimer = setInterval(() => pollLiveTui(false), 400);
+  state.liveTuiTimer = null;
+  if (state.liveTuiStream) state.liveTuiStream.close();
+  state.liveTuiStream = null;
 }
 
 function closeLiveTui() {
   flushLiveTuiText();
   state.liveTui = false;
   state.liveTuiKeys = false;
-  clearInterval(state.liveTuiTimer);
-  state.liveTuiTimer = null;
+  stopLiveTuiFeed();
   const box = $("live-tui");
   if (box) box.classList.add("hidden");
   const tr = $("transcript");
@@ -2552,12 +2606,24 @@ async function pollLiveTui(force) {
     );
     // Drop the frame if the user switched sessions (or left Live TUI).
     if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) return;
+    paintLiveTuiFrame(frame, force);
+  } catch (e) {
+    if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) return;
+    $("live-tui-status").textContent = e.message || "Live TUI error";
+    $("live-tui-status").classList.remove("live");
+  }
+}
+
+/** Draw one frame, however it arrived (pushed or polled). */
+function paintLiveTuiFrame(frame, force) {
+  {
     const status = $("live-tui-status");
     const pane = $("live-tui-pane");
     const screen = $("live-tui-screen");
     if (!frame || frame.attached === false) {
       status.textContent = frame?.error || "No host TUI attached";
       status.classList.remove("live");
+      state.liveTuiSeq = 0;
       if (force || !pane.dataset.hadFrame) {
         screen.textContent = frame?.error
           || "No interactive TUI for this session. Start a turn in Interactive mode.";
@@ -2591,10 +2657,6 @@ async function pollLiveTui(force) {
       ? `Host TUI · job ${String(frame.job_id).slice(0, 8)}`
       : "Host TUI · live";
     status.classList.add("live");
-  } catch (e) {
-    if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) return;
-    $("live-tui-status").textContent = e.message || "Live TUI error";
-    $("live-tui-status").classList.remove("live");
   }
 }
 
@@ -2643,64 +2705,74 @@ function fitLiveTuiPane() {
   pane.style.fontSize = size + "px";
 }
 
-// Keystrokes are a stream, so they are sent as one: each POST waits for the
-// one before it. Fired off in parallel they can reach a threaded daemon out
-// of order, and "cd " arriving as "c d" is not a typo the user made.
-let _tuiSendChain = Promise.resolve();
+// Keystrokes are a stream, so they are sent as one, in order, and never two
+// requests at a time: fired off in parallel they can reach a threaded daemon
+// out of order, and "cd " arriving as "c d" is not a typo the user made.
+//
+// What is pressed while a request is in flight is gathered and goes out as
+// ONE request when it returns (`events`, agentremoted ≥ 2.22). Typing is then
+// never more than one round trip behind, however slow the link; before, each
+// key queued its own round trip and a fast typist outran a tunnel.
+const _tuiQueue = [];      // { text } | { keys } | { line: { text, keys } }
+let _tuiSending = false;
 
 function sendLiveTuiKeys(keys, text) {
-  // Anything queued as plain typing goes first, or a chord would overtake it.
-  if (!(text && !keys)) flushLiveTuiText();
-  _tuiSendChain = _tuiSendChain
-    .catch(() => {})
-    .then(() => postLiveTuiKeys(keys, text));
-  return _tuiSendChain;
+  if (text && keys && keys.length) {
+    // A whole line from the text field: text, a pause, then Enter. The
+    // pause is the daemon's (some harnesses read a fast CR as pasted text).
+    _tuiQueue.push({ line: { text, keys } });
+  } else if (text) {
+    const last = _tuiQueue[_tuiQueue.length - 1];
+    if (last && last.text !== undefined) last.text += text;
+    else _tuiQueue.push({ text });
+  } else if (keys && keys.length) {
+    _tuiQueue.push({ keys: keys.slice() });
+  }
+  pumpLiveTuiKeys();
 }
 
-async function postLiveTuiKeys(keys, text) {
-  if (!state.open || !state.open.sessionId) return;
-  const profile = profileById(state.open.profileId);
-  if (!profile) return;
-  const body = {};
-  if (keys && keys.length) body.keys = keys;
-  if (text) body.text = text;
-  if (!body.keys && !body.text) return;
+async function pumpLiveTuiKeys() {
+  if (_tuiSending) return;
+  _tuiSending = true;
   try {
-    await call(
-      profile,
-      `/api/sessions/${encodeURIComponent(state.open.sessionId)}/tui/keys`,
-      { method: "POST", body },
-    );
-    // Immediate refresh so typing feels snappy.
-    setTimeout(() => pollLiveTui(true), 80);
-  } catch (e) {
-    toast(e.message || "TUI input failed");
+    while (_tuiQueue.length) {
+      const open = state.open;
+      const profile = open && profileById(open.profileId);
+      if (!profile || !open.sessionId) { _tuiQueue.length = 0; break; }
+      let body;
+      if (_tuiQueue[0].line) {
+        body = _tuiQueue.shift().line;
+      } else if (profile.tuiStream) {
+        const events = [];
+        while (_tuiQueue.length && !_tuiQueue[0].line && events.length < 200) {
+          events.push(_tuiQueue.shift());
+        }
+        body = { events };
+      } else {
+        body = _tuiQueue.shift();      // older daemon: one item per request
+      }
+      try {
+        await call(
+          profile,
+          `/api/sessions/${encodeURIComponent(open.sessionId)}/tui/keys`,
+          { method: "POST", body },
+        );
+        // A pushed stream is already bringing the echo; a polled one is asked.
+        if (!state.liveTuiStream) setTimeout(() => pollLiveTui(true), 80);
+      } catch (e) {
+        _tuiQueue.length = 0;          // do not type the rest into a dead pane
+        toast(e.message || "TUI input failed");
+      }
+    }
+  } finally {
+    _tuiSending = false;
   }
 }
 
-// Typed characters are gathered for a frame or two before they are sent. One
-// POST per keystroke (each behind a CORS preflight) is fine on localhost and
-// miserable over a tunnel — a fast typist would outrun the link.
-let _tuiTextBuf = "";
-let _tuiTextTimer = null;
-const TUI_TYPE_COALESCE_MS = 35;
-
-function typeLiveTuiText(ch) {
-  _tuiTextBuf += ch;
-  if (_tuiTextTimer === null) {
-    _tuiTextTimer = setTimeout(flushLiveTuiText, TUI_TYPE_COALESCE_MS);
-  }
-}
-
-function flushLiveTuiText() {
-  if (_tuiTextTimer !== null) {
-    clearTimeout(_tuiTextTimer);
-    _tuiTextTimer = null;
-  }
-  const text = _tuiTextBuf;
-  _tuiTextBuf = "";
-  if (text) sendLiveTuiKeys(null, text);
-}
+// Kept for callers that flush before a chord: typed text now goes straight
+// into the queue, so there is nothing held back to flush.
+function typeLiveTuiText(ch) { sendLiveTuiKeys(null, ch); }
+function flushLiveTuiText() {}
 
 // ---- keyboard capture ---------------------------------------------------
 // Two keyboards share this view. The pane forwards raw keystrokes to the
@@ -4470,6 +4542,7 @@ function normalizeProfile(p) {
     focus: !!p.focus,
     share: !!p.share,
     linkedFiles: !!p.linkedFiles,
+    tuiStream: !!p.tuiStream,
     chunkedUpload: !!p.chunkedUpload,
     ...(typeof p.maxUploadMb === "number" && p.maxUploadMb > 0
       ? { maxUploadMb: p.maxUploadMb } : {}),

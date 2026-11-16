@@ -19,6 +19,22 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.22.0** The Live TUI is pushed, not polled. Clients asked for the pane
+every 400 ms, so a keystroke was echoed up to 400 ms plus a round trip late
+however fast the link was. `GET /sse/sessions/<id>/tui[?ansi=1]` now streams
+the same frame the moment the pane changes (measured: about 50 ms from key to
+echo on the host). The daemon looks at the pane every 40 ms right after a key
+or a change, eases to 120 ms and then 350 ms while it sits still, and a key
+sent through `…/tui/keys` wakes every open stream at once. With no TUI yet the
+stream says so and picks the pane up when one is launched, without a
+reconnect. `POST …/tui/keys` also takes `{"events": [{"text"}|{"keys"}, …]}`:
+ordered typing in one request, so a client can send whatever was pressed
+during its last round trip as one. A frame costs one tmux call instead of two
+and a key no longer runs a capture per harness plus an "is it alive" call
+before it is sent. `/api/ping` advertises `tui_stream: 1` (also in `caps`).
+The polled route is unchanged; BlackBerry, iOS and the pager still use it.
+Covered by `tests/tui_stream_test.py`.
+
 **2.21.0** New sessions show up on every client without a refresh. The
 status stream (`/sse/status`, `/ws/status`) carries `sessions_rev`, which
 goes up when a session is created or removed anywhere on the host - its own
@@ -799,7 +815,9 @@ POST /api/jobs/<id>/stop
 POST /api/jobs/<id>/permission {request_id, allow}
 POST /api/jobs/<id>/input {prompt}              type a full line into interactive TUI
 GET  /api/sessions/<id>/tui[?ansi=1]            Live TUI pane (plain default; ansi=1 for SGR)
+GET  /sse/sessions/<id>/tui[?ansi=1]            SSE: the same frame, pushed when the pane changes
 POST /api/sessions/<id>/tui/keys {keys?,text?}  key/text injection into Live TUI
+                                 or {events:[…]}  ordered typing in one request (tui_stream)
 POST /api/attachments
 GET  /api/focus                                 focus rows only, urgency-sorted
 POST /api/focus/<key>/done                      take a row out of Focus
@@ -856,9 +874,14 @@ overrides live in `focus.json` beside the config, shared by every client of the
 daemon so Focus looks the same on web, phone, BlackBerry and the pager.
 `/api/ping` reports `"focus": true`; clients gate the mode on it.
 
-Cap `live_tui` on `/api/ping` when the harness can host a tmux TUI. Clients
-poll `GET …/tui` (~2–5 Hz; plain by default, `?ansi=1` for colour) and send
-keys via `POST …/tui/keys`.
+Cap `live_tui` on `/api/ping` when the harness can host a tmux TUI. With
+`tui_stream: 1` a client opens `GET /sse/sessions/<id>/tui` (token in the
+query, like `/sse/status`) and is sent a frame whenever the pane, its job or
+its attached state changes, with a `:` keepalive every 15 s. Without it,
+clients poll `GET …/tui` (~2–5 Hz). Both are plain by default, `?ansi=1` for
+colour. Keys go to `POST …/tui/keys`; `{"events": [...]}` sends several
+`{text}` / `{keys}` items in order with no pause between them, while
+`{text, keys}` remains "a whole line, then Enter" with the settle pause.
 
 The frame carries `cols` — the host pane width (120) — so a client can size
 its font to the grid rather than reflowing it, and blank rows below the last

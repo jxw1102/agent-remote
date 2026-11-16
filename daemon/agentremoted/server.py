@@ -48,6 +48,7 @@ Endpoints (all under /api, all JSON):
   GET  /api/jobs                                  running/recent jobs
   GET  /ws/status                                 WebSocket: active-job status pushes
   GET  /sse/status                                SSE: active-job status pushes
+  GET  /sse/sessions/<id>/tui[?ansi=1]            SSE: Live TUI frames, pushed on change
   GET  /api/jobs/<id>?since=<seq>                 job status + new events
   POST /api/jobs/<id>/input {prompt}              type into an interactive TUI
   POST /api/jobs/<id>/queue {prompt}              queue a prompt behind the job
@@ -114,6 +115,10 @@ _SESSION_CONT = re.compile(r"^/api/sessions/([^/]+)/continue$")
 _SESSION_TUI = re.compile(r"^/api/sessions/([^/]+)/tui$")
 _SESSION_FILE = re.compile(r"^/api/sessions/([^/]+)/file$")
 _SESSION_TUI_KEYS = re.compile(r"^/api/sessions/([^/]+)/tui/keys$")
+_SESSION_TUI_STREAM = re.compile(r"^/sse/sessions/([^/]+)/tui$")
+# session id -> the runner whose TUI answered for it. A session never changes
+# harness, so this only saves probing every runner on every frame and key.
+_TUI_RUNNERS = {}
 # Same shape jobs.py runs as a daemon rewind.
 _TUI_REWIND_LINE = re.compile(r"^/rewind(?:\s+\d+)?$")
 _SESSION_ONE = re.compile(r"^/api/sessions/([^/]+)$")
@@ -1804,12 +1809,16 @@ class ApiHandler(BaseHTTPRequestHandler):
         guessing from the version string.
         """
         payload["tui_keys"] = 2
+        # 1: GET /sse/sessions/<id>/tui pushes frames, and POST …/tui/keys
+        # takes an ordered `events` list. Absent: poll GET …/tui.
+        payload["tui_stream"] = 1
         payload["tui_cols"] = TUI_COLS
         payload["tui_rows"] = TUI_ROWS
         caps = payload.get("caps")
         if isinstance(caps, dict):
             caps = dict(caps)
             caps["tui_keys"] = 2
+            caps["tui_stream"] = 1
             payload["caps"] = caps
 
     def _stamp_upload_caps(self, payload: dict) -> None:
@@ -2260,6 +2269,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_tui_capture(m.group(1), query)
             return
 
+        m = _SESSION_TUI_STREAM.match(path)
+        if m:
+            self._handle_tui_stream(m.group(1), query)
+            return
+
         m = _SESSION_ONE.match(path)
         if m:
             name, _b, session = self._find_session(m.group(1))
@@ -2494,6 +2508,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             self._bind_bundle(name)
             self._send_session_file(m.group(1), query)
+            return
+        m = _SESSION_TUI_STREAM.match(path)
+        if m:
+            name, b, session = self._find_session(m.group(1))
+            if b is not None:
+                if not self._session_in_scope(session or {}):
+                    self._error(404, "session not found")
+                    return
+                self._bind_bundle(name)
+            self._handle_tui_stream(m.group(1), query)
             return
         m = _SESSION_TUI.match(path)
         if m:
@@ -3342,25 +3366,83 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         self._error(404, "job not found")
 
+    def _tui_runners(self) -> list:
+        """Every runner that can host a TUI, the bound one first."""
+        out = []
+        for r in [self.runner] + [b.runner for b in (self.bundles or {}).values()]:
+            if r is not None and hasattr(r, "capture_tui") and r not in out:
+                out.append(r)
+        return out
+
     def _tui_runner_for_session(self, session_id: str):
         """Pick the runner that owns a live TUI for session_id (multi or single)."""
         sid = (session_id or "").strip()
         if not sid:
             return None
-        # Prefer the already-bound runner (path prefix or find_session).
-        if self.runner is not None and hasattr(self.runner, "capture_tui"):
-            frame = self.runner.capture_tui(sid)
-            if frame.get("attached"):
-                return self.runner
-        # Multi: probe every harness.
-        for b in (self.bundles or {}).values():
-            r = b.runner
-            if not hasattr(r, "capture_tui"):
-                continue
-            frame = r.capture_tui(sid)
-            if frame.get("attached"):
+        runners = self._tui_runners()
+        cached = _TUI_RUNNERS.get(sid)
+        if cached is not None and cached in runners:
+            return cached
+        for r in runners:
+            if r.capture_tui(sid).get("attached"):
+                self._remember_tui_runner(sid, r)
                 return r
         return self.runner if hasattr(self.runner or object(), "capture_tui") else None
+
+    @staticmethod
+    def _remember_tui_runner(sid: str, runner) -> None:
+        if len(_TUI_RUNNERS) > 512:
+            _TUI_RUNNERS.clear()
+        _TUI_RUNNERS[sid] = runner
+
+    def _tui_frame(self, session_id: str, want_ansi: bool) -> dict:
+        """One Live TUI frame, from whichever harness has the pane."""
+        from .live_tui import frame_payload
+        runners = self._tui_runners()
+        cached = _TUI_RUNNERS.get(session_id)
+        if cached is not None and cached in runners:
+            # Ask the known owner first: one capture, not one per harness.
+            runners.remove(cached)
+            runners.insert(0, cached)
+        last = None
+        for r in runners:
+            frame = r.capture_tui(session_id, ansi=want_ansi)
+            last = frame
+            if frame.get("attached"):
+                self._remember_tui_runner(session_id, r)
+                return frame
+        if last is not None:
+            return last
+        return frame_payload(
+            session_id, "", False,
+            error="live TUI not available on this daemon",
+            ansi=want_ansi,
+        )
+
+    def _tui_in_scope(self, session_id: str) -> bool:
+        """Never show or drive another account's pane."""
+        sess = None
+        if self.store is not None:
+            sess = self.store.get_session(session_id)
+        if sess is None:
+            _n, _b, sess = self._find_session(session_id)
+        return sess is None or self._session_in_scope(sess)
+
+    def _handle_tui_stream(self, session_id: str, query=None):
+        """GET /sse/sessions/<id>/tui — Live TUI frames, pushed when the pane
+        changes. Same frame as GET …/tui; `?ansi=1` for colour.
+
+        The session is looked up and scope-checked once, here, instead of on
+        every frame as the polled route has to.
+        """
+        from . import live_tui
+        if not self._tui_in_scope(session_id):
+            self._error(404, "session not found")
+            return
+        want_ansi = self._flag(query or {}, "ansi")
+        self.close_connection = True
+        live_tui.serve_stream(
+            self, lambda: self._tui_frame(session_id, want_ansi))
 
     def _handle_tui_capture(self, session_id: str, query=None):
         """GET /api/sessions/<id>/tui — live host TUI pane text.
@@ -3368,46 +3450,69 @@ class ApiHandler(BaseHTTPRequestHandler):
         Default text is plain (no SGR, simplified chrome) for BB and simple
         clients. Colour clients pass ``?ansi=1`` (or true/yes/on).
         """
-        from .live_tui import frame_payload
-        # Never stream another account's pane.
-        sess = None
-        if self.store is not None:
-            sess = self.store.get_session(session_id)
-        if sess is None:
-            _n, _b, sess = self._find_session(session_id)
-        if sess is not None and not self._session_in_scope(sess):
+        if not self._tui_in_scope(session_id):
             self._error(404, "session not found")
             return
-        want_ansi = self._flag(query or {}, "ansi")
-        last = None
-        # Multi: try every harness so an attached TUI is found regardless of
-        # path binding; keep the last unattached frame for a useful error.
-        if self.bundles:
-            for b in self.bundles.values():
-                r = b.runner
-                if not hasattr(r, "capture_tui"):
-                    continue
-                frame = r.capture_tui(session_id, ansi=want_ansi)
-                last = frame
-                if frame.get("attached"):
-                    self._send_json(frame)
-                    return
-            if last is not None:
-                self._send_json(last)
-                return
-        if self.runner is not None and hasattr(self.runner, "capture_tui"):
-            self._send_json(self.runner.capture_tui(session_id, ansi=want_ansi))
+        self._send_json(self._tui_frame(
+            session_id, self._flag(query or {}, "ansi")))
+
+    def _handle_tui_events(self, session_id, events):
+        if not isinstance(events, list) or not events or len(events) > 256:
+            self._error(400, "'events' must be a list of 1-256 items")
             return
-        self._send_json(frame_payload(
-            session_id, "", False,
-            error="live TUI not available on this daemon",
-            ansi=want_ansi,
-        ))
+        steps = []
+        for ev in events:
+            if not isinstance(ev, dict):
+                self._error(400, "each event is {text} or {keys}")
+                return
+            text, keys = ev.get("text"), ev.get("keys")
+            if isinstance(text, str) and text:
+                steps.append({"text": text})
+            if isinstance(keys, list) and keys:
+                steps.append({"keys": keys})
+        if not steps:
+            self._error(400, "no input in 'events'")
+            return
+        if not self._tui_in_scope(session_id):
+            self._error(404, "session not found")
+            return
+        missing = "no interactive TUI for this session"
+        owner = self._tui_runner_for_session(session_id)
+        runners = [r for r in ([owner] + self._tui_runners())
+                   if r is not None and hasattr(r, "send_tui_keys")]
+        err = missing
+        for r in runners:
+            err = r.send_tui_keys(session_id, **steps[0])
+            if err != missing:
+                owner = r
+                break
+        if not err:
+            self._remember_tui_runner(session_id, owner)
+            for step in steps[1:]:
+                err = owner.send_tui_keys(session_id, **step)
+                if err:
+                    break
+        if err:
+            _TUI_RUNNERS.pop(session_id, None)
+            self._error(409, err)
+            return
+        self._send_json({"ok": True, "events": len(steps)})
 
     def _handle_tui_keys(self, session_id, body):
-        """POST /api/sessions/<id>/tui/keys {keys?:[], text?:str}."""
+        """POST /api/sessions/<id>/tui/keys {keys?:[], text?:str} or
+        {events:[{text}|{keys}, …]}.
+
+        `events` is typing, in order: a client gathers what was pressed while
+        its last request was in flight and sends it as one, instead of one
+        round trip per keystroke. No event waits on the one before it (the
+        text-then-keys pause is for a whole line sent with `text` + `keys`).
+        """
         if not isinstance(body, dict):
             self._error(400, "body must be JSON")
+            return
+        events = body.get("events")
+        if events is not None:
+            self._handle_tui_events(session_id, events)
             return
         keys = body.get("keys")
         text = body.get("text") or ""
