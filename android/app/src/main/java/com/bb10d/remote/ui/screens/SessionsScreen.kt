@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import com.bb10d.remote.data.ConnState
 import com.bb10d.remote.ui.components.connLabel
 import com.bb10d.remote.ui.components.connTint
@@ -689,7 +690,19 @@ private fun SessionCard(
             .fillMaxWidth()
             // Long press: rename / retitle / focus, without adding controls to
             // the row itself.
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .combinedClickable(
+                onClickLabel = "open",
+                onLongClickLabel = "rename or change focus",
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
+            // The breathing dot says this to the eye; say it to TalkBack too.
+            .semantics {
+                when {
+                    blocked -> stateDescription = "waiting for your answer"
+                    working -> stateDescription = "working"
+                }
+            }
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Row(verticalAlignment = Alignment.Top) {

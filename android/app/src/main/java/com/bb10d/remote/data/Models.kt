@@ -120,8 +120,26 @@ data class ProviderDetailDto(
     val auth: AuthHealthDto? = null,
 )
 
+/**
+ * One harness's colours and name, from /api/ping `palettes`. The daemon is
+ * the single source of truth; the app's built-in values are the fallback for
+ * an older daemon. Hex strings, "#rrggbb".
+ */
+@Serializable
+data class PaletteDto(
+    val label: String = "",
+    val accent: String = "",
+    val heading: String = "",
+    val inline: String = "",
+    @SerialName("heading_light") val headingLight: String = "",
+    @SerialName("inline_light") val inlineLight: String = "",
+    val surface: String = "",
+)
+
 @Serializable
 data class PingDto(
+    /** Colours and labels per harness (see [PaletteDto]). */
+    val palettes: Map<String, PaletteDto> = emptyMap(),
     val ok: Boolean = false,
     val app: String = "",
     val version: String = "",
@@ -218,6 +236,8 @@ data class FocusDto(
     val sessions: List<SessionDto> = emptyList(),
     val counts: Map<String, Int> = emptyMap(),
     val total: Int = 0,
+    /** The daemon's wording for each focus state, e.g. "needs answer". */
+    val labels: Map<String, String> = emptyMap(),
 )
 
 /** POST /api/sessions/<id>/title and .../title/regenerate. */

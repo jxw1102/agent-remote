@@ -249,7 +249,7 @@ fun MetaPill(text: String, modifier: Modifier = Modifier, tint: Color? = null) {
 @Composable
 fun FocusPill(state: String, modifier: Modifier = Modifier, unread: Boolean = false) {
     val pal = palette
-    val (label, tint) = when (state) {
+    val (builtin, tint) = when (state) {
         "needs_answer" -> "needs answer" to pal.warn
         "failed" -> "failed" to pal.danger
         "working" -> "working" to pal.ok
@@ -259,6 +259,8 @@ fun FocusPill(state: String, modifier: Modifier = Modifier, unread: Boolean = fa
             (if (unread) MaterialTheme.colorScheme.onSurface else pal.dim)
         else -> return
     }
+    // The daemon's wording when it has sent it, so every client says the same.
+    val label = com.bb10d.remote.ui.theme.DaemonVocabulary.focusLabel(state) ?: builtin
     MetaPill(label, modifier, tint)
 }
 

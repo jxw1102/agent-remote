@@ -1,5 +1,10 @@
 package com.bb10d.remote.ui.screens
 
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -52,6 +57,11 @@ internal fun PermissionPrompt(
             "Allow $tool?",
             style = MaterialTheme.typography.titleSmall,
             color = MaterialTheme.colorScheme.onSurface,
+            // The agent has stopped for this: announce it when it appears.
+            modifier = Modifier.semantics {
+                heading()
+                liveRegion = LiveRegionMode.Assertive
+            },
         )
         if (detail.isNotBlank()) {
             Spacer(Modifier.height(6.dp))
@@ -80,7 +90,8 @@ internal fun QuestionBanner(accent: Color, onAnswer: () -> Unit) {
             .padding(horizontal = 12.dp, vertical = 6.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(accent.copy(alpha = 0.14f))
-            .clickable(onClick = onAnswer)
+            .clickable(role = Role.Button, onClickLabel = "answer", onClick = onAnswer)
+            .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Assertive }
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

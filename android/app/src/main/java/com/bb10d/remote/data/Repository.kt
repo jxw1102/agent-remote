@@ -6,6 +6,7 @@ import com.bb10d.remote.net.DaemonClient
 import com.bb10d.remote.net.DaemonException
 import com.bb10d.remote.net.LinkedFile
 import com.bb10d.remote.net.StatusStream
+import com.bb10d.remote.ui.theme.DaemonVocabulary
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -223,6 +224,7 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
 
     suspend fun pingProfile(profile: Profile): Result<Caps> = runCatching {
         val ping = client(profile).ping()
+        DaemonVocabulary.usePalettes(ping.palettes)
         val caps = Caps.from(ping, System.currentTimeMillis())
         profileStore.updateCaps(profile.id, caps)
         caps
@@ -260,7 +262,9 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
                             // untouched for weeks falls outside the recency
                             // window, and that is the row that must not be lost.
                             focus -> if (profile.focus) {
-                                client(profile).focus().sessions
+                                client(profile).focus()
+                                    .also { DaemonVocabulary.useFocusLabels(it.labels) }
+                                    .sessions
                             } else {
                                 // Its whole session list would silently fill
                                 // Focus with sessions never enrolled.
