@@ -1,5 +1,6 @@
 package com.bb10d.remote.ui.components
 
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -260,8 +261,10 @@ fun FocusPill(state: String, modifier: Modifier = Modifier, unread: Boolean = fa
         else -> return
     }
     // The daemon's wording when it has sent it, so every client says the same.
-    val label = com.bb10d.remote.ui.theme.DaemonVocabulary.focusLabel(state) ?: builtin
-    MetaPill(label, modifier, tint)
+    val vocabulary = com.bb10d.remote.ui.theme.DaemonVocabulary
+    val label = vocabulary.focusLabel(state) ?: builtin
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    MetaPill(label, modifier, vocabulary.stateColour(state, dark) ?: tint)
 }
 
 val ScreenPadding = PaddingValues(horizontal = 16.dp)

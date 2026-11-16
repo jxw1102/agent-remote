@@ -136,10 +136,22 @@ data class PaletteDto(
     val surface: String = "",
 )
 
+/** One session state from /api/ping `states` (daemon ≥ 2.23). */
+@Serializable
+data class StateDto(
+    val id: String = "",
+    val label: String = "",
+    val role: String = "",
+    val color: String = "",
+    @SerialName("color_light") val colorLight: String = "",
+)
+
 @Serializable
 data class PingDto(
     /** Colours and labels per harness (see [PaletteDto]). */
     val palettes: Map<String, PaletteDto> = emptyMap(),
+    /** Session states: wording and colour, most urgent first. */
+    val states: List<StateDto> = emptyList(),
     val ok: Boolean = false,
     val app: String = "",
     val version: String = "",

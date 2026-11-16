@@ -2,6 +2,7 @@ package com.bb10d.remote.ui.theme
 
 import androidx.compose.runtime.mutableStateMapOf
 import com.bb10d.remote.data.PaletteDto
+import com.bb10d.remote.data.StateDto
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
@@ -70,6 +71,7 @@ enum class Accent(
 object DaemonVocabulary {
     private val palettes = mutableStateMapOf<Accent, PaletteDto>()
     private val focusLabels = mutableStateMapOf<String, String>()
+    private val states = mutableStateMapOf<String, StateDto>()
 
     fun usePalettes(byProvider: Map<String, PaletteDto>) {
         byProvider.forEach { (provider, palette) ->
@@ -103,7 +105,21 @@ object DaemonVocabulary {
 
     fun label(accent: Accent): String? = palettes[accent]?.label?.takeIf { it.isNotBlank() }
 
-    fun focusLabel(state: String): String? = focusLabels[state]
+    fun useStates(list: List<StateDto>) {
+        list.forEach { state ->
+            if (state.id.isNotBlank() && states[state.id] != state) states[state.id] = state
+        }
+    }
+
+    /** The daemon's word for a state: /api/ping first, then /api/focus. */
+    fun focusLabel(state: String): String? =
+        states[state]?.label?.takeIf { it.isNotBlank() } ?: focusLabels[state]
+
+    /** The daemon's colour for a state on this kind of surface, if it has one. */
+    fun stateColour(state: String, dark: Boolean): Color? {
+        val s = states[state] ?: return null
+        return parseHex(if (dark) s.color else s.colorLight)
+    }
 
     /** "#rrggbb" -> opaque colour. */
     fun parseHex(hex: String): Color? {

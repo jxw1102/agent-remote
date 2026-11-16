@@ -742,7 +742,9 @@ private fun SessionCard(
                 WorkingPulse(pal.warn, size = 6)
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    text = "Waiting for your answer",
+                    // The daemon's word for it, as in Focus and on the web.
+                    text = (com.bb10d.remote.ui.theme.DaemonVocabulary.focusLabel("needs_answer")
+                        ?: "needs answer").replaceFirstChar { it.uppercase() },
                     style = MaterialTheme.typography.labelSmall,
                     color = pal.warn,
                 )

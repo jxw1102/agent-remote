@@ -1088,6 +1088,33 @@ function applyRemotePalettes(ping) {
   return changed;
 }
 
+/**
+ * Session-state words and colours from the daemon (≥ 2.23). The built-in
+ * FOCUS_LABELS and CSS colours stay as the fallback for an older daemon.
+ */
+const STATE_ROLE_VARS = { attention: ["--attention", "--warn"], danger: ["--danger"], ok: ["--ok"] };
+function applyRemoteStates(ping) {
+  const states = (ping && Array.isArray(ping.states)) ? ping.states : [];
+  let changed = false;
+  const root = document.documentElement;
+  states.forEach((st) => {
+    if (!st || !st.id) return;
+    if (st.label && FOCUS_LABELS[st.id] !== st.label) {
+      FOCUS_LABELS[st.id] = st.label;
+      changed = true;
+    }
+    const vars = STATE_ROLE_VARS[st.role] || [];
+    if (!/^#[0-9a-fA-F]{6}$/.test(st.color || "")) return;
+    vars.forEach((name) => {
+      if (root.style.getPropertyValue(name).trim() !== st.color) {
+        root.style.setProperty(name, st.color);
+        changed = true;
+      }
+    });
+  });
+  return changed;
+}
+
 async function pingProfile(profile) {
   try {
     const ping = await call(profile, "/api/ping", { timeout: 10000 });
@@ -1101,6 +1128,10 @@ async function pingProfile(profile) {
         const op = profileById(state.open.profileId);
         applyAccent(sessionProvider(state.open.session, op));
       }
+    }
+    if (applyRemoteStates(ping)) {
+      renderSessions();
+      renderStatus();
     }
     profile.provider = ping.provider || "";
     profile.caps = ping.caps || {};
@@ -2089,7 +2120,8 @@ function renderSessions() {
     const folder = String(row.session.cwd || "").replace(/\/+$/, "").split("/").pop();
     if (folder) meta.appendChild(el("span", "tag", folder));
     if (row.session.git_branch) meta.appendChild(el("span", "tag", "⑂ " + row.session.git_branch));
-    if (blocked.has(key)) meta.appendChild(el("span", "tag waiting", "waiting for you"));
+    // The daemon's word for it, so the list, Focus and every other client agree.
+    if (blocked.has(key)) meta.appendChild(el("span", "tag waiting", FOCUS_LABELS.needs_answer));
     // Focus state tag. Same row layout as any other session — one more chip.
     // Focus mode only: in All mode it is noise on rows the human never
     // enrolled, and it duplicates the working dot. Suppressed when the row

@@ -92,3 +92,27 @@ def palettes_for(names) -> dict:
         if pal:
             out[str(name)] = pal
     return out
+
+
+# Session states, in the order they matter to the person: what needs them
+# first. One wording and one colour for every client; before this each client
+# had its own ("waiting for you" / "needs answer" / "blocked", amber in one
+# place and accent in another). An empty colour means "no state colour: use
+# your dim text".
+#   color        on dark surfaces
+#   color_light  on light surfaces
+STATES = [
+    {"id": "needs_answer", "label": "needs answer", "role": "attention",
+     "color": "#e0b454", "color_light": "#8a6100"},
+    {"id": "failed", "label": "failed", "role": "danger",
+     "color": "#e5706b", "color_light": "#b3261e"},
+    {"id": "working", "label": "working", "role": "ok",
+     "color": "#5fc98b", "color_light": "#1f7a50"},
+    {"id": "turn_finished", "label": "turn finished", "role": "dim",
+     "color": "", "color_light": ""},
+]
+
+
+def states() -> list:
+    """A copy of STATES for a JSON payload."""
+    return [dict(s) for s in STATES]

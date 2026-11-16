@@ -225,6 +225,7 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
     suspend fun pingProfile(profile: Profile): Result<Caps> = runCatching {
         val ping = client(profile).ping()
         DaemonVocabulary.usePalettes(ping.palettes)
+        DaemonVocabulary.useStates(ping.states)
         val caps = Caps.from(ping, System.currentTimeMillis())
         profileStore.updateCaps(profile.id, caps)
         caps

@@ -178,6 +178,12 @@ def main():
     with urllib.request.urlopen(base + "/api/ping", timeout=5) as resp:
         ping = json.loads(resp.read().decode())
     check("ping advertises focus", ping.get("focus") is True, ping)
+    check("ping carries the state vocabulary, most urgent first",
+          [s.get("id") for s in ping.get("states", [])]
+          == ["needs_answer", "failed", "working", "turn_finished"],
+          ping.get("states"))
+    check("every state has a label",
+          all(s.get("label") for s in ping.get("states", [])), ping.get("states"))
     check("ping lists focus states",
           "needs_answer" in (ping.get("focus_states") or []), ping)
 

@@ -19,6 +19,16 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.23.0** One vocabulary for session states. `/api/ping` carries `states`:
+the four focus states in urgency order, each with its `label`, a `role`
+(`attention`, `danger`, `ok`, `dim`) and a `color` / `color_light` (empty for
+"no state colour"). Clients had each chosen their own words and colours for
+"this session is waiting on you". Web and Android read it; the others keep
+their built-in values, which `tests/vocabulary_test.py` checks against the
+daemon's. The same test pins palettes and states to
+`tests/fixtures/vocabulary.json`, so a colour or label cannot change by
+accident.
+
 **2.22.0** The Live TUI is pushed, not polled. Clients asked for the pane
 every 400 ms, so a keystroke was echoed up to 400 ms plus a round trip late
 however fast the link was. `GET /sse/sessions/<id>/tui[?ansi=1]` now streams

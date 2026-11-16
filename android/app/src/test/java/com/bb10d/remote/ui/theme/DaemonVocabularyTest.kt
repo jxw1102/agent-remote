@@ -44,6 +44,25 @@ class DaemonVocabularyTest {
     }
 
     @Test
+    fun statesCarryLabelAndColourPerSurface() {
+        assertNull(DaemonVocabulary.stateColour("needs_answer", dark = true))
+        DaemonVocabulary.useStates(
+            listOf(
+                com.bb10d.remote.data.StateDto(
+                    id = "needs_answer", label = "needs answer", role = "attention",
+                    color = "#e0b454", colorLight = "#8a6100",
+                ),
+                com.bb10d.remote.data.StateDto(id = "turn_finished", label = "turn finished"),
+            ),
+        )
+        assertEquals(Color(0xFFE0B454), DaemonVocabulary.stateColour("needs_answer", dark = true))
+        assertEquals(Color(0xFF8A6100), DaemonVocabulary.stateColour("needs_answer", dark = false))
+        assertEquals("needs answer", DaemonVocabulary.focusLabel("needs_answer"))
+        // No state colour: the caller keeps its own dim text.
+        assertNull(DaemonVocabulary.stateColour("turn_finished", dark = true))
+    }
+
+    @Test
     fun focusLabelsComeFromTheDaemon() {
         assertNull(DaemonVocabulary.focusLabel("working"))
         DaemonVocabulary.useFocusLabels(mapOf("working" to "busy", "failed" to ""))
