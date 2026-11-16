@@ -2579,7 +2579,11 @@ function closeSide() {
   $("side").classList.add("hidden");
   $("app").classList.remove("with-side");
   $("btn-changes").setAttribute("aria-pressed", "false");
-  if (hadFocus) $("btn-changes").focus();
+  // In a narrow window the button lives in the More menu, which is closed.
+  if (hadFocus) {
+    const btn = $("btn-changes");
+    (btn.offsetParent ? btn : $("btn-more")).focus();
+  }
 }
 
 async function loadChanges() {

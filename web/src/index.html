@@ -90,9 +90,11 @@
       </div>
       <div class="chat-actions">
         <!-- Icon buttons (titles keep labels for hover + a11y).
-             The first group is what you do now and then; in a narrow window
-             it folds into a menu under "More" so the header stays one row. -->
-        <div id="chat-more" class="chat-more">
+             Options stays in the row at every width: how the next turn
+             runs is what you reach for most. The group after it is what you
+             do now and then (changes, rename, share, reload, copy id); in a
+             narrow window it folds into a menu under "More" so the header
+             stays one row. -->
         <button id="btn-options" class="icon-btn" type="button"
                 title="Options — model, effort, execution mode" aria-label="Options">
           <!-- Cog / gear (not a sun — no radial rays). -->
@@ -109,6 +111,18 @@
                      a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83
                      l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09
                      a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+        <div id="chat-more" class="chat-more">
+        <button id="btn-changes" class="icon-btn hidden" type="button"
+                title="Changes — what differs from the last commit" aria-label="Changes"
+                aria-pressed="false">
+          <!-- Two documents, one with a plus/minus: a diff. -->
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+               stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+               stroke-linejoin="round">
+            <path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/>
+            <path d="M9 12h6M12 9v6M9 18h6"/>
           </svg>
         </button>
         <button id="btn-rename" class="icon-btn" type="button"
@@ -152,17 +166,6 @@
           </svg>
         </button>
         </div>
-        <button id="btn-changes" class="icon-btn hidden" type="button"
-                title="Changes — what differs from the last commit" aria-label="Changes"
-                aria-pressed="false">
-          <!-- Two documents, one with a plus/minus: a diff. -->
-          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
-               stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
-               stroke-linejoin="round">
-            <path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/>
-            <path d="M9 12h6M12 9v6M9 18h6"/>
-          </svg>
-        </button>
         <!-- Order: Options · Refresh · Live TUI · Stop.
              Stop always keeps its slot (icon-idle = invisible, not removed)
              so nothing slides into that space when a job is not running. -->

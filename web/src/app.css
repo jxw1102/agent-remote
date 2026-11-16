@@ -1882,7 +1882,7 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   #side-close { display: none; }
   /* One row: who you are talking to, what you do most. Seven buttons
      took a second row and spread across it; the ones used now and then
-     (options, rename, share, reload, copy id) are a menu under "More". */
+     (changes, rename, share, reload, copy id) are a menu under "More". */
   .chat-head { gap: 8px; }
   .chat-title { flex: 1 1 0; }
   .chat-sub { flex-wrap: nowrap; }
