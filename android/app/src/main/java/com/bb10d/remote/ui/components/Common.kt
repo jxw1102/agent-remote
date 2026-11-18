@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -96,6 +97,37 @@ fun WorkingPulse(color: Color, modifier: Modifier = Modifier, size: Int = 8) {
             .clip(CircleShape)
             .background(color),
     )
+}
+
+/** Three dots rising in turn: the transcript's own "still working" mark. */
+@Composable
+fun WorkingDots(color: Color, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "dots")
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        for (i in 0 until 3) {
+            val phase by transition.animateFloat(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    tween(1200, easing = androidx.compose.animation.core.LinearEasing),
+                    RepeatMode.Restart,
+                    initialStartOffset = androidx.compose.animation.core.StartOffset(i * 150),
+                ),
+                label = "dot$i",
+            )
+            // Up and back in the first 60% of the cycle, then rest.
+            val up = if (phase < 0.6f) kotlin.math.sin(phase / 0.6f * Math.PI).toFloat() else 0f
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .offset(y = (-4f * up).dp)
+                    .alpha(0.35f + 0.65f * up)
+                    .clip(CircleShape)
+                    .background(color),
+            )
+        }
+    }
 }
 
 @Composable

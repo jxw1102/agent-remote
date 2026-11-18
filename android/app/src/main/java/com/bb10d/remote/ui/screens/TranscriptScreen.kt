@@ -91,6 +91,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bb10d.remote.data.ExecMode
 import com.bb10d.remote.data.Time
 import com.bb10d.remote.ui.components.ErrorBanner
+import com.bb10d.remote.ui.components.WorkingDots
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.IntrinsicSize
 import com.bb10d.remote.ui.components.Hairline
 import com.bb10d.remote.ui.components.MetaPill
 import com.bb10d.remote.ui.components.rememberClip
@@ -219,16 +222,26 @@ private fun TranscriptScreenBody(
     // message) always wins — the user is looking for something specific. A new
     // streamed line only follows if they were already at the bottom, so
     // reading back through history is never yanked away mid-sentence.
+    // The list's real last row: the "Load earlier" header and the working
+    // tail are rows too.
+    val bottomRow = ui.items.lastIndex + (if (ui.canLoadOlder) 1 else 0) +
+        (if (jobState.running) 1 else 0)
     LaunchedEffect(ui.scrollTick) {
-        if (ui.items.isNotEmpty()) listState.scrollToItem(ui.items.lastIndex)
+        if (ui.items.isNotEmpty()) listState.scrollToItem(bottomRow)
+    }
+    // The tail appearing at the bottom is followed like new output.
+    LaunchedEffect(jobState.running) {
+        if (!jobState.running || ui.items.isEmpty()) return@LaunchedEffect
+        val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        if (last >= bottomRow - 2) listState.animateScrollToItem(bottomRow)
     }
     // Keyed on the LAST item, not the count, so loading older messages (which
     // also changes the count) can never be mistaken for new output arriving.
     LaunchedEffect(ui.items.lastOrNull()?.id) {
         if (ui.items.isEmpty()) return@LaunchedEffect
         val atBottom = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index
-            ?.let { it >= ui.items.size - 3 } ?: true
-        if (atBottom) listState.animateScrollToItem(ui.items.lastIndex)
+            ?.let { it >= bottomRow - 3 } ?: true
+        if (atBottom) listState.animateScrollToItem(bottomRow)
     }
     // Older messages went in above: shift the anchor by exactly as many rows,
     // so the message you were reading stays under your thumb.
@@ -429,6 +442,23 @@ private fun TranscriptScreenBody(
                                 openSteps = openSteps,
                                 onToggleStep = vm::toggleStep,
                             )
+                        }
+                        if (jobState.running) {
+                            item(key = "working-tail") {
+                                val waiting = jobState.pendingQuestion != null
+                                    || jobState.pendingPermission != null
+                                WorkingTail(
+                                    text = if (waiting) "Waiting for your answer"
+                                    else liveHeadline(
+                                        live?.phase.orEmpty(),
+                                        live?.phaseDetail.orEmpty(),
+                                        live?.tool.orEmpty().ifEmpty { jobState.toolLine },
+                                        accent.label,
+                                    ),
+                                    elapsed = if (waiting) 0 else live?.elapsedS ?: 0,
+                                    color = if (waiting) palette.warn else accent.tint,
+                                )
+                            }
                         }
                     } }
                 }
@@ -929,6 +959,51 @@ private fun humanSize(bytes: Long): String = when {
     else -> "$bytes B"
 }
 
+private fun liveHeadline(phase: String, phaseDetail: String, tool: String, agent: String) =
+    when {
+        phase.isNotEmpty() && phaseDetail.isNotEmpty() -> {
+            val verb = phase.replaceFirstChar { it.uppercase() }
+            "$verb · $phaseDetail"
+        }
+        phase.isNotEmpty() -> phase.replaceFirstChar { it.uppercase() }
+        tool.isNotEmpty() -> tool
+        else -> "$agent is working"
+    }
+
+/**
+ * The transcript's last row while a turn runs. The banner sits above the
+ * list, so a reader at the bottom of a long turn saw nothing moving where
+ * they were looking. Same words as the banner; the warning colour when a
+ * question or permission waits on the reader.
+ */
+@Composable
+private fun WorkingTail(text: String, elapsed: Int, color: Color) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .height(IntrinsicSize.Min),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .width(2.dp)
+                .fillMaxHeight()
+                .background(color.copy(alpha = 0.7f)),
+        )
+        Spacer(Modifier.width(10.dp))
+        WorkingDots(color)
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = if (elapsed > 0) "$text · ${Time.elapsed(elapsed)}" else text,
+            style = MaterialTheme.typography.labelMedium,
+            color = palette.dim,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
 /** The live strip: what the agent is doing right now, and for how long. */
 @Composable
 private fun StatusBanner(
@@ -951,15 +1026,7 @@ private fun StatusBanner(
     AnimatedVisibility(visible = running) {
         // Line 1: human description (daemon phase_detail). Line 2: raw
         // command / path / [attached: …] (tool_detail), when distinct.
-        val headline = when {
-            phase.isNotEmpty() && phaseDetail.isNotEmpty() -> {
-                val verb = phase.replaceFirstChar { it.uppercase() }
-                "$verb · $phaseDetail"
-            }
-            phase.isNotEmpty() -> phase.replaceFirstChar { it.uppercase() }
-            tool.isNotEmpty() -> tool
-            else -> "$agent is working"
-        }
+        val headline = liveHeadline(phase, phaseDetail, tool, agent)
         val second = when {
             toolDetail.isNotBlank() && toolDetail != phaseDetail -> toolDetail
             tool.isNotBlank() && tool != phaseDetail -> tool

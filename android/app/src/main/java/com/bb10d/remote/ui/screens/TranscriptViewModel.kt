@@ -1028,7 +1028,7 @@ class TranscriptViewModel(
                         busy = false,
                         error = when (code) {
                             404 -> "$name is not available. The daemon only opens files " +
-                                "this session linked inside its working folder."
+                                "this session linked inside its working folder or ~/Public."
                             413 -> "$name is too large to open on the phone (over 10 MB)."
                             else -> repo.reason(e)
                         },
