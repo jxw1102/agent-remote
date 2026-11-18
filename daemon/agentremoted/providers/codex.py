@@ -44,6 +44,10 @@ log = logging.getLogger(__name__)
 _MAX_TITLE = 80
 _MAX_PREVIEW = 160
 _STATE_GLOB = "state_*.sqlite"
+# Columns every `threads` query reads; `name` is appended by _select_cols.
+_THREAD_COLS = ("id, title, cwd, model, git_branch, preview, rollout_path, "
+                "created_at, updated_at, archived, first_user_message, "
+                "has_user_event")
 # Codex keeps thread goals in their own database beside the thread index.
 _GOALS_GLOB = "goals_*.sqlite"
 
@@ -788,6 +792,58 @@ def _event_chat_message(ev: dict):
     return None
 
 
+_TAIL_STEPS = (256 * 1024, 4 * 1024 * 1024)
+_tail_cache = {}
+_tail_lock = threading.Lock()
+
+
+def _tail_message(path: str):
+    """(role, text) of the newest chat message in a rollout, ("", "") if
+    none. The session list shows this, as for the other harnesses; Codex's
+    own ``preview`` column is the opening prompt and never moves.
+
+    Reads only the tail (a wider one if a long turn of tool calls hides the
+    last message), cached on the file's size and mtime.
+    """
+    if not path:
+        return "", ""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return "", ""
+    key = (st.st_size, st.st_mtime_ns)
+    with _tail_lock:
+        hit = _tail_cache.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    found = ("", "")
+    try:
+        with open(path, "rb") as f:
+            for span in _TAIL_STEPS:
+                start = max(0, st.st_size - span)
+                f.seek(start)
+                lines = f.read(st.st_size - start).decode(
+                    "utf-8", errors="replace").splitlines()
+                if start > 0 and lines:
+                    lines = lines[1:]        # cut mid-line
+                for line in reversed(lines):
+                    if '"event_msg"' not in line:
+                        continue
+                    msg = _event_chat_message(_safe_json(line))
+                    if msg:
+                        found = msg
+                        break
+                if found[0] or start == 0:
+                    break
+    except OSError:
+        return "", ""
+    with _tail_lock:
+        if len(_tail_cache) > 2000:
+            _tail_cache.clear()
+        _tail_cache[path] = (key, found)
+    return found
+
+
 def _is_user_prompt_event(ev: dict) -> bool:
     """True for human user turns (submit confirm + rewind anchors)."""
     hit = _event_chat_message(ev)
@@ -900,6 +956,8 @@ class CodexStore:
         self.config = config
         # Set by providers.build_one to this harness's own generator.
         self.titler = None
+        # (state db path, column names) — see _select_cols.
+        self._cols_for = None
 
     # -- discovery ------------------------------------------------------
 
@@ -967,15 +1025,37 @@ class CodexStore:
             log.warning("codex state db open failed: %s", e)
             return None
 
+    def _select_cols(self) -> str:
+        """The columns every thread query reads, `name` included.
+
+        Codex summarises a thread into ``threads.name`` ("Build an ARM32 APK
+        search tool") a turn or two in. A CLI older than that has no such
+        column, so ask the schema and substitute an empty one — callers can
+        then read ``row["name"]`` without caring which Codex wrote the store.
+        """
+        db = self._state_db()
+        if self._cols_for and self._cols_for[0] == db:
+            cols = self._cols_for[1]
+        else:
+            cols = frozenset()
+            con = self._connect()
+            if con is not None:
+                try:
+                    cols = frozenset(
+                        r[1] for r in con.execute("PRAGMA table_info(threads)"))
+                except sqlite3.Error:
+                    cols = frozenset()
+                finally:
+                    con.close()
+            self._cols_for = (db, cols)
+        return _THREAD_COLS + (", name" if "name" in cols else ", '' AS name")
+
     def _rows(self, user_only: bool = True, project_cwd: str = None):
         con = self._connect()
         if con is None:
             return []
         try:
-            q = ("SELECT id, title, cwd, model, git_branch, preview, "
-                 "rollout_path, created_at, updated_at, archived, "
-                 "first_user_message, has_user_event "
-                 "FROM threads")
+            q = "SELECT " + self._select_cols() + " FROM threads"
             clauses = []
             args = []
             if user_only:
@@ -1056,6 +1136,7 @@ class CodexStore:
             if project_id and _munge_cwd(row["cwd"] or "") != project_id:
                 continue
             hay = " ".join([
+                row["name"] or "",
                 row["title"] or "",
                 row["preview"] or "",
                 row["first_user_message"] or "",
@@ -1063,7 +1144,10 @@ class CodexStore:
             ])
             snippet = None
             if search_util.contains_ci(hay, q):
-                for field in (row["title"], row["preview"], row["first_user_message"]):
+                # The name is what the list shows, so a hit on it is the one
+                # that needs no snippet to make sense — try it first.
+                for field in (row["name"], row["title"], row["preview"],
+                              row["first_user_message"]):
                     if field and search_util.contains_ci(field, q):
                         snippet = search_util.make_snippet(field, q)
                         break
@@ -1094,10 +1178,7 @@ class CodexStore:
             return None
         try:
             row = con.execute(
-                "SELECT id, title, cwd, model, git_branch, preview, "
-                "rollout_path, created_at, updated_at, archived, "
-                "first_user_message, has_user_event "
-                "FROM threads WHERE id = ?",
+                "SELECT " + self._select_cols() + " FROM threads WHERE id = ?",
                 (session_id,),
             ).fetchone()
         except sqlite3.Error:
@@ -1258,17 +1339,27 @@ class CodexStore:
 
     def _summary(self, row) -> dict:
         cwd = (row["cwd"] or "").strip()
-        title = " ".join(str(row["title"] or "").split())
+        # Codex names a thread itself once it has seen the work ("Diagnose
+        # Android app crashes"), and its own summary beats anything we could
+        # derive — it read the session, we only ever see the opening message.
+        # `title` is no second opinion: Codex stores the raw first message
+        # there, byte for byte the same as `preview`.
+        title = " ".join(str(row["name"] or "").split())
         if titles.looks_blank(title):
-            # Codex usually stores no title, so the fallback is a raw opening
-            # message. Derive one instead; the raw text shows once while the
-            # first call is in flight.
+            title = " ".join(str(row["title"] or "").split())
+        if titles.looks_blank(title):
+            # A thread Codex never named (older CLI, or named too early to
+            # have anything to go on): derive one. The raw opening message
+            # shows once while that first call is in flight.
             first = " ".join(
                 str(row["first_user_message"] or row["preview"] or "").split())
             title = self._derived_title(row["id"] or "", first) or first
         if not title:
             title = "Session %s" % (row["id"] or "")[:8]
-        last = row["preview"] or row["first_user_message"] or ""
+        last_role, last = _tail_message(row["rollout_path"] or "")
+        if not last:
+            last = row["preview"] or row["first_user_message"] or ""
+            last_role = "user" if last else ""
         try:
             size = Path(row["rollout_path"] or "").stat().st_size
         except OSError:
@@ -1281,7 +1372,7 @@ class CodexStore:
             "title": _preview(title, _MAX_TITLE),
             "started": _iso_from_unix(row["created_at"]),
             "last_active": _iso_from_unix(row["updated_at"] or row["created_at"]),
-            "last_role": "assistant" if last else "",
+            "last_role": last_role,
             "last_text": _preview(last),
             "model": row["model"] or "",
             "size_bytes": size,

@@ -15,7 +15,9 @@ when every rule below holds:
     the agent put it on screen, so the client is only following a link the
     reader can already see;
   * after symlinks are resolved, the file sits inside the session's working
-    folder, so a link (or a symlink) cannot reach outside the project;
+    folder or the host's ``~/Public`` (the folder agents drop finished
+    builds and images into), so a link (or a symlink) cannot reach anywhere
+    else;
   * the path crosses no credential directory (``.ssh``, the daemon's own
     ``.agentremoted``, …), even when the working folder is the home folder;
   * it is a regular file no larger than ``MAX_BYTES``.
@@ -92,15 +94,32 @@ def _inside(child: str, parent: str) -> bool:
         return False
 
 
+# Folders outside the working folder a session may link into. ~/Public is
+# where agents leave things for the user (BARs, APKs, diagrams).
+_SHARED_ROOTS = ("~/Public",)
+
+
+def _roots(cwd: str) -> list:
+    roots = []
+    if cwd:
+        root = os.path.realpath(os.path.expanduser(str(cwd)))
+        if root != os.path.sep:     # "/" scopes nothing
+            roots.append(root)
+    for extra in _SHARED_ROOTS:
+        root = os.path.realpath(os.path.expanduser(extra))
+        if root != os.path.sep and os.path.isdir(root):
+            roots.append(root)
+    return roots
+
+
 def resolve(path: str, cwd: str) -> str:
     """Real path of an allowed file, or "" when the rules refuse it."""
     if not path or not os.path.isabs(path) or "\x00" in path:
         return ""
-    root = os.path.realpath(os.path.expanduser(str(cwd or "")))
-    if not cwd or root == os.path.sep:
-        return ""  # no working folder, or "/" — nothing to scope to
     real = os.path.realpath(path)
-    if not _inside(real, root) or real == root:
+    root = next((r for r in _roots(cwd)
+                 if _inside(real, r) and real != r), "")
+    if not root:
         return ""
     rel = os.path.relpath(real, root)
     parts = rel.split(os.sep)

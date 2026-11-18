@@ -19,6 +19,53 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.20.11** Codex sessions are listed under the name Codex gave them.
+Codex summarises a thread into `threads.name` ("Diagnose Android app
+crashes") a turn or two in; the daemon was reading `threads.title`, which
+only ever holds the raw opening message — the same bytes as `preview`. The
+name is used when there is one, and is searched before anything else. A
+thread Codex never named (older CLI) still falls back to the opening
+message, and a manual rename still outranks both.
+
+**2.20.10** A session stops asking for an answer once the question is
+answered. The PreToolUse hook announces an AskUserQuestion, but only a turn
+the daemon itself was running ever cleared it, so a question answered in the
+terminal with no such turn left the card on "needs answer" for good (session
+46c2870a). It is now cleared when the turn stops or the session ends, and a
+question that survives either — a lost hook — is believed only while its
+panel is actually on the pane.
+
+**2.20.9** One prompt can no longer become two sessions. A repeat of
+`POST /api/sessions/new` with the same account, harness, folder and prompt
+within ten seconds answers with the job already running instead of starting a
+second agent; a repeat arriving while the first is still launching waits for
+its job id. The web client also keeps a modal's buttons dead while its action
+is in flight, which is how one "Start" tap became two (codex sessions
+01a1e3ad-4265 and -468a, 1.03s apart).
+
+**2.20.8** Search finds a session by its renamed title and by words
+anywhere in a Claude transcript. A rename made in a client lives only in the
+daemon's focus store, which search never read; and body search read only the
+first 384 KB and last 192 KB of each transcript, so the middle of a long
+session (a 99 MB one: mentions between 6 and 94 MB) could never match. The
+whole file is now scanned as bytes, and only lines holding the term are
+parsed: a miss over 1.3 GB of transcripts takes under a second.
+
+**2.20.7** A Claude session whose turn ended with a background shell still
+running (a copy, a build, a `run_in_background` command) counts as working
+until the shell exits, since Claude Code picks the conversation up again by
+itself then. The banner says "background shell running".
+
+**2.20.6** A session's links to files in the host's `~/Public` open on
+the phone, not only links inside its working folder. Agents leave builds and
+diagrams there. The other rules still hold: the transcript must link the
+file, credential folders are refused, and only regular files are served.
+
+**2.20.5** The session list previews a Codex session's latest message, as
+it does for the other harnesses. It used Codex's own `preview` column, which
+is the opening prompt and never changes; the daemon now reads the newest
+message from the end of the rollout (cached on its size and mtime).
+
 **2.20.4** A new Codex session whose TUI dies at startup is retried. A
 fresh codex TUI can exit about a second after it starts (its handshake with
 codex's shared app server fails), after it has already drawn its input box,

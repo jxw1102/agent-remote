@@ -303,6 +303,11 @@ class ApiHandler(BaseHTTPRequestHandler):
     # Set per-request by _authorize(); never share data across principals.
     principal = None
 
+    # Recent POST /api/sessions/new, so a repeat does not start a second
+    # agent on the same prompt. Shared by every request thread.
+    _new_recent = {}
+    _new_recent_lock = threading.Lock()
+
     # -- plumbing --------------------------------------------------------
 
     def _bind_path(self):
@@ -779,6 +784,45 @@ class ApiHandler(BaseHTTPRequestHandler):
         rows.sort(key=lambda r: float(r.get("last_active") or 0), reverse=True)
         return rows
 
+    def _title_hits(self, q, project):
+        """Sessions whose title override (a rename) matches *q*.
+
+        Provider stores search transcripts and their own titles; a rename
+        lives only in the focus store, so it is matched here and put first.
+        """
+        b = self.focus
+        if b is None:
+            return []
+        rows = []
+        for key in b.keys_with_title(q)[:50]:
+            try:
+                name, _bundle, s = self._find_session(key)
+            except Exception:
+                continue
+            if not s:
+                continue
+            if project and str(s.get("project_id") or "") != str(project):
+                continue
+            row = dict(s)
+            if name:
+                row.setdefault("provider", name)
+            title = b.title(key)
+            row["title"] = title
+            from . import search_util
+            row["snippet"] = search_util.make_snippet(title, q)
+            rows.append(row)
+        return rows
+
+    def _with_title_hits(self, q, project, hits):
+        """Title-override hits first, then *hits* minus those sessions."""
+        first = self._title_hits(q, project)
+        seen = {str(r.get("id") or "") for r in first}
+        yield from first
+        for row in hits:
+            if str(row.get("id") or "") in seen:
+                continue
+            yield row
+
     def _merged_search(self, q, project, limit, user_only):
         """Search every harness in parallel — sequential 3× was the multi lag."""
         import concurrent.futures
@@ -836,8 +880,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         ) else min(max(limit * 4, 50), 100)
         try:
             if multi:
-                for row in self._iter_merged_search(
-                        q, project, fetch, user_only):
+                for row in self._with_title_hits(q, project, self._iter_merged_search(
+                        q, project, fetch, user_only)):
                     if not self._session_in_scope(row):
                         continue
                     self._write_ndjson({"type": "hit", "session": row})
@@ -850,7 +894,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     search_fn = getattr(self.store, "search_sessions", None)
                     rows = (search_fn(q, project, fetch, user_only=user_only)
                             if search_fn else [])
-                    for row in rows:
+                    for row in self._with_title_hits(q, project, rows):
                         if not self._session_in_scope(row):
                             continue
                         self._write_ndjson({"type": "hit", "session": row})
@@ -858,7 +902,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                         if count >= limit:
                             break
                 else:
-                    for row in it_fn(q, project, fetch, user_only=user_only):
+                    for row in self._with_title_hits(
+                            q, project, it_fn(q, project, fetch, user_only=user_only)):
                         if not self._session_in_scope(row):
                             continue
                         self._write_ndjson({"type": "hit", "session": row})
@@ -2162,7 +2207,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             fetch = limit if (
                 self.principal is None or self.principal.is_main
             ) else min(max(limit * 4, 50), 100)
-            results = search_fn(q, project, fetch, user_only=user_only)
+            results = list(self._with_title_hits(
+                q, project, search_fn(q, project, fetch, user_only=user_only)))
             results = self._decorate_focus(self._filter_rows(results)[:limit])
             self._send_json({"query": q, "results": results})
             return
@@ -2388,8 +2434,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             fetch = limit if (
                 self.principal is None or self.principal.is_main
             ) else min(max(limit * 4, 50), 100)
-            results = self._merged_search(
-                q, project, fetch, user_only=user_only)
+            results = list(self._with_title_hits(q, project, self._merged_search(
+                q, project, fetch, user_only=user_only)))
             results = self._decorate_focus(self._filter_rows(results)[:limit])
             self._send_json({"query": q, "results": results})
             return
@@ -3024,6 +3070,80 @@ class ApiHandler(BaseHTTPRequestHandler):
         # bodies; clients only need the job_id JSON either way.
         self._send_json({"job_id": job.id}, status=200)
 
+    # A second POST /api/sessions/new with the same account, harness, folder
+    # and prompt inside this window is a repeat, not a second task: a tap that
+    # did not look like it landed, or a client retrying a request whose reply
+    # was lost. One prompt became two codex sessions this way (01a1e3ad-4265
+    # and -468a, 1.03s apart, one web Start tapped twice). Long enough to
+    # cover a slow round trip over a tunnel, short enough that deliberately
+    # running the same prompt again still works.
+    _NEW_DEDUPE_S = 10.0
+
+    # How long a repeat waits for the job id of a POST still launching.
+    # Starting a turn means spawning or finding a TUI, which is seconds.
+    _NEW_INFLIGHT_WAIT_S = 20.0
+
+    def _new_session_dupe(self, body, cwd):
+        """Job id of an identical new-session POST just served, or "".
+
+        Returning "" also claims the key, so the caller must then either
+        report the job through `_new_session_served` or release the claim
+        through `_new_session_failed`.
+        """
+        p = self.principal or accounts.main_principal()
+        key = (str(getattr(p, "account", "") or ""),
+               str(getattr(self.runner, "name", "") or ""),
+               str(cwd or ""),
+               str(body.get("prompt") or ""),
+               str(body.get("provider") or ""))
+        deadline = time.time() + self._NEW_INFLIGHT_WAIT_S
+        while True:
+            now = time.time()
+            with ApiHandler._new_recent_lock:
+                recent = ApiHandler._new_recent
+                for k, (at, jid) in list(recent.items()):
+                    # A claim with no job id yet is still launching; it is
+                    # dropped by its own request, not by age.
+                    if jid and now - at > self._NEW_DEDUPE_S:
+                        recent.pop(k, None)
+                hit = recent.get(key)
+                if hit is None:
+                    # Claim the key: two taps can land on two threads at
+                    # once, and the second must not start a job while the
+                    # first is still launching one.
+                    recent[key] = (now, "")
+                    self._new_dedupe_key = key
+                    return ""
+                if hit[1]:
+                    return hit[1]
+            # Claimed but not yet launched: wait for that job's id rather
+            # than start a second agent on the same prompt.
+            if time.time() >= deadline:
+                with ApiHandler._new_recent_lock:
+                    ApiHandler._new_recent.pop(key, None)
+                    ApiHandler._new_recent[key] = (time.time(), "")
+                    self._new_dedupe_key = key
+                return ""
+            time.sleep(0.05)
+
+    def _new_session_served(self, job_id):
+        """Attach the job id to the key claimed by _new_session_dupe."""
+        key = getattr(self, "_new_dedupe_key", None)
+        if key is None:
+            return
+        with ApiHandler._new_recent_lock:
+            if key in ApiHandler._new_recent:
+                ApiHandler._new_recent[key] = (time.time(), str(job_id or ""))
+
+    def _new_session_failed(self):
+        """Drop the claim when no job started, so a retry is not swallowed."""
+        key = getattr(self, "_new_dedupe_key", None)
+        if key is None:
+            return
+        with ApiHandler._new_recent_lock:
+            if ApiHandler._new_recent.get(key, (0, ""))[1] == "":
+                ApiHandler._new_recent.pop(key, None)
+
     def _handle_new_session(self, body):
         if not isinstance(body, dict) or not isinstance(body.get("prompt"), str) \
                 or not body["prompt"].strip():
@@ -3044,6 +3164,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             else:
                 self._error(400, "'cwd' is required for a new session")
                 return
+        # A repeat of the POST just served: answer with the job already
+        # running, so the client follows that one instead of starting a
+        # second agent on the same prompt.
+        dupe = self._new_session_dupe(body, cwd)
+        if dupe:
+            log.info("new session: repeat POST, reusing job %s", dupe)
+            self._send_json({"job_id": dupe, "duplicate": True}, status=200)
+            return
         try:
             job = self._start_job_for_principal(
                 prompt=body["prompt"],
@@ -3053,8 +3181,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 effort=str(body.get("effort", "") or ""),
             )
         except RuntimeError as e:
+            self._new_session_failed()
             self._error(503, str(e))
             return
+        except Exception:
+            self._new_session_failed()
+            raise
+        self._new_session_served(job.id)
         self._send_json({"job_id": job.id}, status=200)
 
     def _resolve_synthetic_tui_job(self, job_id):

@@ -349,6 +349,20 @@ class Focus:
             entry = self._titles.get(str(key or ""))
             return entry.get("title", "") if entry else ""
 
+    def keys_with_title(self, query: str) -> list:
+        """Session keys whose stored title contains *query* (any case).
+
+        Search reads transcripts, which know nothing of a rename made here,
+        so a session renamed in a client could not be found by its name.
+        """
+        q = str(query or "").casefold()
+        if not q:
+            return []
+        with self._lock:
+            return [k for k, e in self._titles.items()
+                    if not k.startswith(JOB_KEY_PREFIX)
+                    and q in str(e.get("title") or "").casefold()]
+
     def title_entry(self, key: str):
         with self._lock:
             entry = self._titles.get(str(key or ""))

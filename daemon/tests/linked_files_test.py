@@ -61,6 +61,9 @@ PAGE = os.path.join(PROJECT, "report.html")
 PIC = os.path.join(PROJECT, "shot.png")
 SPACED = os.path.join(PROJECT, "my notes", "a b.md")
 BIG = os.path.join(PROJECT, "big.log")
+PUBLIC_PIC = os.path.join(FAKE_HOME, "Public", "arch.png")
+PUBLIC_UNLINKED = os.path.join(FAKE_HOME, "Public", "other.bar")
+PUBLIC_SSH = os.path.join(FAKE_HOME, "Public", ".ssh", "id")
 
 
 def fixtures():
@@ -73,6 +76,9 @@ def fixtures():
     write(PIC, b"\x89PNG\r\n\x1a\n\x00\x00")
     write(SPACED, b"# notes\n")
     write(BIG, b"x" * (linked_files.MAX_BYTES + 1))
+    write(PUBLIC_PIC, b"\x89PNG\r\n\x1a\n\x00\x00")
+    write(PUBLIC_UNLINKED, b"bar")
+    write(PUBLIC_SSH, b"key")
 
 
 class Store:
@@ -118,6 +124,7 @@ def main():
             SSH_KEY, PAGE, PIC),
         "Notes in [notes](%s) and [log](%s)." % (
             urllib.parse.quote(SPACED), BIG),
+        "Diagram in [Public](%s), key [k](%s)." % (PUBLIC_PIC, PUBLIC_SSH),
     ])
     # Many filler messages so the link sits past the first 500-row page.
     msgs = [assistant("step %d" % i) for i in range(620)] + [assistant(linked)]
@@ -172,6 +179,10 @@ def main():
         check("an image keeps its type", st == 200
               and hd.get("Content-Type") == "image/png", hd.get("Content-Type"))
 
+        st, hd, _b = fetch(PUBLIC_PIC)
+        check("a linked file in ~/Public is served", st == 200
+              and hd.get("Content-Type") == "image/png", st)
+
         print("everything else is refused:")
         st, _h, _b = fetch(FINDINGS, auth=False)
         check("no token, no file", st == 401, st)
@@ -184,6 +195,9 @@ def main():
             ("a traversal spelling", PROJECT + "/audit/../../other/secret.txt"),
             ("a relative path", "audit/findings.txt"),
             ("the working folder itself", PROJECT),
+            ("an unlinked file in ~/Public", PUBLIC_UNLINKED),
+            ("a linked file under ~/Public/.ssh", PUBLIC_SSH),
+            ("~/Public itself", os.path.join(FAKE_HOME, "Public")),
         ]
         bodies = set()
         for label, path in refusals:

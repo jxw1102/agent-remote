@@ -1553,7 +1553,7 @@ class ClaudeStore:
 
         Two passes so the UI can paint quickly:
           1) title / last_text / cwd only (cheap)
-          2) head+tail body scan for the rest
+          2) whole-body scan for the rest
         """
         q = search_util.normalize_query(query)
         if not q:
@@ -1629,13 +1629,9 @@ class ClaudeStore:
         return None
 
     def _match_body(self, path: Path, query: str):
-        """Head+tail transcript scan. Line reject skips JSON parse for most lines."""
-        q_folded = query.lower() if query.isascii() else query.casefold()
-        ascii_q = query.isascii()
+        """Whole-transcript scan; only lines holding the term are parsed."""
         try:
-            for line in self._search_body_lines(path):
-                if not search_util.line_may_match(line, q_folded, ascii_needle=ascii_q):
-                    continue
+            for line in search_util.iter_matching_lines(path, query):
                 msg = self._parse_line(line)
                 if not msg:
                     continue
@@ -1645,24 +1641,6 @@ class ClaudeStore:
         except OSError:
             return None
         return None
-
-    @staticmethod
-    def _search_body_lines(path: Path):
-        """Yield transcript lines for body search (full small files; head+tail large)."""
-        try:
-            size = path.stat().st_size
-        except OSError:
-            return
-        head_n = search_util.SEARCH_HEAD_BYTES
-        tail_n = search_util.SEARCH_TAIL_BYTES
-        if size <= head_n + tail_n:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                yield from f
-            return
-        for line in _read_head_lines(path, head_n):
-            yield line
-        for line in _read_tail_lines(path, tail_n):
-            yield line
 
     def find_session_file(self, session_id: str) -> Path:
         """Locate a session transcript by uuid across all projects."""

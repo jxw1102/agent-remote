@@ -138,7 +138,7 @@ idle = pane(
     "⏺ Done. The build finished in 712s.",
     "✻ Baked for 7m 21s · done 6:27 PM",
     *BOX,
-    status("1 shell", "↓ to manage"),
+    status(),
 )
 check("a finished turn is idle", busy(idle) is False)
 
@@ -218,6 +218,110 @@ if rows:
 mgr_idle = Pane(idle)
 mgr_idle._tuis["cld-test-1"] = tui
 check("an idle TUI is not reported", mgr_idle.active_tui_status() == [])
+
+print("a background shell outlives the turn")
+# Session 46c2870a: the turn ended with a copy still running in the
+# background; Claude Code resumes by itself when it exits, so the reader
+# must see "working", not "turn finished".
+shell_wait = pane(
+    "⏺ Alipay on 22141 is in progress.",
+    "✻ Cooked for 3m 27s · done 4:58 PM · 1 shell still running",
+    *BOX,
+    status("1 shell", "↓ to manage") + "      ◎ /goal active (6m)",
+)
+shell_done = pane(
+    "⏺ Alipay on 22141 is in progress.",
+    "✻ Cooked for 3m 27s · done 4:58 PM · 1 shell still running",
+    *BOX,
+    status(),
+)
+check("a live shell is reported", Pane(shell_wait)._pane_bg_shells("t"))
+check("two shells too",
+      Pane(pane(*BOX, status("2 shells", "↓ to manage")))._pane_bg_shells("t"))
+check("the old turn line alone is not", not Pane(shell_done)._pane_bg_shells("t"))
+check("an agent count is not a shell",
+      not Pane(pane(*BOX, status("← 1 agent")))._pane_bg_shells("t"))
+check("a shell is not a busy turn (Stop must not wait on it)",
+      not busy(shell_wait))
+mgr_sh = Pane(shell_wait)
+mgr_sh._tuis["cld-test-1"] = tui
+rows = mgr_sh.active_tui_status()
+check("the shell-waiting session gets a working row", len(rows) == 1, rows)
+if rows:
+    check("saying why", rows[0].get("phase_detail") == "background shell running",
+          rows[0])
+mgr_sd = Pane(shell_done)
+mgr_sd._tuis["cld-test-1"] = tui
+check("and loses it when the shell exits", mgr_sd.active_tui_status() == [])
+
+print("a question answered in the pane stops asking for an answer")
+# Session 46c2870a: the PreToolUse hook announced an AskUserQuestion, the
+# user answered it in the terminal with no job of ours watching, and the
+# turn ran on for two more minutes — but only the turn loop cleared
+# `hook_ask`, so the card stayed "needs answer" for ever.
+panel = pane(
+    "⏺ Which build should I use?",
+    "❯ 1. Reconstruct build 08",
+    "  2. Build from today's sources",
+    "  Submit",
+    "Enter to select · ↑/↓ to navigate · Esc to cancel",
+)
+answered = pane(
+    "⏺ Going with the build-08 reconstruction.",
+    "✻ Baked for 6m 0s · done 6:47 AM · 1 shell still running",
+    *BOX,
+    status("1 shell", "↓ to manage"),
+)
+check("the panel on screen is live", Pane(panel)._ask_panel_live("t"))
+check("a finished turn has no panel", not Pane(answered)._ask_panel_live("t"))
+check("an answered panel in scrollback is not live",
+      not Pane(pane(panel, "⏺ Going with 08.", *BOX, status()))._ask_panel_live("t"))
+# Safety: a live question must never be read as answered. One stray rule
+# under the panel (a separator, a wrapped box edge mid-redraw) is not the
+# input box coming back, so the question stands.
+check("one stray rule under the panel does not kill it",
+      Pane(pane(panel, RULE))._ask_panel_live("t"))
+
+ask_tui = ci._Tui("cld-ask-1", "/tmp")
+ask_tui.spawned = True
+ask_tui.session_id = "46c2870a-0b2e-4116-9582-3854aad17fe8"
+ask_tui.hook_ask = [{"question": "Which build?", "header": "Build"}]
+mgr_q = Pane(panel)
+mgr_q._tuis[ask_tui.name] = ask_tui
+rows = mgr_q.active_tui_status()
+check("while the panel is up the session needs an answer",
+      len(rows) == 1 and rows[0].get("pending_question") is True, rows)
+check("and hook_ask is kept", ask_tui.hook_ask is not None)
+
+mgr_a = Pane(answered)
+mgr_a._tuis[ask_tui.name] = ask_tui
+rows = mgr_a.active_tui_status()
+check("once answered it no longer needs one",
+      len(rows) == 1 and rows[0].get("pending_question") is False, rows)
+check("the stale question is dropped", ask_tui.hook_ask is None)
+
+# An idle pane after the answer: the row goes away entirely.
+ask_tui.hook_ask = [{"question": "Which build?", "header": "Build"}]
+mgr_i = Pane(idle)
+mgr_i._tuis[ask_tui.name] = ask_tui
+check("an idle TUI with a stale question is not reported",
+      mgr_i.active_tui_status() == [])
+
+print("\nthe Stop hook clears a question nobody was watching")
+hooked = Pane(answered)
+tui_h = ci._Tui("cld-hook-1", "/tmp")
+tui_h.spawned = True
+tui_h.session_id = "46c2870a-0b2e-4116-9582-3854aad17fe8"
+tui_h.hook_ask = [{"question": "Which build?", "header": "Build"}]
+hooked._tuis[tui_h.name] = tui_h
+hooked.secret = "s3cret"
+hooked.on_hook({"hook_event_name": "Stop",
+                "session_id": tui_h.session_id}, "s3cret", tui_h.name)
+check("Stop clears it", tui_h.hook_ask is None)
+tui_h.hook_ask = [{"question": "again?", "header": "H"}]
+hooked.on_hook({"hook_event_name": "SessionEnd",
+                "session_id": tui_h.session_id}, "s3cret", tui_h.name)
+check("so does SessionEnd", tui_h.hook_ask is None)
 
 print("no method may shadow another")
 # The bug behind all of the above: _pane_tail was defined twice in one class,

@@ -121,6 +121,8 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 # The rules that draw the input box. _pane_bottom anchors on them to tell the
 # live bottom of the pane from the scrollback above it.
 _RULE_CHARS = set("─━═-_")
+# Status-bar segment for background shells: "· 1 shell ·", "· 2 shells".
+_BG_SHELL_RE = re.compile(r"(?:^|·)\s*\d+\s+(?:background\s+)?shells?\s*(?:·|$)", re.M)
 
 # tmux session name prefix: `tmux ls` should read as "claude" at a glance
 # (grok's fleet is grk-*). Legacy bb10i-* sessions are still adopted/reaped.
@@ -500,6 +502,7 @@ class InteractiveManager:
             if not tui.session_id or tui.session_id == sid:
                 tui.session_id = ""
                 tui.transcript = ""
+                tui.hook_ask = None
                 self._save_state()
             return True
         if (sid and sid != tui.session_id) or (transcript
@@ -513,6 +516,11 @@ class InteractiveManager:
         elif event == "Stop":
             tui.stop_payload = payload
             tui.stop_event.set()
+            # AskUserQuestion blocks the turn, so a turn that reached Stop
+            # has no question outstanding. Only the turn loop used to clear
+            # `hook_ask`, so a question answered in the pane while no job of
+            # ours was watching left the card "needs answer" for ever.
+            tui.hook_ask = None
         elif event == "PreToolUse":
             # AskUserQuestion opens a panel that blocks the pane, and the
             # transcript line for it is flushed only AFTER it is answered
@@ -644,6 +652,56 @@ class InteractiveManager:
             return True
         return False
 
+    def _pane_bg_shells(self, name: str) -> bool:
+        """The turn ended but a background shell it started is still running.
+
+        Claude Code wakes the session itself when that shell exits (a task
+        notification starts a new turn), so to the reader the session is
+        still working. The pane says so in two places: the turn line
+        ("done 4:58 PM · 1 shell still running") and the live status bar
+        under the box ("bypass permissions on · 1 shell · ↓ to manage").
+        Only the status bar is trusted — the turn line is history and keeps
+        its wording after the shell has exited.
+
+        Kept apart from _pane_busy on purpose: Stop bookkeeping must not
+        wait on a shell, only the status pulse reports it.
+        """
+        rows = [l.rstrip() for l in self._pane_text(name).splitlines()
+                if l.strip()]
+        rules = [i for i, line in enumerate(rows)
+                 if len(line.strip()) >= 10 and set(line.strip()) <= _RULE_CHARS]
+        if not rules:
+            return False
+        chrome = "\n".join(rows[rules[-1] + 1:]).lower()
+        return bool(_BG_SHELL_RE.search(chrome))
+
+    def _ask_panel_live(self, name: str) -> bool:
+        """Is an AskUserQuestion panel on the pane right now?
+
+        Its footer ("Enter to select · ↑/↓ to navigate") stays in the buffer
+        after the panel is answered, so finding it is not enough. The panel
+        takes the bottom of the pane while it is up and the input box comes
+        back when it goes, so the box is the discriminator: a box rule below
+        the footer means the panel is history.
+        """
+        rows = [l.strip() for l in self._pane_text(name).splitlines()
+                if l.strip()]
+        footer = -1
+        for i in range(len(rows) - 1, -1, -1):
+            low = rows[i].lower()
+            if _ASK_PANEL_MARKER in low and "enter to select" in low:
+                footer = i
+                break
+        if footer < 0:
+            return False
+        # Both rules of the input box, not one: this decides whether a
+        # question is still owed an answer, and calling a live one dead
+        # would drop it from the phone. A whole box below the footer is
+        # unambiguous — the panel had the bottom and no longer does.
+        rules = sum(1 for r in rows[footer + 1:]
+                    if len(r) >= 10 and set(r) <= _RULE_CHARS)
+        return rules < 2
+
     def _pane_queued(self, name: str) -> bool:
         """Typed-ahead messages are still waiting in the TUI's own queue."""
         return "queued message" in self._pane_bottom(name)
@@ -672,10 +730,22 @@ class InteractiveManager:
                 with job.lock:
                     if job.status in ("starting", "running"):
                         continue  # real job row already covers this session
+            # A question the PreToolUse hook announced. Nothing reaches
+            # here while a turn of ours is draining (that job `continue`d
+            # above), so one still set here was either answered in the pane
+            # with no job of ours watching, or its Stop hook was lost —
+            # either way the turn loop will never clear it. Believe it only
+            # while the panel is really on screen, or the card stays
+            # "needs answer" for ever.
+            if t.hook_ask and not self._ask_panel_live(t.name):
+                t.hook_ask = None
             busy = bool(t.compacting or t.hook_ask)
+            shells = False
             if not busy:
                 try:
                     busy = self._pane_busy(t.name) or self._pane_queued(t.name)
+                    if not busy:
+                        shells = busy = self._pane_bg_shells(t.name)
                 except Exception:
                     busy = False
             if not busy:
@@ -691,8 +761,7 @@ class InteractiveManager:
                 with job.lock:
                     pending_q = bool(job.pending_question)
                     pending_p = bool(job.pending_permission)
-            # hook_ask is an AskUserQuestion the PreToolUse hook just saw —
-            # treat it as blocked even before request_question publishes.
+            # Checked against the pane above, so it is a live question.
             if t.hook_ask:
                 pending_q = True
             out.append({
@@ -709,7 +778,8 @@ class InteractiveManager:
                 "tool": "AskUserQuestion" if pending_q else "",
                 "tool_detail": "",
                 "phase": "asking" if pending_q else ("permission" if pending_p else "working"),
-                "phase_detail": "host interactive TUI",
+                "phase_detail": ("background shell running" if shells
+                                 else "host interactive TUI"),
                 "pending_permission": pending_p,
                 "pending_question": pending_q,
                 "next_seq": 0,

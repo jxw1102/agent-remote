@@ -1,11 +1,13 @@
 """AI session titles, shared by every harness.
 
 A session's own name is whatever its CLI happened to store: Claude keeps an
-``ai-title`` line, Grok sometimes writes ``generated_title``, Codex often has
-nothing and the list falls back to the first user message ("update
-prepare_upload.py . if the item i…"). Across a dozen parallel projects those
-raw openings are what make a list unreadable, so the daemon derives a short
-title of its own and caches it.
+``ai-title`` line, Grok sometimes writes ``generated_title``, Codex summarises
+a thread into ``threads.name`` a turn or two in. Where a CLI stores nothing the
+list falls back to the first user message ("update prepare_upload.py . if the
+item i…"), and across a dozen parallel projects those raw openings are what
+make a list unreadable, so the daemon derives a short title of its own and
+caches it. A CLI's own name always wins: it read the whole session, this
+module only ever sees the opening message.
 
 **Each harness names its own sessions.** A Grok session is titled by Grok, a
 Codex session by Codex, a Claude session by Claude — the runner supplies a
