@@ -273,6 +273,9 @@ const state = {
   answeredQuestions: new Set(), // request_ids the user already submitted
   gen: 0,                // fan-out generation guard (session list / search)
   openGen: 0,            // transcript generation — drops stale loadTail/poll paint
+  stick: true,           // transcript follows new rows (false once read back)
+  lastTop: 0,            // last seen transcript scrollTop (direction)
+  gestureAt: 0,          // ms of the last reader scroll — see readerScrolling()
 };
 
 const profileById = (id) => state.profiles.find((p) => p.id === id) || null;
@@ -2121,6 +2124,10 @@ async function openSession(row) {
   state.job = null;
   state.askedQuestion = null;
   state.askedPermission = null;
+  // A session always opens at its newest row, whatever the last one did.
+  state.stick = true;
+  state.lastTop = 0;
+  state.gestureAt = 0;
   applyAccent(row.provider);
 
   $("chat-head").classList.remove("hidden");
@@ -2935,8 +2942,57 @@ function expandMessages(messages, offset) {
   return out;
 }
 
+/**
+ * The transcript follows a live turn only while the reader is actually at the
+ * bottom. Scrolling up stops it dead: a working row that keeps repainting
+ * must never drag the page back down under a reader going the other way.
+ *
+ * `stick` is recomputed from the real scroll position, so a rebuild that
+ * restores a position corrects it by itself; `gestureAt` covers the moment a
+ * gesture starts, when the reader is still inches from the bottom and a
+ * forced scrollTop would cut the flick short.
+ */
+function watchTranscriptScroll() {
+  const view = $("transcript");
+  if (!view) return;
+  const gesture = () => { state.gestureAt = Date.now(); };
+  ["wheel", "touchstart", "touchmove", "touchend"].forEach((ev) => {
+    view.addEventListener(ev, gesture, { passive: true });
+  });
+  view.addEventListener("scroll", () => {
+    const top = view.scrollTop;
+    // Momentum keeps firing scrolls long after the finger is gone; each one
+    // moving up renews the window, so the flick runs to its own stop.
+    if (top < state.lastTop - 1) gesture();
+    state.lastTop = top;
+    state.stick = view.scrollHeight - top - view.clientHeight < 24;
+  }, { passive: true });
+}
+
+const readerScrolling = () => Date.now() - state.gestureAt < 400;
+
+/** Follow the tail of a live turn — but only when the reader is still there. */
+function followBottom(view) {
+  if (!state.stick || readerScrolling()) return;
+  view.scrollTop = view.scrollHeight;
+}
+
+/** Jump to the bottom because the reader acted (opened, sent, refreshed). */
+function jumpBottom(view) {
+  state.stick = true;
+  state.gestureAt = 0;
+  view.scrollTop = view.scrollHeight;
+  state.lastTop = view.scrollTop;
+}
+
 function renderTranscript(toBottom) {
   const view = $("transcript");
+  // A mid-turn reload (process view, end-of-turn repaint) rebuilds the whole
+  // thread. For a reader who has scrolled back that must not become a jump to
+  // the bottom — hold their distance from it across the rebuild instead.
+  const hold = toBottom && !state.stick
+    ? view.scrollHeight - view.scrollTop
+    : 0;
   view.textContent = "";
   const thread = el("div", "thread");
 
@@ -2954,7 +3010,13 @@ function renderTranscript(toBottom) {
     if (item.steps && item.steps.length) thread.appendChild(renderSteps(item));
   });
   view.appendChild(thread);
-  if (toBottom) view.scrollTop = view.scrollHeight;
+  syncWorkingTail();
+  if (hold) {
+    view.scrollTop = Math.max(0, view.scrollHeight - hold);
+    state.lastTop = view.scrollTop;
+  } else if (toBottom) {
+    jumpBottom(view);
+  }
 }
 
 /**
@@ -3114,7 +3176,7 @@ async function openHostFile(link) {
       { raw: true, timeout: 60000 });
   } catch (e) {
     toast(e.status === 404
-      ? `${link.name} is not available: the daemon only opens files this session linked inside its working folder`
+      ? `${link.name} is not available: the daemon only opens files this session linked inside its working folder or ~/Public`
       : e.status === 413 ? `${link.name} is too large to open (over 10 MB)`
       : `Could not open ${link.name}: ${e.message}`);
     return;
@@ -3446,8 +3508,12 @@ function appendLive(item, { gen = state.openGen, profileId = null, sessionId = n
   const thread = $("transcript").querySelector(".thread");
   if (thread) {
     thread.appendChild(renderMessage(state.items[state.items.length - 1]));
+    syncWorkingTail();
     const view = $("transcript");
-    view.scrollTop = view.scrollHeight;
+    // The reader's own prompt pulls them back down; the agent's output does
+    // not — reading back through a long turn has to survive new rows.
+    if (row.role === "user") jumpBottom(view);
+    else followBottom(view);
   } else {
     renderTranscript(true);
   }
@@ -3813,6 +3879,47 @@ async function pollJob() {
 }
 
 function renderBanner() {
+  renderBannerStrip();
+  syncWorkingTail();
+}
+
+/**
+ * The transcript's own "still working" row: the banner sits above the
+ * scroll, so a reader at the bottom of a long turn saw nothing moving where
+ * they were looking. It mirrors the banner (same text, the ask colour when a
+ * question or permission waits) and always stays the thread's last child.
+ */
+function syncWorkingTail() {
+  const view = $("transcript");
+  const thread = view && view.querySelector(".thread");
+  const old = document.getElementById("working-tail");
+  const box = $("banner");
+  const on = thread && box && !box.classList.contains("hidden");
+  if (!on) {
+    if (old) old.remove();
+    return;
+  }
+  const ask = box.classList.contains("needs-answer");
+  const lineEl = box.querySelector(".banner-line");
+  const text = ask
+    ? (lineEl ? lineEl.textContent : "Waiting for you")
+    : (lineEl ? lineEl.textContent : "Working");
+  let tail = old;
+  if (!tail) {
+    tail = el("div", "msg status working-tail");
+    tail.id = "working-tail";
+    const dots = el("span", "working-dots");
+    for (let i = 0; i < 3; i++) dots.appendChild(el("span"));
+    tail.appendChild(dots);
+    tail.appendChild(el("span", "working-text"));
+  }
+  tail.classList.toggle("ask", ask);
+  tail.lastChild.textContent = text;
+  if (tail.parentNode !== thread || thread.lastChild !== tail) thread.appendChild(tail);
+  followBottom(view);
+}
+
+function renderBannerStrip() {
   const box = $("banner");
   if (!state.open) {
     box.classList.add("hidden");
@@ -4035,15 +4142,35 @@ function modal({ title, build, actions = [], wide = false }) {
   body.textContent = "";
   foot.textContent = "";
   if (build) build(body);
+  // One action at a time: every footer button is dead while one is running.
+  let busy = false;
+  const buttons = [];
   actions.forEach((a) => {
     const b = el("button", a.primary ? "primary" : (a.danger ? "danger" : null), a.label);
     b.type = "button";
     if (a.id) b.id = a.id;
     if (a.disabled) b.disabled = true;
     b.addEventListener("click", async () => {
-      if (a.run) await a.run(b);
+      // An async action keeps the modal on screen until it resolves — over a
+      // tunnel that is a second or more. Without this guard a second tap on
+      // Start ran the whole action again: two POST /api/sessions/new, two
+      // sessions, one prompt (codex 01a1e3ad-4265 and -468a, 1.03s apart).
+      if (busy) return;
+      busy = true;
+      buttons.forEach((x) => { x.disabled = true; });
+      try {
+        if (a.run) await a.run(b);
+      } finally {
+        busy = false;
+        // Leave them disabled when the modal is closing: re-enabling paints
+        // a live-looking footer for the frame before it hides.
+        if (a.close === false) buttons.forEach((x, i) => {
+          x.disabled = !!actions[i].disabled;
+        });
+      }
       if (a.close !== false) closeModal();
     });
+    buttons.push(b);
     foot.appendChild(b);
   });
   host.classList.remove("hidden");
@@ -5616,6 +5743,7 @@ function wire() {
   syncSoundButton();
 
   wireHostFileLinks($("transcript"));
+  watchTranscriptScroll();
   $("btn-profiles").addEventListener("click", openProfiles);
   $("btn-new").addEventListener("click", openNewSession);
   $("btn-inbox").addEventListener("click", openInbox);
