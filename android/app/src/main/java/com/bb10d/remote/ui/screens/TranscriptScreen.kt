@@ -201,8 +201,12 @@ private fun TranscriptScreenBody(
     // message) always wins — the user is looking for something specific. A new
     // streamed line only follows if they were already at the bottom, so
     // reading back through history is never yanked away mid-sentence.
+    // The list's real last row: the "Load earlier" header and the working
+    // tail are rows too.
+    val bottomRow = ui.items.lastIndex + (if (ui.canLoadOlder) 1 else 0) +
+        (if (jobState.running) 1 else 0)
     LaunchedEffect(ui.scrollTick) {
-        if (ui.items.isNotEmpty()) listState.scrollToItem(ui.items.lastIndex)
+        if (ui.items.isNotEmpty()) listState.scrollToItem(bottomRow)
     }
     // Keyed on the LAST item, not the count, so loading older messages (which
     // also changes the count) can never be mistaken for new output arriving.
@@ -246,7 +250,7 @@ private fun TranscriptScreenBody(
         }
         following[0] = true
         try {
-            listState.animateScrollToItem(ui.items.lastIndex)
+            listState.animateScrollToItem(bottomRow)
         } finally {
             following[0] = false
         }
@@ -255,6 +259,16 @@ private fun TranscriptScreenBody(
         // leaves them at its first line, reading, and the next row must not
         // pull them off it.
         wasReadingBack[0] = awayFromLatest || behindLatest
+    }
+    // The working tail appearing at the bottom is followed like new output.
+    LaunchedEffect(jobState.running) {
+        if (!jobState.running || ui.items.isEmpty() || wasReadingBack[0]) return@LaunchedEffect
+        following[0] = true
+        try {
+            listState.animateScrollToItem(bottomRow)
+        } finally {
+            following[0] = false
+        }
     }
     LaunchedEffect(awayFromLatest, behindLatest, lastId) {
         if (following[0]) return@LaunchedEffect
@@ -482,6 +496,23 @@ private fun TranscriptScreenBody(
                                 onToggleStep = vm::toggleStep,
                             )
                         }
+                        if (jobState.running) {
+                            item(key = "working-tail") {
+                                val waiting = jobState.pendingQuestion != null
+                                    || jobState.pendingPermission != null
+                                WorkingTail(
+                                    text = if (waiting) "Waiting for your answer"
+                                    else liveHeadline(
+                                        live?.phase.orEmpty(),
+                                        live?.phaseDetail.orEmpty(),
+                                        live?.tool.orEmpty().ifEmpty { jobState.toolLine },
+                                        accent.label,
+                                    ),
+                                    elapsed = if (waiting) 0 else live?.elapsedS ?: 0,
+                                    color = if (waiting) pal.warn else accent.tint,
+                                )
+                            }
+                        }
                     } }
                 }
                 if ((awayFromLatest || unseen) && ui.items.isNotEmpty()) {
@@ -495,7 +526,7 @@ private fun TranscriptScreenBody(
                         scope.launch {
                             // Far away: go straight there. A smooth scroll
                             // over a long transcript takes seconds.
-                            val last = ui.items.lastIndex
+                            val last = bottomRow
                             val visible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
                             if (last - visible > 30) listState.scrollToItem(last)
                             else listState.animateScrollToItem(last)

@@ -30,11 +30,61 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bb10d.remote.data.Time
 import com.bb10d.remote.ui.components.WorkingPulse
+import com.bb10d.remote.ui.components.WorkingDots
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
 import com.bb10d.remote.ui.theme.MonoStyle
 import com.bb10d.remote.ui.theme.palette
 import kotlinx.coroutines.delay
 
 // What sits under the title bar while a turn runs.
+
+internal fun liveHeadline(phase: String, phaseDetail: String, tool: String, agent: String) =
+    when {
+        phase.isNotEmpty() && phaseDetail.isNotEmpty() -> {
+            val verb = phase.replaceFirstChar { it.uppercase() }
+            "$verb · $phaseDetail"
+        }
+        phase.isNotEmpty() -> phase.replaceFirstChar { it.uppercase() }
+        tool.isNotEmpty() -> tool
+        else -> "$agent is working"
+    }
+
+/**
+ * The transcript's last row while a turn runs. The banner sits above the
+ * list, so a reader at the bottom of a long turn saw nothing moving where
+ * they were looking. Same words as the banner; the warning colour when a
+ * question or permission waits on the reader.
+ */
+@Composable
+internal fun WorkingTail(text: String, elapsed: Int, color: Color) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .height(IntrinsicSize.Min),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .width(2.dp)
+                .fillMaxHeight()
+                .background(color.copy(alpha = 0.7f)),
+        )
+        Spacer(Modifier.width(10.dp))
+        WorkingDots(color)
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = if (elapsed > 0) "$text · ${Time.elapsed(elapsed)}" else text,
+            style = MaterialTheme.typography.labelMedium,
+            color = palette.dim,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
 
 /** The live strip: what the agent is doing right now, and for how long. */
 @Composable
@@ -58,15 +108,7 @@ internal fun StatusBanner(
     AnimatedVisibility(visible = running) {
         // Line 1: human description (daemon phase_detail). Line 2: raw
         // command / path / [attached: …] (tool_detail), when distinct.
-        val headline = when {
-            phase.isNotEmpty() && phaseDetail.isNotEmpty() -> {
-                val verb = phase.replaceFirstChar { it.uppercase() }
-                "$verb · $phaseDetail"
-            }
-            phase.isNotEmpty() -> phase.replaceFirstChar { it.uppercase() }
-            tool.isNotEmpty() -> tool
-            else -> "$agent is working"
-        }
+        val headline = liveHeadline(phase, phaseDetail, tool, agent)
         val second = when {
             toolDetail.isNotBlank() && toolDetail != phaseDetail -> toolDetail
             tool.isNotBlank() && tool != phaseDetail -> tool
