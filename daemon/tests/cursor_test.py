@@ -473,6 +473,52 @@ def main():
     names = alias_cfg.provider_names()
     check("cursor-agent alias canonicalizes", names == ["cursor"], names)
 
+    # Chat created in a folder that was later renamed, then resumed from the
+    # new folder: meta.json keeps the old (now missing) cwd, the live turns
+    # land in a second transcript under the new folder's project dir.
+    from pathlib import Path as _P
+    from agentremoted.providers import cursor as cursor_mod
+    moved_root = tempfile.mkdtemp(prefix="cursor-moved-")
+    moved_home = os.path.join(moved_root, "cursor-home")
+    old_cwd = os.path.join(moved_root, "work", "old-name")
+    new_cwd = os.path.join(moved_root, "work", "new-name")
+    os.makedirs(new_cwd)
+    msid = "11111111-2222-3333-4444-555555555555"
+    chat = os.path.join(moved_home, "chats",
+                        hashlib.md5(old_cwd.encode()).hexdigest(), msid)
+    os.makedirs(chat)
+    with open(os.path.join(chat, "meta.json"), "w") as f:
+        json.dump({"schemaVersion": 1, "hasConversation": True,
+                   "createdAtMs": 1, "updatedAtMs": 2, "cwd": old_cwd}, f)
+
+    def put_transcript(cwd, text, mtime):
+        d = os.path.join(moved_home, "projects", cursor_mod._munge_cwd(cwd),
+                         "agent-transcripts", msid)
+        os.makedirs(d)
+        path = os.path.join(d, msid + ".jsonl")
+        with open(path, "w") as f:
+            f.write(json.dumps({"role": "user", "message": {"content": [
+                {"type": "text", "text": text}]}}) + "\n")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    put_transcript(old_cwd, "stale", time.time() - 3600)
+    fresh = put_transcript(new_cwd, "fresh", time.time())
+    mstore = cursor_mod.CursorStore(_P(moved_home))
+    check("moved chat: newest transcript wins",
+          str(mstore.find_session_file(msid)) == fresh,
+          mstore.find_session_file(msid))
+    msum = mstore.get_session(msid) or {}
+    check("moved chat: resumes in the folder it last ran in",
+          os.path.realpath(msum.get("cwd", "")) == os.path.realpath(new_cwd),
+          msum.get("cwd"))
+    check("moved chat: stays in its original project",
+          msum.get("project_id") == cursor_mod._munge_cwd(old_cwd),
+          msum.get("project_id"))
+    check("unmunge rejects a missing folder",
+          cursor_mod._unmunge_project(cursor_mod._munge_cwd(old_cwd)) == "")
+    shutil.rmtree(moved_root, ignore_errors=True)
+
     server.shutdown()
     usage_server.shutdown()
     shutil.rmtree(FAKE_HOME, ignore_errors=True)

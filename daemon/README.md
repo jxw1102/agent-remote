@@ -19,6 +19,15 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.20.12** An interactive Claude turn in a folder Claude has never trusted
+starts. Claude Code 2.1.3xx lists "No, exit" first on its folder-trust
+dialog, so the blind Enter that dismisses startup screens picked it and the
+TUI quit with "exit status 1". The daemon now moves onto "Yes, I trust this
+folder" before confirming. Also: a Cursor chat whose project folder was
+renamed or moved is found again - the transcript is read from whichever
+project dir holds the newest copy, and its working folder is taken from a
+path that still exists instead of the stale one in meta.json.
+
 **2.20.11** Codex sessions are listed under the name Codex gave them.
 Codex summarises a thread into `threads.name` ("Diagnose Android app
 crashes") a turn or two in; the daemon was reading `threads.title`, which
