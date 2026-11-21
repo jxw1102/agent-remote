@@ -1,8 +1,18 @@
-"""What the agent changed: the working tree of a session's folder, via git.
+"""What the agent changed: a session's folder, via git.
 
-Read-only. This is the "review before you answer" view: which files differ
-from the last commit, by how much, and the diff itself. Nothing here writes
-to the repository; commit and push stay explicit actions the person takes.
+Read-only. This is the "review before you answer" view: which files differ,
+by how much, and the diff itself. Nothing here writes to the repository;
+commit and push stay explicit actions the person takes.
+
+Two scopes answer two different questions:
+
+* ``collect`` — **since the last commit**. The working tree against HEAD,
+  the way `git status` sees it. Needs a repository.
+* ``collect_turn`` — **since this turn started**. A diff between two
+  snapshots taken in a shadow repository beside the folder (see
+  ``shadow.py``), so it works in a folder that was never `git init`-ed, and
+  in a repository it does not drown one turn in ten turns of uncommitted
+  work.
 
 Everything goes through `git` with a fixed argument list (no shell), with the
 repository's own hooks into diffing switched off: an external diff driver, a
@@ -19,6 +29,8 @@ import os
 import subprocess
 import threading
 import time
+
+from . import shadow
 
 # One response must stay small enough for a phone on a bad link.
 MAX_DIFF_BYTES = 400 * 1024
@@ -75,6 +87,11 @@ def _git_capped(cwd, args, cap, timeout=GIT_TIMEOUT):
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
         return -1, b"", False
+    return _read_capped(proc, cap, timeout)
+
+
+def _read_capped(proc, cap, timeout):
+    """Drain a diff process, stopping it once there is more than `cap`."""
     timer = threading.Timer(timeout, proc.kill)
     timer.daemon = True
     timer.start()
@@ -291,3 +308,152 @@ def collect(cwd):
         "diff": _text(diff),
         "truncated": truncated,
     }
+
+
+# --------------------------------------------------------------- this turn
+
+def _parse_numstat(raw, files, order):
+    """`diff --numstat -z` into the per-file counters `files` already holds."""
+    parts = _text(raw).split("\0")
+    j = 0
+    while j < len(parts):
+        row = parts[j]
+        j += 1
+        if not row:
+            continue
+        cols = row.split("\t")
+        if len(cols) < 3:
+            continue
+        added, removed, path = cols[0], cols[1], cols[2]
+        if path == "":
+            # Rename: "<a>\t<r>\t" then the old path, then the new one.
+            path = parts[j + 1] if j + 1 < len(parts) else ""
+            j += 2
+        info = files.get(path)
+        if info is None:
+            info = {"path": path, "status": "changed", "staged": False,
+                    "added": 0, "removed": 0, "binary": False}
+            files[path] = info
+            order.append(path)
+        if added == "-":
+            info["binary"] = True
+        else:
+            info["added"] = int(added) if added.isdigit() else 0
+            info["removed"] = int(removed) if removed.isdigit() else 0
+
+
+def _parse_name_status(raw):
+    """`diff --name-status -z` -> ({path: info}, [path]) in git's order."""
+    files, order = {}, []
+    parts = _text(raw).split("\0")
+    i = 0
+    while i < len(parts):
+        code = parts[i]
+        i += 1
+        if not code:
+            continue
+        letter = code[0]
+        path = parts[i] if i < len(parts) else ""
+        i += 1
+        old = ""
+        if letter in ("R", "C"):
+            # Rename / copy: the score is on the letter, then old, then new.
+            old, path = path, (parts[i] if i < len(parts) else "")
+            i += 1
+        if not path:
+            continue
+        files[path] = {
+            "path": path,
+            "status": _STATUS_WORDS.get(letter, "changed"),
+            # Nothing is "staged" in this scope: the shadow index is ours,
+            # and the project's index is none of our business.
+            "staged": False,
+            "added": 0, "removed": 0, "binary": False,
+        }
+        if old:
+            files[path]["from"] = old
+        order.append(path)
+    return files, order
+
+
+def collect_turn(cwd):
+    """What changed under `cwd` since the last turn started, as a dict.
+
+    Same shape as [collect] so a client renders it with the same code, plus
+    ``scope`` and ``since``. ``available: False`` (with a ``reason``) when
+    there is no mark to measure from — a folder no turn has run in since the
+    daemon started, one too large to snapshot, or a machine without git.
+    """
+    def unavailable(reason):
+        return {"repo": False, "scope": "turn", "available": False,
+                "reason": reason, "files": [], "diff": "",
+                "added": 0, "removed": 0, "more_files": 0,
+                "truncated": False, "can_publish": False}
+
+    base = shadow.base_for(cwd)
+    if base is None:
+        return unavailable(
+            "No turn has run in this folder yet. The next one is measured "
+            "from where the folder stands when it starts.")
+    head = shadow.snapshot(cwd)
+    if not head:
+        return unavailable(
+            "This folder could not be snapshotted — too large, or git "
+            "could not read it.")
+    base_tree = str(base.get("tree") or "")
+
+    root = os.path.realpath(cwd)
+    payload = {
+        "repo": True,
+        "scope": "turn",
+        "available": True,
+        "since": float(base.get("at") or 0.0),
+        "root": root,
+        "branch": "", "upstream": "", "ahead": 0, "behind": 0,
+        # Commit and Push act on the project's repository and would take in
+        # more than this diff shows, so they are not offered in this scope.
+        "can_publish": False,
+    }
+    if head == base_tree:
+        payload.update({"files": [], "more_files": 0, "added": 0,
+                        "removed": 0, "diff": "", "truncated": False})
+        return payload
+
+    code, out = shadow.diff_args(cwd, base_tree,
+                                 ["--name-status", "-z", "-M",
+                                  "--no-ext-diff", "--no-textconv",
+                                  base_tree, head])
+    if code == -2:
+        raise ChangesError("the snapshot diff took too long in this folder")
+    if code != 0:
+        raise ChangesError("could not diff this folder's snapshots")
+    files, order = _parse_name_status(out)
+
+    code, out = shadow.diff_args(cwd, base_tree,
+                                 ["--numstat", "-z", "-M", "--no-ext-diff",
+                                  "--no-textconv", base_tree, head])
+    if code == 0:
+        _parse_numstat(out, files, order)
+
+    proc = shadow.diff_popen(cwd, ["--no-color", "-M", "--no-ext-diff",
+                                   "--no-textconv", base_tree, head])
+    diff = b""
+    if proc is not None:
+        code, out, _cut = _read_capped(proc, MAX_DIFF_BYTES, GIT_TIMEOUT)
+        if code == 0:
+            diff = out
+
+    truncated = len(diff) > MAX_DIFF_BYTES
+    if truncated:
+        cut = diff.rfind(b"\n", 0, MAX_DIFF_BYTES)
+        diff = diff[:cut if cut > 0 else MAX_DIFF_BYTES]
+
+    payload.update({
+        "files": [files[p] for p in order[:MAX_FILES]],
+        "more_files": max(0, len(order) - MAX_FILES),
+        "added": sum(f["added"] for f in files.values()),
+        "removed": sum(f["removed"] for f in files.values()),
+        "diff": _text(diff),
+        "truncated": truncated,
+    })
+    return payload

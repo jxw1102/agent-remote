@@ -23,6 +23,7 @@ import time
 import uuid
 
 from . import procutil
+from . import shadow
 from .config import CONFIG_DIR
 from .providers import RunnerError
 
@@ -91,6 +92,11 @@ class Job:
         # records its id in next_job_id so the client can follow the chain.
         self.permission_mode = ""
         self.model = ""                    # "" -> provider/CLI default
+        # True when `model` came from this session's own pin rather than the
+        # client's daemon-wide pick. Interactive runners relaunch a live TUI
+        # on a pinned change (the model is a launch argument), and must not
+        # do that for a client default that happens to differ.
+        self.model_pinned = False
         self.effort = ""                   # reasoning effort ("" -> default)
         self.queued = []                   # [{"id": qid, "prompt": str}]
         self.next_job_id = ""
@@ -138,6 +144,7 @@ class Job:
                 "phase_detail": self.phase_detail,
                 "permission_mode": self.permission_mode,
                 "model": self.model,
+                "model_pinned": self.model_pinned,
                 "effort": self.effort,
                 "queued": [dict(q) for q in self.queued],
                 "next_job_id": self.next_job_id,
@@ -173,6 +180,7 @@ class Job:
         job.phase_detail = str(data.get("phase_detail") or "")
         job.permission_mode = str(data.get("permission_mode") or "")
         job.model = str(data.get("model") or "")
+        job.model_pinned = bool(data.get("model_pinned"))
         job.effort = str(data.get("effort") or "")
         queued = data.get("queued")
         job.queued = [dict(q) for q in queued] if isinstance(queued, list) else []
@@ -546,10 +554,11 @@ class JobManager:
     def start_job(self, prompt: str, cwd: str, session_id: str = "",
                   permission_mode: str = "", model: str = "", effort: str = "",
                   queued: list = None, isolate_root: str = "",
-                  account: str = "main") -> Job:
+                  account: str = "main", model_pinned: bool = False) -> Job:
         job = Job(uuid.uuid4().hex[:12], session_id, prompt, cwd)
         job.permission_mode = permission_mode
         job.model = model
+        job.model_pinned = bool(model_pinned)
         job.effort = effort
         job.isolate_root = str(isolate_root or "")
         acct = str(account or "").strip()
@@ -563,6 +572,17 @@ class JobManager:
             self.jobs[job.id] = job
             self._prune_locked()
         self._flush_active()
+        # Where the folder stood before this turn touched it, for the
+        # "This turn" scope of the Changes view. Taken here and not in the
+        # worker thread because a mark taken after the first edit is not a
+        # mark; bounded so a huge folder costs the view, not the turn.
+        # Skipped for a confined guest: the snapshot would run as the
+        # daemon's user over a tree that is not theirs to read.
+        if cwd and not job.isolate_root:
+            try:
+                shadow.mark_turn(cwd)
+            except Exception:
+                log.debug("shadow snapshot failed for %s", cwd, exc_info=True)
         thread = threading.Thread(target=self._run, args=(job, permission_mode), daemon=True)
         thread.start()
         return job
@@ -993,13 +1013,14 @@ class JobManager:
             cwd = job.cwd
             mode = job.permission_mode
             model = job.model
+            pinned = job.model_pinned
             effort = job.effort
             isolate_root = job.isolate_root
             account = job.account
         nxt = self.start_job(entry["prompt"], cwd, session_id=session,
                              permission_mode=mode, model=model, effort=effort,
                              queued=remaining, isolate_root=isolate_root,
-                             account=account)
+                             account=account, model_pinned=pinned)
         with job.lock:
             job.next_job_id = nxt.id
 

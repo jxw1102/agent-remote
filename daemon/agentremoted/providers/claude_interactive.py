@@ -69,6 +69,7 @@ import uuid
 
 from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
 from ..live_tui import TUI_COLS, TUI_ROWS, idle_eviction_victim
+from .. import session_prefs
 
 log = logging.getLogger(__name__)
 
@@ -285,6 +286,11 @@ def _hook_secret() -> str:
     return secret
 
 
+def _norm_model(value) -> str:
+    """"", "default" and "auto" all mean "whatever the CLI picks"."""
+    return session_prefs.normalize(value)
+
+
 class _Tui:
     """One detached tmux session hosting one claude TUI."""
 
@@ -293,6 +299,7 @@ class _Tui:
         self.cwd = cwd
         self.isolate_root = isolate_root or ""
         self.session_id = ""          # current claude session id
+        self.model = ""               # --model it was launched with ("" = CLI default)
         self.transcript = ""          # its JSONL path
         self.spawned = False          # tmux session created (prunable when dead)
         self.last_used = time.time()  # LRU stamp for the _MAX_TUIS cap
@@ -426,6 +433,7 @@ class InteractiveManager:
         launched TUIs: a registered-but-unlaunched one has no tmux session."""
         rows = [{"name": t.name, "cwd": t.cwd, "session_id": t.session_id,
                  "transcript": t.transcript, "last_used": t.last_used,
+                 "model": getattr(t, "model", "") or "",
                  "isolate_root": getattr(t, "isolate_root", "") or ""}
                 for t in list(self._tuis.values()) if t.spawned]
         try:
@@ -473,6 +481,7 @@ class InteractiveManager:
                            or os.path.expanduser("~"),
                            isolate_root=str(entry.get("isolate_root") or ""))
                 tui.session_id = str(entry.get("session_id", ""))
+                tui.model = str(entry.get("model", "") or "")
                 tui.transcript = str(entry.get("transcript", ""))
                 tui.spawned = True
                 try:
@@ -1048,7 +1057,8 @@ class InteractiveManager:
             pass
 
     def _ensure_tui(self, cwd: str, session_id: str, model: str,
-                    isolate_root: str = "", effort: str = ""):
+                    isolate_root: str = "", effort: str = "",
+                    model_pinned: bool = False):
         """Return (tui, error). One TUI per claude session: a continued
         session is matched to its live TUI by session id; a new session (or
         one whose TUI died) gets a fresh TUI, --resume'ing when continuing.
@@ -1084,6 +1094,17 @@ class InteractiveManager:
                             self._kill(t)
                             del self._tuis[t.name]
                             break
+                        # --model is a launch argument: a live TUI keeps the
+                        # model it started on. Only a pin — a model chosen
+                        # for *this session* — is worth restarting for; it
+                        # resumes, so the conversation survives.
+                        if model_pinned and _norm_model(model) != _norm_model(
+                                getattr(t, "model", "")):
+                            log.info("relaunching TUI %s on model %s",
+                                     t.name, model or "default")
+                            self._kill(t)
+                            del self._tuis[t.name]
+                            break
                         if self._pane_healthy(t.name):
                             t.last_used = time.time()
                             return t, ""
@@ -1104,6 +1125,7 @@ class InteractiveManager:
                 del self._tuis[victim.name]
                 self._save_state()
             tui = _Tui(self._tui_name(cwd), cwd, isolate_root=iso)
+            tui.model = str(model or "")
             self._tuis[tui.name] = tui
         err = self._launch(tui, session_id, model, effort)
         if err:
@@ -1125,7 +1147,8 @@ class InteractiveManager:
         iso = str(getattr(job, "isolate_root", "") or "")
         tui, err = self._ensure_tui(
             cwd, job.session_id, job.model, isolate_root=iso,
-            effort=str(getattr(job, "effort", "") or ""))
+            effort=str(getattr(job, "effort", "") or ""),
+            model_pinned=bool(getattr(job, "model_pinned", False)))
         if err:
             self._fail(job, err)
             return
@@ -1162,7 +1185,8 @@ class InteractiveManager:
             iso = str(getattr(job, "isolate_root", "") or "")
             tui, err = self._ensure_tui(
                 cwd, sid, job.model, isolate_root=iso,
-                effort=str(getattr(job, "effort", "") or ""))
+                effort=str(getattr(job, "effort", "") or ""),
+                model_pinned=bool(getattr(job, "model_pinned", False)))
             if err:
                 self._fail(job, "interrupted by daemon restart: %s" % err)
                 return

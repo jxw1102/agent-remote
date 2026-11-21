@@ -19,6 +19,46 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.27.0** The model belongs to the **session**, not to the client. Clients
+kept one model per daemon and applied it to whichever session was open, so
+the picker showed a model the open session was not running on and changing
+it moved every other session too. The session list already reported the
+model each session last ran on (`model`); the missing half was a model
+*chosen* for a session, which no transcript can know yet.
+`POST /api/sessions/<id>/options` with `{"model": …}` (and/or `"effort"`)
+pins one, `""`/`"default"`/`"auto"` clears it, and the pin comes back on
+every session row as `model_pinned` so the pick made on the phone is what
+the web shows before any turn has run. `/api/sessions/<id>/continue` uses
+the pin over whatever the client sent. Pins live in
+`~/.agentremoted/session-prefs.json`, follow a session whose id the harness
+re-mints on resume, and are capped at 500. `--model` is a *launch*
+argument, so an interactive session's live TUI is relaunched (resuming, so
+the conversation survives) when a pinned model no longer matches the one it
+started on — only ever for a pin, never for a client default that happens
+to differ. `/api/ping` advertises `session_options`.
+
+**2.26.0** Changes answers a second question: **what did this turn do?**
+`GET /api/sessions/<id>/changes?scope=turn` diffs two snapshots taken in a
+shadow repository beside the folder (`~/.agentremoted/shadow/<key>`), so it
+works in a folder that was never `git init`-ed, and in a repository it no
+longer drowns one turn in ten turns of uncommitted work. The snapshot is
+taken as the turn starts, costs one `git add -A` (half a second on a
+400-file tree, less once warm), and honours the folder's own `.gitignore`
+— or a built-in list of generated directories where there is none. Nothing
+is written into the work tree and the project's own git is never touched:
+different git dir, so its index is never locked, HEAD never moves, and
+there are no commits to author or sign. `/api/ping` advertises
+`changes_turn`. Folders the size of `$HOME` are refused, and one that takes
+longer than six seconds to walk is left unmarked rather than holding up the
+turn.
+
+**2.25.2** The two lines of work meet. 2.20.5-2.20.12 and 2.21.0-2.25.1
+were developed side by side from 2.20.4 and both are in from here: the
+session vocabulary, pushed Live TUI, `sessions_rev`, the Changes pane and
+the daemon menu on one side; Codex names, Codex fork chains, search that
+finds things and the trust dialog on the other. Nothing below this line was
+dropped — the entries are ordered by version, not by the day they landed.
+
 **2.25.1** Second review pass. The transcript scan takes its file size after
 it holds the session's lock, not before: a request that waited for another's
 scan carried a stale size, read it as "the file got shorter" and scanned the
@@ -116,7 +156,7 @@ One shared watcher fingerprints each store's per-project session counts at
 most every 2 s, so N connected clients cost one scan. Guests get a watcher
 over their own harness home. New capability `session_events` on every
 provider.
-**2.20.12** An interactive Claude turn in a folder Claude has never trusted
+**2.20.13** An interactive Claude turn in a folder Claude has never trusted
 starts. Claude Code 2.1.3xx lists "No, exit" first on its folder-trust
 dialog, so the blind Enter that dismisses startup screens picked it and the
 TUI quit with "exit status 1". The daemon now moves onto "Yes, I trust this
@@ -124,6 +164,24 @@ folder" before confirming. Also: a Cursor chat whose project folder was
 renamed or moved is found again - the transcript is read from whichever
 project dir holds the newest copy, and its working folder is taken from a
 path that still exists instead of the stale one in meta.json.
+(Shipped on the other line as 2.20.5, which was already taken by the
+Codex preview fix; renumbered here so both survive.)
+
+**2.20.12** A Codex session that Codex forked keeps going in the clients.
+Codex does not grow one thread forever: its own rewind, and the fresh
+thread it opens when a conversation outgrows the context window, both start
+a NEW thread id whose rollout head records `forked_from_id` and the ordinal
+it forked at. The tmux pane keeps running and the person keeps typing into
+the same window, so nothing about it looks like a new session — but every
+line from the fork on lands in a rollout the daemon was not reading, and
+the transcript froze at the fork while the Live TUI went on showing work
+(session 01a1ee30, stuck two days behind its own pane). A session is now
+the whole chain: the transcript runs through it, the list shows what the
+tip is saying and hides the continuation's duplicate row, a search hit
+inside one is reported against the row you can open, and a rewind cuts the
+rollout the session is actually writing to. A fork Codex took to *branch* —
+the parent kept talking afterwards — is still a session of its own, and a
+fork at ordinal 0 is a spawned sub-agent, never a continuation.
 
 **2.20.11** Codex sessions are listed under the name Codex gave them.
 Codex summarises a thread into `threads.name` ("Diagnose Android app

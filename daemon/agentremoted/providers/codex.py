@@ -798,25 +798,25 @@ _tail_lock = threading.Lock()
 
 
 def _tail_message(path: str):
-    """(role, text) of the newest chat message in a rollout, ("", "") if
-    none. The session list shows this, as for the other harnesses; Codex's
+    """(role, text, ts) of the newest chat message in a rollout,
+    ("", "", "") if none. The session list shows this, as for the other harnesses; Codex's
     own ``preview`` column is the opening prompt and never moves.
 
     Reads only the tail (a wider one if a long turn of tool calls hides the
     last message), cached on the file's size and mtime.
     """
     if not path:
-        return "", ""
+        return "", "", ""
     try:
         st = os.stat(path)
     except OSError:
-        return "", ""
+        return "", "", ""
     key = (st.st_size, st.st_mtime_ns)
     with _tail_lock:
         hit = _tail_cache.get(path)
     if hit and hit[0] == key:
         return hit[1]
-    found = ("", "")
+    found = ("", "", "")
     try:
         with open(path, "rb") as f:
             for span in _TAIL_STEPS:
@@ -829,19 +829,119 @@ def _tail_message(path: str):
                 for line in reversed(lines):
                     if '"event_msg"' not in line:
                         continue
-                    msg = _event_chat_message(_safe_json(line))
+                    ev = _safe_json(line)
+                    msg = _event_chat_message(ev)
                     if msg:
-                        found = msg
+                        found = (msg[0], msg[1],
+                                 str((ev or {}).get("timestamp") or ""))
                         break
                 if found[0] or start == 0:
                     break
     except OSError:
-        return "", ""
+        return "", "", ""
     with _tail_lock:
         if len(_tail_cache) > 2000:
             _tail_cache.clear()
         _tail_cache[path] = (key, found)
     return found
+
+
+# -- fork chains ---------------------------------------------------------
+#
+# Codex does not grow one thread forever. Its own rewind, and the fresh
+# thread it opens when a conversation outgrows its context window, both
+# start a NEW thread whose rollout head records where it came from:
+#
+#     "forked_from_id": "01a1ee30-…",
+#     "forked_from_ordinal_exclusive": 12030
+#
+# The tmux pane keeps running and the person keeps typing into the same
+# window, so to them it is still one session — but from the fork on, every
+# line lands in a rollout this daemon was not reading. The transcript
+# stopped dead at the fork while the Live TUI went on showing work, which
+# is how this was found. So a session is a CHAIN of rollouts, not a file.
+#
+# An ordinal of 0 is not a continuation: that is how Codex records a
+# sub-agent it spawned (the same pairs sit in `thread_spawn_edges`). Those
+# threads hold no user turn of their own and never reach a listing.
+_FORK_FROM_RE = re.compile(r'"forked_from_id"\s*:\s*"([0-9a-fA-F-]{36})"')
+_FORK_AT_RE = re.compile(r'"forked_from_ordinal_exclusive"\s*:\s*(\d+)')
+_FORK_TS_RE = re.compile(r'"timestamp"\s*:\s*"([^"]{4,40})"')
+# All three sit ~300 bytes into the head, well ahead of the instructions
+# blob that makes the first line 20 kB.
+_FORK_HEAD_BYTES = 8192
+
+# Lines of one segment are offset by this much so a position stays ordered
+# across a chain, and so one integer still carries both the segment and the
+# line — which keeps a step ref (`cu12345`) the same shape it has always
+# been, on the wire and in every client. A rollout runs to tens of
+# thousands of lines, never to millions.
+_SEG_STRIDE = 10_000_000
+
+_fork_cache = {}
+_fork_lock = threading.Lock()
+
+
+def _fork_origin(path: str):
+    """(parent_id, ordinal, fork_ts) a rollout was forked from.
+
+    ("", 0, "") for a thread that stands on its own. A rollout head never
+    changes once written, so the answer is cached by path.
+    """
+    if not path:
+        return ("", 0, "")
+    with _fork_lock:
+        hit = _fork_cache.get(path)
+    if hit is not None:
+        return hit
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(_FORK_HEAD_BYTES)
+    except OSError:
+        head = ""
+    out = ("", 0, "")
+    m = _FORK_FROM_RE.search(head)
+    if m:
+        at = _FORK_AT_RE.search(head)
+        ts = _FORK_TS_RE.search(head)
+        out = (m.group(1), int(at.group(1)) if at else 0,
+               ts.group(1) if ts else "")
+    with _fork_lock:
+        if len(_fork_cache) > 4000:
+            _fork_cache.clear()
+        _fork_cache[path] = out
+    return out
+
+
+def _continuation(parent: str, kids, threads):
+    """(child_id, ordinal) that continues `parent`, or None.
+
+    A fork only *continues* a thread when that thread fell silent at the
+    fork. Codex also forks to BRANCH — a second topic lifted out of one
+    conversation, taken while the first one goes on — and a parent that
+    kept talking afterwards is a conversation of its own: both keep their
+    own row and their own transcript.
+
+    The test is the parent's last chat message, not its mtime and not its
+    `updated_at`: a turn that was already running writes to the old
+    rollout for a while after the fork (a long command finishing, a token
+    count landing), and judging by the file would call a continued session
+    live and leave it frozen. Of several forks, the one that took the most
+    of the parent is the one that carried it on.
+    """
+    path = (threads.get(parent) or ("", 0.0))[0]
+    best = None
+    for sid, ordinal, fork_ts, child_upd in kids:
+        if ordinal <= 0:
+            continue
+        if best is None or (ordinal, child_upd) > (best[1], best[3]):
+            best = (sid, ordinal, fork_ts, child_upd)
+    if best is None:
+        return None
+    last_ts = _tail_message(path)[2]
+    if last_ts and best[2] and last_ts > best[2]:
+        return None
+    return (best[0], best[1])
 
 
 def _is_user_prompt_event(ev: dict) -> bool:
@@ -958,6 +1058,8 @@ class CodexStore:
         self.titler = None
         # (state db path, column names) — see _select_cols.
         self._cols_for = None
+        # ((state db path, mtime), (threads, continued)) — see _chain_index.
+        self._chain_for = None
 
     # -- discovery ------------------------------------------------------
 
@@ -1081,11 +1183,118 @@ class CodexStore:
         finally:
             con.close()
 
+
+    # -- fork chains ----------------------------------------------------
+
+    def _chain_index(self):
+        """(threads, continued) for the whole store.
+
+        `threads` is {id: (rollout_path, updated_at)}; `continued` is
+        {parent_id: (child_id, ordinal)} and holds only the forks that
+        really continue their parent (see :func:`_continuation`). Cached
+        until the state db is written again, so one listing builds it once
+        however many rows it summarises.
+        """
+        db = self._state_db()
+        try:
+            stamp = os.stat(str(db)).st_mtime_ns if db else 0
+        except OSError:
+            stamp = 0
+        if self._chain_for and self._chain_for[0] == (db, stamp):
+            return self._chain_for[1]
+        threads = {}
+        forks = {}
+        con = self._connect()
+        if con is not None:
+            try:
+                rows = con.execute(
+                    "SELECT id, rollout_path, updated_at, created_at "
+                    "FROM threads").fetchall()
+            except sqlite3.Error as e:
+                log.warning("codex fork scan failed: %s", e)
+                rows = []
+            finally:
+                con.close()
+            for r in rows:
+                sid = r["id"] or ""
+                if not sid:
+                    continue
+                path = r["rollout_path"] or ""
+                upd = float(r["updated_at"] or r["created_at"] or 0)
+                threads[sid] = (path, upd)
+                parent, ordinal, fork_ts = _fork_origin(path)
+                if parent and ordinal > 0:
+                    forks.setdefault(parent, []).append(
+                        (sid, ordinal, fork_ts, upd))
+        continued = {}
+        for parent, kids in forks.items():
+            pick = _continuation(parent, kids, threads)
+            if pick:
+                continued[parent] = pick
+        out = (threads, continued)
+        self._chain_for = ((db, stamp), out)
+        return out
+
+    def chain(self, session_id: str):
+        """The rollouts one session is spread over, oldest first:
+        [(thread_id, rollout_path, stop_line)].
+
+        `stop_line` is the ordinal the next segment forked off at: the
+        lines after it were rewound away when Codex opened the new thread,
+        and replaying them would show work the conversation no longer
+        contains. None on the last segment, which is still being written.
+        """
+        sid = (session_id or "").strip()
+        if not sid:
+            return []
+        threads, continued = self._chain_index()
+        if sid not in threads:
+            return []
+        out = []
+        seen = set()
+        while sid and sid not in seen:
+            seen.add(sid)
+            nxt = continued.get(sid)
+            out.append((sid, (threads.get(sid) or ("", 0.0))[0],
+                        nxt[1] if nxt else None))
+            sid = nxt[0] if nxt else ""
+        return out
+
+    def _parent_of(self) -> dict:
+        """{child_id: parent_id} for forks that continue their parent."""
+        _threads, continued = self._chain_index()
+        return {child: parent for parent, (child, _o) in continued.items()}
+
+    def _root_of(self, session_id: str) -> str:
+        """The thread that carries the row a continuation belongs to."""
+        parent_of = self._parent_of()
+        sid = (session_id or "").strip()
+        seen = set()
+        while sid in parent_of and sid not in seen:
+            seen.add(sid)
+            sid = parent_of[sid]
+        return sid
+
+    def _fold_continuations(self, rows):
+        """Drop rows that are only the rest of another row's conversation.
+
+        Two rows under one name, one of them frozen at the fork, is exactly
+        the confusion this came from: the person sees the session working
+        in the Live TUI while the transcript they opened has stopped.
+        A continuation whose parent is not in this listing stays — better a
+        row too many than a session with nowhere to be read.
+        """
+        parent_of = self._parent_of()
+        if not parent_of:
+            return rows
+        visible = {r["id"] for r in rows}
+        return [r for r in rows if parent_of.get(r["id"]) not in visible]
+
     # -- store API ------------------------------------------------------
 
     def list_projects(self):
         by_cwd = {}
-        for row in self._rows(user_only=True):
+        for row in self._fold_continuations(self._rows(user_only=True)):
             cwd = (row["cwd"] or "").strip() or "(no project)"
             rec = by_cwd.get(cwd)
             # Float epoch like claude/grok — ISO strings break multi merge sort
@@ -1116,7 +1325,8 @@ class CodexStore:
             if project_cwd is None and project_id:
                 # No match — empty list rather than everything.
                 return []
-        rows = self._rows(user_only=user_only, project_cwd=project_cwd)
+        rows = self._fold_continuations(
+            self._rows(user_only=user_only, project_cwd=project_cwd))
         limit = max(1, min(int(limit or 25), 200))
         return [self._summary(r) for r in rows[:limit]]
 
@@ -1131,7 +1341,24 @@ class CodexStore:
         q = query.strip()
         limit = max(1, min(int(limit or 25), 100))
         yielded = 0
+        seen_ids = set()
         need_body = []
+
+        def hit(row, snippet):
+            """The summary a hit should be listed under.
+
+            A continuation has no row of its own, so a match inside one is
+            reported against the session it continues — the row that can
+            actually be opened.
+            """
+            target = self._root_of(row["id"] or "")
+            s = None
+            if target and target != row["id"]:
+                s = self.get_session(target)
+            s = s or self._summary(row)
+            s["snippet"] = snippet
+            return s
+
         for row in self._rows(user_only=user_only):
             if project_id and _munge_cwd(row["cwd"] or "") != project_id:
                 continue
@@ -1153,8 +1380,10 @@ class CodexStore:
                         break
                 snippet = snippet or search_util.make_snippet(hay, q)
             if snippet:
-                s = self._summary(row)
-                s["snippet"] = snippet
+                s = hit(row, snippet)
+                if s["id"] in seen_ids:
+                    continue
+                seen_ids.add(s["id"])
                 yield s
                 yielded += 1
                 if yielded >= limit:
@@ -1167,8 +1396,10 @@ class CodexStore:
             snippet = self._search_rollout(row["rollout_path"] or "", q)
             if not snippet:
                 continue
-            s = self._summary(row)
-            s["snippet"] = snippet
+            s = hit(row, snippet)
+            if s["id"] in seen_ids:
+                continue
+            seen_ids.add(s["id"])
             yield s
             yielded += 1
 
@@ -1190,7 +1421,15 @@ class CodexStore:
         return self._summary(row)
 
     def rollout_path(self, session_id: str) -> str:
-        """rollout_path of one thread id ("" when unknown)."""
+        """The rollout a session is writing to now ("" when unknown).
+
+        The tip of its chain, not where it started: a rewind that truncated
+        the first rollout would be cutting a file Codex has already left
+        behind, and the session would not notice.
+        """
+        seg = self.chain(session_id)
+        if seg and seg[-1][1]:
+            return seg[-1][1]
         con = self._connect()
         if con is None:
             return ""
@@ -1216,7 +1455,15 @@ class CodexStore:
             want = int(num)
         except ValueError:
             return None
-        path = self._rollout_path(session_id)
+        # Steps are numbered across the whole chain (see _SEG_STRIDE), so
+        # the ref says which rollout to reopen as well as which line.
+        seg_i, want = divmod(want, _SEG_STRIDE)
+        segments = self.chain(session_id)
+        if not segments:
+            segments = [(session_id, self._rollout_path(session_id), None)]
+        if seg_i >= len(segments):
+            return None
+        path = segments[seg_i][1]
         if not path:
             return None
         try:
@@ -1270,26 +1517,16 @@ class CodexStore:
         sess = self.get_session(session_id)
         if sess is None:
             return None
-        con = self._connect()
-        path = ""
-        if con is not None:
-            try:
-                r = con.execute(
-                    "SELECT rollout_path FROM threads WHERE id = ?",
-                    (session_id,),
-                ).fetchone()
-                path = (r["rollout_path"] if r else "") or ""
-            except sqlite3.Error:
-                path = ""
-            finally:
-                con.close()
+        # One session, however many rollouts Codex has forked it across.
+        segments = self.chain(session_id)
+        if not segments:
+            segments = [(session_id, self._rollout_path(session_id), None)]
         t0 = time.perf_counter()
         step_rows = []
         if steps:
-            messages, step_rows = _build_transcript(
-                Path(path) if path else None, want_steps=True)
+            messages, step_rows = _chain_transcript(segments, want_steps=True)
         else:
-            messages = _build_transcript(Path(path) if path else None)
+            messages = _chain_transcript(segments)
         t1 = time.perf_counter()
         total = len(messages)
         if offset is None:
@@ -1303,10 +1540,12 @@ class CodexStore:
             for msg in messages:
                 msg.pop("_pos", None)
         t2 = time.perf_counter()
-        try:
-            file_bytes = Path(path).stat().st_size if path else 0
-        except OSError:
-            file_bytes = 0
+        file_bytes = 0
+        for _sid, seg_path, _stop in segments:
+            try:
+                file_bytes += Path(seg_path).stat().st_size if seg_path else 0
+            except OSError:
+                pass
         return {
             "session_id": session_id,
             "total": total,
@@ -1356,14 +1595,28 @@ class CodexStore:
             title = self._derived_title(row["id"] or "", first) or first
         if not title:
             title = "Session %s" % (row["id"] or "")[:8]
-        last_role, last = _tail_message(row["rollout_path"] or "")
+        # What the session is saying now lives at the tip of its chain:
+        # a forked session stopped writing to the rollout it started in,
+        # and a row that reads only that file freezes at the fork while the
+        # session goes on working.
+        segments = self.chain(row["id"] or "")
+        tip_path = row["rollout_path"] or ""
+        last_active = row["updated_at"] or row["created_at"]
+        if len(segments) > 1:
+            threads = self._chain_index()[0]
+            tip_path = segments[-1][1] or tip_path
+            last_active = (threads.get(segments[-1][0])
+                           or ("", last_active))[1] or last_active
+        last_role, last, _last_ts = _tail_message(tip_path)
         if not last:
             last = row["preview"] or row["first_user_message"] or ""
             last_role = "user" if last else ""
-        try:
-            size = Path(row["rollout_path"] or "").stat().st_size
-        except OSError:
-            size = 0
+        size = 0
+        for _sid, seg_path, _stop in (segments or [(None, tip_path, None)]):
+            try:
+                size += Path(seg_path).stat().st_size if seg_path else 0
+            except OSError:
+                pass
         return {
             "id": row["id"],
             "project_id": _munge_cwd(cwd),
@@ -1371,7 +1624,7 @@ class CodexStore:
             "git_branch": row["git_branch"] or "",
             "title": _preview(title, _MAX_TITLE),
             "started": _iso_from_unix(row["created_at"]),
-            "last_active": _iso_from_unix(row["updated_at"] or row["created_at"]),
+            "last_active": _iso_from_unix(last_active),
             "last_role": last_role,
             "last_text": _preview(last),
             "model": row["model"] or "",
@@ -1429,13 +1682,40 @@ def _goal_continuation(ev: dict) -> bool:
             and 'source="goal"' in head)
 
 
-def _build_transcript(path: Path | None, want_steps: bool = False):
+def _chain_transcript(segments, want_steps: bool = False):
+    """Transcript across every rollout a session has been forked into.
+
+    Each segment stops where the next one forked off it: those later lines
+    were rewound away when Codex opened the new thread, and replaying them
+    would show the conversation work it no longer contains.
+    """
+    messages = []
+    step_rows = []
+    for seg, (_sid, path, stop) in enumerate(segments):
+        got = _build_transcript(Path(path) if path else None,
+                                want_steps=want_steps, stop_line=stop,
+                                base=seg * _SEG_STRIDE, start=len(messages))
+        if want_steps:
+            messages.extend(got[0])
+            step_rows.extend(got[1])
+        else:
+            messages.extend(got)
+    return (messages, step_rows) if want_steps else messages
+
+
+def _build_transcript(path: Path | None, want_steps: bool = False,
+                      stop_line: int = None, base: int = 0, start: int = 0):
     """Coalesce rollout JSONL into [{role, text, ts}] for the phone.
 
     Conversation only (user + assistant) by default. With ``want_steps`` the
     turn's working records are collected too — function calls, their output
     and the reasoning — and returned alongside, tagged with the rollout line
     they came from so they can be attached to the message they followed.
+
+    One rollout may be a segment of a longer chain: ``stop_line`` is where
+    the next segment forked off, ``base`` offsets this segment's line
+    numbers so steps stay ordered and addressable across the chain, and
+    ``start`` continues the message numbering.
     """
     if path is None or not path.is_file():
         return ([], []) if want_steps else []
@@ -1446,22 +1726,25 @@ def _build_transcript(path: Path | None, want_steps: bool = False):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for ln, line in enumerate(f):
+                if stop_line is not None and ln >= stop_line:
+                    break
+                gl = base + ln
                 ev = _safe_json(line)
                 if not isinstance(ev, dict):
                     continue
                 if want_steps:
-                    st = _codex_step(ev, ln, tool_meta)
+                    st = _codex_step(ev, gl, tool_meta)
                     if st is not None:
-                        step_rows.append((ln, st))
+                        step_rows.append((gl, st))
                 if _goal_continuation(ev):
                     msg = {
-                        "uuid": "g%d" % len(messages),
+                        "uuid": "g%d" % (start + len(messages)),
                         "role": "meta",
                         "ts": str(ev.get("timestamp") or ""),
                         "text": "Goal continuation - codex started this turn",
                     }
                     if want_steps:
-                        msg["_pos"] = ln
+                        msg["_pos"] = gl
                     messages.append(msg)
                     continue
                 hit = _event_chat_message(ev)
@@ -1471,13 +1754,13 @@ def _build_transcript(path: Path | None, want_steps: bool = False):
                 ts = str(ev.get("timestamp") or "")
                 prefix = "u" if role == "user" else "a"
                 msg = {
-                    "uuid": "%s%d" % (prefix, len(messages)),
+                    "uuid": "%s%d" % (prefix, start + len(messages)),
                     "role": role,
                     "ts": ts,
                     "text": text,
                 }
                 if want_steps:
-                    msg["_pos"] = ln
+                    msg["_pos"] = gl
                 messages.append(msg)
     except OSError:
         return (messages, step_rows) if want_steps else messages

@@ -42,6 +42,7 @@ from pathlib import Path
 
 from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
 from ..live_tui import TUI_COLS, TUI_ROWS, idle_eviction_victim
+from .. import session_prefs
 from ..render_blocks import markdown_to_blocks
 
 log = logging.getLogger(__name__)
@@ -188,6 +189,7 @@ class _Tui:
         # Guest sandbox root (seatbelt/chroot); empty = unrestricted main.
         self.isolate_root = isolate_root or ""
         self.session_id = ""          # grok session id (we choose it)
+        self.model = ""               # --model it was launched with ("" = CLI default)
         self.spawned = False          # tmux session created (prunable when dead)
         self.last_used = time.time()  # LRU stamp for the _MAX_TUIS cap
         self.job = None               # job of the turn in flight, if any
@@ -214,6 +216,7 @@ class GrokInteractiveManager:
         launched TUIs: a registered-but-unlaunched one has no tmux session."""
         rows = [{"name": t.name, "cwd": t.cwd, "session_id": t.session_id,
                  "last_used": t.last_used,
+                 "model": getattr(t, "model", "") or "",
                  "isolate_root": getattr(t, "isolate_root", "") or ""}
                 for t in list(self._tuis.values()) if t.spawned]
         try:
@@ -254,6 +257,7 @@ class GrokInteractiveManager:
                            or os.path.expanduser("~"),
                            isolate_root=str(entry.get("isolate_root") or ""))
                 tui.session_id = str(entry.get("session_id") or "")
+                tui.model = str(entry.get("model") or "")
                 tui.spawned = True
                 try:
                     tui.last_used = float(entry.get("last_used") or 0) or time.time()
@@ -456,7 +460,7 @@ class GrokInteractiveManager:
             pass
 
     def _ensure_tui(self, cwd: str, session_id: str, model: str, effort: str,
-                    isolate_root: str = ""):
+                    isolate_root: str = "", model_pinned: bool = False):
         """Return (tui, error). One TUI per grok session: a continued session
         is matched to its live TUI by session id; a new session (or one whose
         TUI died) gets a fresh TUI, --resume'ing when continuing. Parallel
@@ -481,6 +485,16 @@ class GrokInteractiveManager:
                             self._kill(t)
                             del self._tuis[t.name]
                             break
+                        # --model is a launch argument: a live TUI keeps the
+                        # model it started on, so a model pinned to this
+                        # session takes effect on a relaunch (which resumes).
+                        if model_pinned and session_prefs.normalize(model) \
+                                != session_prefs.normalize(getattr(t, "model", "")):
+                            log.info("relaunching grok TUI %s on model %s",
+                                     t.name, model or "default")
+                            self._kill(t)
+                            del self._tuis[t.name]
+                            break
                         t.last_used = time.time()
                         return t, ""
             # Cap the fleet: evict LRU idle TUIs (never a turn in flight,
@@ -494,6 +508,7 @@ class GrokInteractiveManager:
                 del self._tuis[victim.name]
                 self._save_state()
             tui = _Tui(self._tui_name(cwd), cwd, isolate_root=iso)
+            tui.model = str(model or "")
             # Snapshot the (guest) session tree before grok starts so we can
             # pick up a minted id when --session-id is ignored.
             try:
@@ -710,7 +725,8 @@ class GrokInteractiveManager:
         cwd = os.path.expanduser(job.cwd or "") or self.runner._default_cwd()
         iso = str(getattr(job, "isolate_root", "") or "")
         tui, err = self._ensure_tui(
-            cwd, job.session_id, job.model, job.effort, isolate_root=iso)
+            cwd, job.session_id, job.model, job.effort, isolate_root=iso,
+            model_pinned=bool(getattr(job, "model_pinned", False)))
         if err:
             self._fail(job, err)
             return

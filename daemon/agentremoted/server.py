@@ -99,7 +99,9 @@ from . import __version__
 from . import palette
 from . import accounts
 from . import changes
+from . import shadow
 from . import focus as focus_store
+from . import session_prefs as prefs_store
 from . import linked_files
 from . import shares as share_store
 from . import session_watch
@@ -141,6 +143,7 @@ _DROP_DELETE = re.compile(r"^/api/drop/([^/]+)/delete$")
 _SESSION_TITLE = re.compile(r"^/api/sessions/([^/]+)/title$")
 _SESSION_RETITLE = re.compile(r"^/api/sessions/([^/]+)/title/regenerate$")
 _SESSION_SHARE = re.compile(r"^/api/sessions/([^/]+)/share$")
+_SESSION_OPTIONS = re.compile(r"^/api/sessions/([^/]+)/options$")
 _SHARE_PAGE = re.compile(r"^/share/([A-Za-z0-9_-]{20,64})$")
 _SHARE_API = re.compile(r"^/api/share/([A-Za-z0-9_-]{20,64})$")
 _SHARE_MSGS = re.compile(r"^/api/share/([A-Za-z0-9_-]{20,64})/messages$")
@@ -310,6 +313,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     # Focus-list membership + title overrides, shared across every provider
     # and every client of this daemon (focus.Focus).
     focus = None
+    session_prefs = None
     # Read-only share tokens (shares.ShareStore). Public /share/<token> pages
     # resolve through this table — never through the daemon auth token.
     shares = None
@@ -1310,9 +1314,38 @@ class ApiHandler(BaseHTTPRequestHandler):
             # sitting on a session that will never be written to again.
             if new and old and new != old:
                 b.rekey(old, new)
+                # The model pin follows the session, not the id it had.
+                if self.session_prefs is not None:
+                    self.session_prefs.rekey(old, new)
+
+    def _decorate_prefs(self, rows) -> list:
+        """Stamp each row's pinned model / effort, when it has one.
+
+        `model` is what the session last ran on (read from the transcript);
+        `model_pinned` is what the human picked for its next turn. Clients
+        show the pin when there is one and the observed model otherwise, so
+        a pick made on one client is visible on the others at once instead
+        of only after the next turn has run.
+        """
+        prefs = self.session_prefs
+        if prefs is None:
+            return list(rows or [])
+        out = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                out.append(row)
+                continue
+            pin = prefs.get(str(row.get("id") or "").strip())
+            if pin["model"] or pin["effort"]:
+                row = dict(row)
+                row["model_pinned"] = pin["model"]
+                row["effort_pinned"] = pin["effort"]
+            out.append(row)
+        return out
 
     def _decorate_focus(self, rows, live=None) -> list:
-        """Stamp focus membership + state tag + title override onto rows."""
+        """Stamp focus membership + state tag + title/option overrides."""
+        rows = self._decorate_prefs(rows)
         b = self.focus
         if b is None:
             return list(rows or [])
@@ -1449,7 +1482,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         return unquote(str(raw or "")).strip()
 
     def _route_focus_post(self, path, body) -> bool:
-        """Handle a focus/title POST. True when this request was answered."""
+        """Handle a focus / title / session-options POST.
+
+        True when this request was answered. These all key on a session id
+        rather than a harness, so they are served before the provider split.
+        """
         # Longest pattern first: /title/regenerate also matches /title's regex
         # prefix only by accident of ordering, so be explicit about it.
         m = _SESSION_RETITLE.match(path)
@@ -1463,6 +1500,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         m = _SESSION_SHARE.match(path)
         if m:
             self._handle_session_share(m.group(1))
+            return True
+        m = _SESSION_OPTIONS.match(path)
+        if m:
+            self._handle_session_options(m.group(1), body)
             return True
         for pattern, action in ((_FOCUS_DONE, "done"),
                                 (_FOCUS_RESTORE, "restore"),
@@ -1492,6 +1533,42 @@ class ApiHandler(BaseHTTPRequestHandler):
         # is a no-op the client should not have to special-case.
         self._send_json({"ok": True, "changed": bool(changed), "key": key,
                          "focus": b.is_member(key)})
+
+    def _handle_session_options(self, raw_id: str, body):
+        """Pin the model / effort this one session runs on.
+
+        The session list already reports the model a session *last ran on*;
+        this is the other half — a model chosen for the next turn, which no
+        transcript can know yet. Sending "" (or "default" / "auto") clears the
+        pin and hands the choice back to the harness.
+        """
+        prefs = self.session_prefs
+        if prefs is None:
+            self._error(503, "session options unavailable")
+            return
+        if not isinstance(body, dict) or not ("model" in body or "effort" in body):
+            self._error(400, "body must be JSON with a 'model' and/or 'effort'")
+            return
+        for field in ("model", "effort"):
+            if field in body and not isinstance(body[field], str):
+                self._error(400, "'%s' must be a string" % field)
+                return
+        key = self._focus_key_from_path(raw_id)
+        if not key:
+            self._error(400, "session id required")
+            return
+        # A pin is only meaningful for a session this caller can see; without
+        # this a guest could pin models onto the host's sessions.
+        name, _bundle, session = self._find_session(key)
+        if session is None or not self._session_in_scope(session):
+            self._error(404, "session not found")
+            return
+        now = prefs.set(key,
+                        model=body.get("model") if "model" in body else None,
+                        effort=body.get("effort") if "effort" in body else None,
+                        provider=str(session.get("provider") or name or ""))
+        self._send_json({"ok": True, "id": key,
+                         "model": now["model"], "effort": now["effort"]})
 
     def _handle_session_title(self, raw_id: str, body):
         """Rename a session (or clear the override with an empty title)."""
@@ -2095,6 +2172,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 payload["linked_files"] = True
                 # GET /api/sessions/<id>/changes: what differs from the last commit.
                 payload["changes"] = self._changes_allowed()
+                # ?scope=turn as well: measured from a snapshot taken beside
+                # the folder, so it answers in a folder with no repository.
+                payload["changes_turn"] = (self._changes_allowed()
+                                           and shadow.available())
+                # POST /api/sessions/<id>/options: pin the model/effort this
+                # one session runs on, instead of one pick per daemon.
+                payload["session_options"] = (self.session_prefs is not None)
                 self._stamp_tui_caps(payload)
                 self._stamp_upload_caps(payload)
                 self._send_json(payload)
@@ -2152,6 +2236,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             payload["linked_files"] = True
             # GET /api/sessions/<id>/changes: what differs from the last commit.
             payload["changes"] = self._changes_allowed()
+            payload["changes_turn"] = (self._changes_allowed()
+                                       and shadow.available())
+            payload["session_options"] = (self.session_prefs is not None)
             self._stamp_tui_caps(payload)
             self._stamp_upload_caps(payload)
             self._send_json(payload)
@@ -2276,7 +2363,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         m = _SESSION_CHANGES.match(path)
         if m:
-            self._send_session_changes(m.group(1))
+            self._send_session_changes(m.group(1), query)
             return
 
         m = _SESSION_FILE.match(path)
@@ -2522,7 +2609,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         m = _SESSION_CHANGES.match(path)
         if m:
-            self._send_session_changes(m.group(1))
+            self._send_session_changes(m.group(1), query)
             return
         m = _SESSION_FILE.match(path)
         if m:
@@ -3023,13 +3110,18 @@ class ApiHandler(BaseHTTPRequestHandler):
         p = self.principal or accounts.main_principal()
         return not (p.is_guest and p.isolate_root)
 
-    def _send_session_changes(self, session_id):
-        """GET /api/sessions/<id>/changes: the session folder's working tree.
+    def _send_session_changes(self, session_id, query=None):
+        """GET /api/sessions/<id>/changes: what changed in the session folder.
+
+        `?scope=turn` measures from the snapshot taken when the last turn
+        started (works in a folder that is not a repository); anything else
+        is the default scope, the working tree against the last commit.
 
         Read-only (see changes.py). Same access rules as running a shell
         command in that folder: the session must be in scope and its cwd
         inside what this principal may touch.
         """
+        scope = str(((query or {}).get("scope") or [""])[0]).strip().lower()
         _name, _b, session = self._find_session(session_id)
         if session is None or not self._session_in_scope(session):
             self._error(404, "session not found")
@@ -3047,12 +3139,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "repo": False, "cwd": cwd or ""})
             return
         try:
-            payload = changes.collect(cwd)
+            payload = (changes.collect_turn(cwd) if scope == "turn"
+                       else changes.collect(cwd))
         except changes.ChangesError as e:
             self._error(504, str(e))
             return
         payload["ok"] = True
         payload["cwd"] = cwd
+        payload.setdefault("scope", "commit")
         self._send_json(payload)
 
     def _handle_shell(self, body):
@@ -3158,13 +3252,21 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._focus_enroll(running)
                 self._send_json({"job_id": running.id}, status=200)
                 return
+            # This session's own model wins over whatever the client
+            # happens to have selected daemon-wide: a pin was set against
+            # *this* session, by a human, and is what every client shows
+            # for it. A client that sends nothing gets the pin too.
+            pin = (self.session_prefs.get(session_id)
+                   if self.session_prefs is not None
+                   else {"model": "", "effort": ""})
             job = self._start_job_for_principal(
                 prompt=body["prompt"],
                 cwd=cwd or session.get("cwd", ""),
                 session_id=session_id,
                 permission_mode=body.get("permission_mode", ""),
-                model=str(body.get("model", "") or ""),
-                effort=str(body.get("effort", "") or ""),
+                model=pin["model"] or str(body.get("model", "") or ""),
+                effort=pin["effort"] or str(body.get("effort", "") or ""),
+                model_pinned=bool(pin["model"]),
             )
         except RuntimeError as e:
             self._error(503, str(e))
@@ -4402,6 +4504,9 @@ def make_server(config, token, bundles) -> ThreadingHTTPServer:
         "bundles": bundles,
         # One focus list per daemon, shared by every harness and every client.
         "focus": focus_store.Focus(),
+        # Per-session model/effort pins, also shared daemon-wide:
+        # a model picked on the phone is the one the web sends.
+        "session_prefs": prefs_store.SessionPrefs(),
         "shares": share_store.ShareStore(),
         # Detects newly created sessions and drives `sessions_rev` on the
         # status streams so clients re-list. One watcher, every connection.

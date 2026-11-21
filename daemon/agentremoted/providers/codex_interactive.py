@@ -38,6 +38,7 @@ from pathlib import Path
 from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
 from .. import goalwatch
 from ..live_tui import TUI_COLS, TUI_ROWS, idle_eviction_victim
+from .. import session_prefs
 from ..render_blocks import markdown_to_blocks
 from .codex import (
     _event_chat_message,
@@ -110,6 +111,7 @@ class _Tui:
         self.cwd = cwd
         self.isolate_root = isolate_root or ""
         self.session_id = ""
+        self.model = ""               # -m it was launched with ("" = CLI default)
         self.spawned = False
         self.last_used = time.time()
         self.job = None
@@ -175,7 +177,8 @@ class CodexInteractiveManager:
 
     def _save_state(self):
         rows = [{"name": t.name, "cwd": t.cwd, "session_id": t.session_id,
-                 "last_used": t.last_used, "rollout_path": t.rollout_path}
+                 "last_used": t.last_used, "rollout_path": t.rollout_path,
+                 "model": getattr(t, "model", "") or ""}
                 for t in list(self._tuis.values()) if t.spawned]
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -209,6 +212,7 @@ class CodexInteractiveManager:
                     continue
                 tui = _Tui(name, str(entry.get("cwd", "")) or os.path.expanduser("~"))
                 tui.session_id = str(entry.get("session_id", ""))
+                tui.model = str(entry.get("model", "") or "")
                 tui.rollout_path = str(entry.get("rollout_path", ""))
                 tui.spawned = True
                 try:
@@ -362,7 +366,8 @@ class CodexInteractiveManager:
         return ""
 
     def _ensure_tui(self, cwd: str, session_id: str, model: str,
-                    effort: str = "", isolate_root: str = ""):
+                    effort: str = "", isolate_root: str = "",
+                    model_pinned: bool = False):
         iso = (isolate_root or "").strip()
         with self._lock:
             dead = [n for n, t in self._tuis.items()
@@ -380,6 +385,16 @@ class CodexInteractiveManager:
                             self._kill(t)
                             del self._tuis[t.name]
                             break
+                        # -m is a launch argument: a live TUI keeps the model
+                        # it started on, so a model pinned to this session
+                        # only takes effect on a relaunch (which resumes).
+                        if model_pinned and session_prefs.normalize(model) \
+                                != session_prefs.normalize(getattr(t, "model", "")):
+                            log.info("relaunching codex TUI %s on model %s",
+                                     t.name, model or "default")
+                            self._kill(t)
+                            del self._tuis[t.name]
+                            break
                         t.last_used = time.time()
                         return t, ""
             while len(self._tuis) >= _MAX_TUIS:
@@ -392,6 +407,7 @@ class CodexInteractiveManager:
                 del self._tuis[victim.name]
                 self._save_state()
             tui = _Tui(self._tui_name(cwd), cwd, isolate_root=iso)
+            tui.model = str(model or "")
             self._tuis[tui.name] = tui
         err = self._launch(tui, session_id, model, effort)
         if err:
@@ -1101,7 +1117,8 @@ class CodexInteractiveManager:
         iso = str(getattr(job, "isolate_root", "") or "")
         tui, err = self._ensure_tui(
             cwd, job.session_id, job.model, getattr(job, "effort", ""),
-            isolate_root=iso)
+            isolate_root=iso,
+            model_pinned=bool(getattr(job, "model_pinned", False)))
         if err:
             self._fail(job, err)
             return
@@ -1127,7 +1144,8 @@ class CodexInteractiveManager:
         launched_at = time.time()
         tui, err = self._ensure_tui(
             cwd, job.session_id, job.model, getattr(job, "effort", ""),
-            isolate_root=iso)
+            isolate_root=iso,
+            model_pinned=bool(getattr(job, "model_pinned", False)))
         if err:
             self._fail(job, err)
             return
