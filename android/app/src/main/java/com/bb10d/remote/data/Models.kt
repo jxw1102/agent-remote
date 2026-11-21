@@ -173,6 +173,10 @@ data class PingDto(
     @SerialName("linked_files") val linkedFiles: Boolean = false,
     /** GET /api/sessions/<id>/changes — working-tree changes (≥ 2.24). */
     val changes: Boolean = false,
+    /** …and `?scope=turn`, what the last turn changed (≥ 2.26). */
+    @SerialName("changes_turn") val changesTurn: Boolean = false,
+    /** POST /api/sessions/<id>/options — model/effort per session (≥ 2.27). */
+    @SerialName("session_options") val sessionOptions: Boolean = false,
     /** 1: Live TUI frames pushed over SSE (agentremoted ≥ 2.22); 0: poll. */
     @SerialName("tui_stream") val tuiStream: Int = 0,
     /** Chunked POST /api/attachments (agentremoted ≥ 2.8.6). */
@@ -218,7 +222,15 @@ data class SessionDto(
     @SerialName("last_active") val lastActive: String = "",
     @SerialName("last_role") val lastRole: String = "",
     @SerialName("last_text") val lastText: String = "",
+    /** The model this session last ran on, read from its own transcript. */
     val model: String = "",
+    /**
+     * A model chosen for this session and not yet run (daemon >= 2.27).
+     * It outranks [model] everywhere a client shows "the session's model":
+     * [model] is history, this is what the next turn will use.
+     */
+    @SerialName("model_pinned") val modelPinned: String = "",
+    @SerialName("effort_pinned") val effortPinned: String = "",
     @SerialName("size_bytes") val sizeBytes: Long = 0,
     /** Only present on /api/sessions/search rows. */
     val snippet: String = "",
@@ -261,6 +273,15 @@ data class TitleDto(
     val id: String = "",
     val title: String = "",
     val manual: Boolean = false,
+)
+
+/** POST /api/sessions/<id>/options — the pins now in force for that session. */
+@Serializable
+data class SessionOptionsDto(
+    val ok: Boolean = false,
+    val id: String = "",
+    val model: String = "",
+    val effort: String = "",
 )
 
 /** POST /api/sessions/<id>/share — a 7-day read-only URL hosted by the daemon. */
@@ -549,11 +570,25 @@ data class ChangedFileDto(
     val from: String = "",
 )
 
-/** GET /api/sessions/<id>/changes: the session folder against its last commit. */
+/**
+ * GET /api/sessions/<id>/changes: what changed in the session folder.
+ *
+ * Two scopes answer two questions. The default is the working tree against
+ * the last commit. `?scope=turn` (daemon 2.26) is measured from a snapshot
+ * the daemon takes beside the folder when a turn starts, so it answers in a
+ * folder that is not a repository — and in one that is, it shows the turn
+ * instead of every uncommitted thing. [available] is false, with a
+ * [reason], when there is no mark to measure from yet.
+ */
 @Serializable
 data class ChangesDto(
     val ok: Boolean = false,
     val repo: Boolean = false,
+    val scope: String = "commit",
+    val available: Boolean = true,
+    val reason: String = "",
+    /** Epoch seconds the turn being measured started. */
+    val since: Double = 0.0,
     val cwd: String = "",
     val root: String = "",
     val branch: String = "",
@@ -639,6 +674,10 @@ data class Caps(
     val linkedFiles: Boolean = false,
     /** The Changes view (agentremoted >= 2.24). */
     val changes: Boolean = false,
+    /** …with a "This turn" scope as well (agentremoted >= 2.26). */
+    val changesTurn: Boolean = false,
+    /** Model/effort can be pinned to one session (agentremoted >= 2.27). */
+    val sessionOptions: Boolean = false,
     /** Live TUI frames are pushed, not polled (agentremoted >= 2.22). */
     val tuiStream: Boolean = false,
     /** Chunked attachments (agentremoted >= 2.8.6). */
@@ -785,6 +824,8 @@ data class Caps(
             share = ping.share,
             linkedFiles = ping.linkedFiles,
             changes = ping.changes,
+            changesTurn = ping.changesTurn,
+            sessionOptions = ping.sessionOptions,
             tuiStream = ping.tuiStream > 0 || ping.caps["tui_stream"] == true,
             chunkedUpload = ping.chunkedUpload || ping.caps["chunked_upload"] == true,
             maxUploadMb = ping.maxUploadMb.takeIf { it > 0 } ?: 16,

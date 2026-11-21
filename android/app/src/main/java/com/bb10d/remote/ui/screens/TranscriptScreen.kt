@@ -74,6 +74,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bb10d.remote.data.ExecMode
 import com.bb10d.remote.ui.components.ErrorBanner
+import com.bb10d.remote.ui.components.WorkingDots
+import androidx.compose.ui.graphics.Color
+import com.bb10d.remote.data.Time
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.IntrinsicSize
 import com.bb10d.remote.ui.components.Hairline
 import com.bb10d.remote.ui.components.rememberClip
 import com.bb10d.remote.ui.markdown.LocalHostLinkHandler
@@ -208,6 +213,12 @@ private fun TranscriptScreenBody(
     LaunchedEffect(ui.scrollTick) {
         if (ui.items.isNotEmpty()) listState.scrollToItem(bottomRow)
     }
+    // The tail appearing at the bottom is followed like new output.
+    LaunchedEffect(jobState.running) {
+        if (!jobState.running || ui.items.isEmpty()) return@LaunchedEffect
+        val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        if (last >= bottomRow - 2) listState.animateScrollToItem(bottomRow)
+    }
     // Keyed on the LAST item, not the count, so loading older messages (which
     // also changes the count) can never be mistaken for new output arriving.
     // Two distances from the newest output. "Away": the newest message is
@@ -259,16 +270,6 @@ private fun TranscriptScreenBody(
         // leaves them at its first line, reading, and the next row must not
         // pull them off it.
         wasReadingBack[0] = awayFromLatest || behindLatest
-    }
-    // The working tail appearing at the bottom is followed like new output.
-    LaunchedEffect(jobState.running) {
-        if (!jobState.running || ui.items.isEmpty() || wasReadingBack[0]) return@LaunchedEffect
-        following[0] = true
-        try {
-            listState.animateScrollToItem(bottomRow)
-        } finally {
-            following[0] = false
-        }
     }
     LaunchedEffect(awayFromLatest, behindLatest, lastId) {
         if (following[0]) return@LaunchedEffect
@@ -509,7 +510,7 @@ private fun TranscriptScreenBody(
                                         accent.label,
                                     ),
                                     elapsed = if (waiting) 0 else live?.elapsedS ?: 0,
-                                    color = if (waiting) pal.warn else accent.tint,
+                                    color = if (waiting) palette.warn else accent.tint,
                                 )
                             }
                         }
@@ -526,7 +527,7 @@ private fun TranscriptScreenBody(
                         scope.launch {
                             // Far away: go straight there. A smooth scroll
                             // over a long transcript takes seconds.
-                            val last = bottomRow
+                            val last = ui.items.lastIndex
                             val visible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
                             if (last - visible > 30) listState.scrollToItem(last)
                             else listState.animateScrollToItem(last)
@@ -589,7 +590,11 @@ private fun TranscriptScreenBody(
                 TurnChips(
                     profile = it,
                     harness = h,
-                    onExecMode = vm::setExecMode,
+                    // Read from the collected session state, not the view
+                    // model, so the chips repaint when the pin changes.
+                    model = sessionModelOf(session, profile, harness),
+                    effort = sessionEffortOf(session, profile, harness),
+                    perSession = it.caps.sessionOptions && ref.sessionId.isNotEmpty(),
                     onModel = vm::setModel,
                     onEffort = vm::setEffort,
                 )
@@ -637,6 +642,8 @@ private fun TranscriptScreenBody(
                 onRefresh = vm::loadChanges,
                 onCommit = vm::commitChanges,
                 onPush = vm::pushChanges,
+                canScope = profile?.caps?.changesTurn == true,
+                onScope = vm::setChangesTurnScope,
             )
         }
     }
@@ -827,6 +834,51 @@ private fun plainTranscript(items: List<TranscriptItem>): String =
         }
         "$who:\n${item.text}"
     }
+
+private fun liveHeadline(phase: String, phaseDetail: String, tool: String, agent: String) =
+    when {
+        phase.isNotEmpty() && phaseDetail.isNotEmpty() -> {
+            val verb = phase.replaceFirstChar { it.uppercase() }
+            "$verb · $phaseDetail"
+        }
+        phase.isNotEmpty() -> phase.replaceFirstChar { it.uppercase() }
+        tool.isNotEmpty() -> tool
+        else -> "$agent is working"
+    }
+
+/**
+ * The transcript's last row while a turn runs. The banner sits above the
+ * list, so a reader at the bottom of a long turn saw nothing moving where
+ * they were looking. Same words as the banner; the warning colour when a
+ * question or permission waits on the reader.
+ */
+@Composable
+private fun WorkingTail(text: String, elapsed: Int, color: Color) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .height(IntrinsicSize.Min),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .width(2.dp)
+                .fillMaxHeight()
+                .background(color.copy(alpha = 0.7f)),
+        )
+        Spacer(Modifier.width(10.dp))
+        WorkingDots(color)
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = if (elapsed > 0) "$text · ${Time.elapsed(elapsed)}" else text,
+            style = MaterialTheme.typography.labelMedium,
+            color = palette.dim,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
 
 private fun queryFileName(context: android.content.Context, uri: android.net.Uri): String {
     val fallback = uri.lastPathSegment?.substringAfterLast('/') ?: "file"

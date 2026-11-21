@@ -17,6 +17,7 @@ import com.bb10d.remote.data.ProjectsDto
 import com.bb10d.remote.data.SearchDto
 import com.bb10d.remote.data.StepTextDto
 import com.bb10d.remote.data.SessionDto
+import com.bb10d.remote.data.SessionOptionsDto
 import com.bb10d.remote.data.SessionsDto
 import com.bb10d.remote.data.ShareDto
 import com.bb10d.remote.data.ShellResultDto
@@ -360,8 +361,12 @@ class DaemonClient(
     // recency window, and that is exactly the row that must not be lost.
 
     /** What differs from the last commit in a session's folder (daemon ≥ 2.24). */
-    suspend fun changes(sessionId: String): ChangesDto =
-        call(request(url("api/sessions/$sessionId/changes")).get().build(), ChangesDto.serializer())
+    suspend fun changes(sessionId: String, turn: Boolean = false): ChangesDto =
+        call(
+            request(url("api/sessions/$sessionId/changes" + if (turn) "?scope=turn" else ""))
+                .get().build(),
+            ChangesDto.serializer(),
+        )
 
     suspend fun focus(): FocusDto =
         call(request(url("api/focus")).get().build(), FocusDto.serializer())
@@ -389,6 +394,29 @@ class DaemonClient(
             jsonBody(buildJsonObject { put("title", title) }),
         ).build(),
         TitleDto.serializer(),
+    )
+
+    /**
+     * Pin the model (and/or effort) ONE session runs on, daemon >= 2.27.
+     *
+     * The model belongs to the session, not to this phone: the pin is what
+     * every client shows for it and what its next turn uses, whoever sends
+     * that turn. An empty string hands the choice back to the harness.
+     */
+    suspend fun setSessionOptions(
+        sessionId: String,
+        model: String? = null,
+        effort: String? = null,
+    ): SessionOptionsDto = call(
+        request(url("api/sessions/$sessionId/options")).post(
+            jsonBody(
+                buildJsonObject {
+                    if (model != null) put("model", model)
+                    if (effort != null) put("effort", effort)
+                },
+            ),
+        ).build(),
+        SessionOptionsDto.serializer(),
     )
 
     /** Ask the daemon to derive a fresh title from the transcript. */

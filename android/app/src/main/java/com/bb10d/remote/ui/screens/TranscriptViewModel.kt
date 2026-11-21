@@ -317,6 +317,17 @@ class TranscriptViewModel(
         }
     }
 
+    /** The model this session runs on — see [sessionModelOf]. */
+    fun sessionModel(): String =
+        sessionModelOf(_session.value, profile.value, harnessProvider.value)
+
+    fun sessionEffort(): String =
+        sessionEffortOf(_session.value, profile.value, harnessProvider.value)
+
+    /** Whether this daemon can hold a model against one session (>= 2.27). */
+    fun canPinOptions(): Boolean =
+        profile.value?.caps?.sessionOptions == true && _ref.value.sessionId.isNotEmpty()
+
     // -- loading -----------------------------------------------------------
 
     private fun loadSession() {
@@ -696,13 +707,8 @@ class TranscriptViewModel(
         watcher.markStarting()
         setStatus("")
         viewModelScope.launch {
-            val harness = harnessProvider.value.ifBlank { null }
-            val models = profile.caps.modelsFor(harness)
-            val efforts = profile.caps.effortsFor(harness)
-            val model = profile.model.takeIf { it in models }
-                ?: models.firstOrNull().orEmpty()
-            val effort = profile.effort.takeIf { it in efforts }
-                ?: efforts.firstOrNull().orEmpty()
+            val model = sessionModel()
+            val effort = sessionEffort()
             runCatching {
                 c.continueSession(
                     sessionId = _ref.value.sessionId,
@@ -847,13 +853,8 @@ class TranscriptViewModel(
         }
         watcher.markStarting()
         viewModelScope.launch {
-            val harness = harnessProvider.value.ifBlank { null }
-            val models = profile.caps.modelsFor(harness)
-            val efforts = profile.caps.effortsFor(harness)
-            val model = profile.model.takeIf { it in models }
-                ?: models.firstOrNull().orEmpty()
-            val effort = profile.effort.takeIf { it in efforts }
-                ?: efforts.firstOrNull().orEmpty()
+            val model = sessionModel()
+            val effort = sessionEffort()
             runCatching {
                 c.continueSession(
                     sessionId = _ref.value.sessionId,
@@ -994,9 +995,13 @@ class TranscriptViewModel(
         _share.value = ShareUi()
     }
 
-    // -- changes: the session folder against its last commit ---------------
+    // -- changes: what the agent changed, in one of two scopes -------------
 
-    /** [output] is what the last git action printed; [busy] while one runs. */
+    /**
+     * [output] is what the last git action printed; [busy] while one runs.
+     * [turnScope] picks the question: what this turn changed, or everything
+     * since the last commit.
+     */
     data class ChangesUi(
         val open: Boolean = false,
         val loading: Boolean = false,
@@ -1004,6 +1009,7 @@ class TranscriptViewModel(
         val error: String? = null,
         val output: String = "",
         val busy: Boolean = false,
+        val turnScope: Boolean = false,
         /** Counts commits that succeeded, so the sheet knows when to clear its message. */
         val committed: Int = 0,
     )
@@ -1020,13 +1026,21 @@ class TranscriptViewModel(
         _changes.value = ChangesUi()
     }
 
+    /** Switch scope and reload; the two answers are not interchangeable. */
+    fun setChangesTurnScope(turn: Boolean) {
+        if (_changes.value.turnScope == turn) return
+        _changes.value = _changes.value.copy(turnScope = turn, data = null)
+        loadChanges()
+    }
+
     fun loadChanges() {
         val c = client ?: return
         val sid = _ref.value.sessionId
         if (sid.isEmpty() || !_changes.value.open) return
+        val turn = _changes.value.turnScope
         _changes.value = _changes.value.copy(loading = true, error = null)
         viewModelScope.launch {
-            val result = runCatching { c.changes(sid) }
+            val result = runCatching { c.changes(sid, turn = turn) }
             if (!_changes.value.open) return@launch
             _changes.value = result.fold(
                 onSuccess = { _changes.value.copy(loading = false, data = it) },
@@ -1243,21 +1257,56 @@ class TranscriptViewModel(
     /** Surface a short note under the composer (e.g. file-picker read errors). */
     fun note(text: String, sticky: Boolean = true) = setStatus(text, sticky = sticky)
 
-    // -- per-profile turn settings (shared by every session on that daemon) --
+    // -- turn settings -------------------------------------------------------
+    //
+    // Execution is a property of the daemon (one terminal, one host); model
+    // and effort are properties of the SESSION. Pinning them used to write
+    // one value per daemon, so changing the model of the session you were
+    // reading moved every other session on that daemon too.
 
     fun setExecMode(mode: String) {
         val id = _ref.value.profileId
         viewModelScope.launch { repo.profileStore.updateComposerDefaults(id, execMode = mode) }
     }
 
-    fun setModel(model: String) {
-        val id = _ref.value.profileId
-        viewModelScope.launch { repo.profileStore.updateComposerDefaults(id, model = model) }
-    }
+    fun setModel(model: String) = pinOption(model = model)
 
-    fun setEffort(effort: String) {
-        val id = _ref.value.profileId
-        viewModelScope.launch { repo.profileStore.updateComposerDefaults(id, effort = effort) }
+    fun setEffort(effort: String) = pinOption(effort = effort)
+
+    /**
+     * Pin to the open session; fall back to the daemon-wide default only on
+     * a daemon too old to hold one (< 2.27).
+     *
+     * Optimistic: the local row is updated before the POST, so the chip
+     * never sits on the old value while the request is in flight.
+     */
+    private fun pinOption(model: String? = null, effort: String? = null) {
+        val profileId = _ref.value.profileId
+        val sessionId = _ref.value.sessionId
+        if (!canPinOptions()) {
+            viewModelScope.launch {
+                repo.profileStore.updateComposerDefaults(
+                    profileId, model = model, effort = effort,
+                )
+            }
+            return
+        }
+        _session.value = _session.value?.copy(
+            modelPinned = model ?: _session.value?.modelPinned.orEmpty(),
+            effortPinned = effort ?: _session.value?.effortPinned.orEmpty(),
+        )
+        val c = client ?: return
+        viewModelScope.launch {
+            runCatching { c.setSessionOptions(sessionId, model = model, effort = effort) }
+                .onSuccess { reply ->
+                    // The daemon normalises ("default" is not a pin), so take
+                    // what it stored rather than what we asked for.
+                    _session.value = _session.value?.copy(
+                        modelPinned = reply.model, effortPinned = reply.effort,
+                    )
+                }
+                .onFailure { setStatus(repo.reason(it)) }
+        }
     }
 
     fun refresh() {
@@ -1287,4 +1336,48 @@ class TranscriptViewModel(
         const val CREATE_RETRIES = 12
         const val CREATE_RETRY_MS = 1500L
     }
+}
+
+/**
+ * The model ONE session runs on, which is a different question from "what
+ * did this phone last pick".
+ *
+ * Three answers, in order of how much they know:
+ *   1. [SessionDto.modelPinned] — a model chosen for this session, from any
+ *      client, which has not run yet.
+ *   2. [SessionDto.model] — what it actually last ran on, read by the daemon
+ *      from the harness's own transcript.
+ *   3. the profile default — all a session that has never run can offer.
+ *
+ * A session may report a model the harness no longer lists (an older id, a
+ * `[1m]` variant). It is still the model that session runs on, so it is
+ * still what the chip shows; the picker adds it to its own list for the
+ * same reason.
+ *
+ * Free functions, not methods, so a composable reading them also reads the
+ * states they are built from and recomposes when the session changes.
+ */
+fun sessionModelOf(
+    session: SessionDto?,
+    profile: Profile?,
+    harness: String?,
+): String {
+    session?.modelPinned?.takeIf { it.isNotBlank() }?.let { return it }
+    session?.model
+        ?.takeIf { it.isNotBlank() && it != "default" && it != "interactive" }
+        ?.let { return it }
+    val prof = profile ?: return ""
+    val models = prof.caps.modelsFor(harness?.ifBlank { null })
+    return prof.model.takeIf { it in models } ?: models.firstOrNull().orEmpty()
+}
+
+fun sessionEffortOf(
+    session: SessionDto?,
+    profile: Profile?,
+    harness: String?,
+): String {
+    session?.effortPinned?.takeIf { it.isNotBlank() }?.let { return it }
+    val prof = profile ?: return ""
+    val efforts = prof.caps.effortsFor(harness?.ifBlank { null })
+    return prof.effort.takeIf { it in efforts } ?: efforts.firstOrNull().orEmpty()
 }

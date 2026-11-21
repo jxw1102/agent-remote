@@ -1,6 +1,7 @@
 package com.bb10d.remote.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,7 +32,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -43,10 +46,14 @@ import com.bb10d.remote.ui.components.Hairline
 import com.bb10d.remote.ui.theme.MonoStyle
 import com.bb10d.remote.ui.theme.palette
 
-// What the agent changed, before you answer it: the session folder's working
-// tree against its last commit (daemon 2.24). Read-only on the daemon; commit
-// and push are explicit actions here, run through the same shell route as a
-// "!command". The web client's Changes pane is the same view.
+// What the agent changed, before you answer it. Read-only on the daemon;
+// commit and push are explicit actions here, run through the same shell route
+// as a "!command". The web client's Changes pane is the same view.
+//
+// Two scopes, because they answer two questions: "This turn" (daemon 2.26,
+// measured from a snapshot taken beside the folder — it works in a folder
+// that is not a repository) and "Since last commit", the working tree
+// against HEAD.
 
 /** One row of the list under the file summary. */
 internal sealed interface DiffRow {
@@ -97,14 +104,53 @@ private val HIDDEN_META = listOf(
 )
 
 internal fun changesSummary(d: ChangesDto): String = buildList {
-    add(d.branch.ifBlank { "detached" })
-    if (d.ahead > 0) add("↑${d.ahead}")
-    if (d.behind > 0) add("↓${d.behind}")
+    if (d.scope == "turn") {
+        add(
+            if (d.since > 0) "this turn · started ${shortSpan(nowSeconds() - d.since)} ago"
+            else "this turn",
+        )
+    } else {
+        add(d.branch.ifBlank { "detached" })
+        if (d.ahead > 0) add("↑${d.ahead}")
+        if (d.behind > 0) add("↓${d.behind}")
+    }
     add(
         if (d.files.isEmpty()) "no changes"
         else "${d.files.size} ${if (d.files.size == 1) "file" else "files"} · +${d.added} −${d.removed}",
     )
 }.joinToString(" · ")
+
+private fun nowSeconds(): Double = System.currentTimeMillis() / 1000.0
+
+/**
+ * Which question the sheet is answering. Shown only where the daemon can
+ * answer both; on an older one the sheet is exactly what it was.
+ */
+@Composable
+private fun ScopeBar(turn: Boolean, onPick: (Boolean) -> Unit) {
+    val pal = palette
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        listOf(true to "This turn", false to "Since last commit").forEach { (value, label) ->
+            val on = value == turn
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (on) pal.onAccent else pal.dim,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (on) pal.accent else androidx.compose.ui.graphics.Color.Transparent)
+                    .clickable(role = Role.Tab) { onPick(value) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .semantics { selected = on },
+            )
+        }
+    }
+}
 
 @Composable
 internal fun ChangesSheet(
@@ -112,6 +158,8 @@ internal fun ChangesSheet(
     onRefresh: () -> Unit,
     onCommit: (String) -> Unit,
     onPush: () -> Unit,
+    canScope: Boolean = false,
+    onScope: (Boolean) -> Unit = {},
 ) {
     val pal = palette
     val data = ui.data
@@ -152,6 +200,7 @@ internal fun ChangesSheet(
             }
             TextButton(onClick = onRefresh, enabled = !ui.loading && !ui.busy) { Text("Refresh") }
         }
+        if (canScope) ScopeBar(turn = ui.turnScope, onPick = onScope)
         Hairline()
 
         LazyColumn(
@@ -176,20 +225,43 @@ internal fun ChangesSheet(
             }
             when {
                 ui.error != null -> item(key = "error") { Note(ui.error, pal.danger) }
-                data == null -> item(key = "wait") { Note("Reading the working tree…", pal.dim) }
+                data == null -> item(key = "wait") {
+                    Note(
+                        if (ui.turnScope) "Comparing with the start of the turn…"
+                        else "Reading the working tree…",
+                        pal.dim,
+                    )
+                }
+                // scope=turn with no mark to measure from: the daemon says why.
+                !data.available -> item(key = "nomark") {
+                    Note(
+                        data.reason.ifBlank {
+                            "There is nothing to measure this turn against yet."
+                        },
+                        pal.dim,
+                    )
+                }
                 !data.repo -> item(key = "norepo") {
                     Note(
                         "This session's folder is not a git repository, so there is " +
-                            "nothing to compare with.",
+                            "nothing to compare with." +
+                            if (canScope) {
+                                " “This turn” still works: the daemon snapshots the " +
+                                    "folder when a turn starts, outside the folder."
+                            } else "",
                         pal.dim,
                     )
                 }
                 data.files.isEmpty() -> item(key = "clean") {
                     Note(
-                        "Nothing differs from the last commit." + when (data.ahead) {
-                            0 -> ""
-                            1 -> " 1 commit is not pushed yet."
-                            else -> " ${data.ahead} commits are not pushed yet."
+                        if (data.scope == "turn") {
+                            "Nothing in this folder changed during the last turn."
+                        } else {
+                            "Nothing differs from the last commit." + when (data.ahead) {
+                                0 -> ""
+                                1 -> " 1 commit is not pushed yet."
+                                else -> " ${data.ahead} commits are not pushed yet."
+                            }
                         },
                         pal.dim,
                     )
@@ -245,9 +317,13 @@ internal fun ChangesSheet(
             }
         }
 
-        // Git actions. Each one says what it will do.
+        // Git actions. Each one says what it will do — and they act on the
+        // project's repository, so they are not offered in the turn scope:
+        // `git add -A` would take in more than the diff above shows.
         val canPush = data != null && ((data.upstream.isNotEmpty() && data.ahead > 0) || data.canPublish)
-        if (data != null && data.repo && (data.files.isNotEmpty() || canPush)) {
+        if (data != null && data.repo && data.scope != "turn" &&
+            (data.files.isNotEmpty() || canPush)
+        ) {
             Hairline()
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                 if (data.files.isNotEmpty()) {

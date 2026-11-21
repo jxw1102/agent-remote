@@ -193,8 +193,9 @@ internal fun QueueSheet(
 
 
 /**
- * What is true of this session and its daemon. Execution, model and effort
- * are not here: they are per message, on the composer.
+ * What is true of this session and its daemon — Execution among it, where
+ * the BlackBerry client has always kept it. Model and effort stay on the
+ * composer, as chips, because they change far more often than this does.
  */
 @Composable
 internal fun SessionOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.remote.data.Profile) {
@@ -217,12 +218,18 @@ internal fun SessionOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.rem
             style = MaterialTheme.typography.bodySmall,
             color = palette.dim,
         )
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "Execution, model and effort are set above the message box.",
-            style = MaterialTheme.typography.bodySmall,
-            color = palette.dim,
-        )
+        ExecModeBlock(profile = profile, harness = h, onExecMode = vm::setExecMode)
+        if (hasTurnChips(profile, h)) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                if (profile.caps.sessionOptions)
+                    "Model and effort are set above the message box, and"
+                        + " belong to this session alone."
+                else "Model and effort are set above the message box.",
+                style = MaterialTheme.typography.bodySmall,
+                color = palette.dim,
+            )
+        }
         if (caps.goalWatchFor(h)) {
             GoalBlock(vm)
         }
@@ -242,6 +249,45 @@ internal fun SessionOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.rem
         }
     }
 }
+
+/**
+ * How the next message runs, and the one line of what that means. The
+ * chip is the same control the composer uses for model and effort, so the
+ * two places behave identically; only the wording around it differs.
+ *
+ * It stays visible with a single option (a harness with no TUI), greyed
+ * and unclickable: "Headless" shown is worth more than nothing shown.
+ */
+@Composable
+internal fun ExecModeBlock(
+    profile: com.bb10d.remote.data.Profile,
+    harness: String?,
+    onExecMode: (String) -> Unit,
+) {
+    val selected = profile.effectiveExecMode(harness)
+    Spacer(Modifier.height(10.dp))
+    TurnChip(
+        label = "Execution",
+        options = ExecMode.options(profile.caps.interactiveFor(harness)),
+        selected = selected,
+        display = { ExecMode.label(it) },
+        hint = { execModeHint(it) },
+        footer = "Used for every session on ${profile.displayName}",
+        onSelect = onExecMode,
+    )
+    Text(
+        execModeHint(selected),
+        style = MaterialTheme.typography.bodySmall,
+        color = palette.dim,
+    )
+}
+
+/** One line on what a mode means — the same words in the menu and under it. */
+internal fun execModeHint(mode: String): String =
+    if (ExecMode.normalize(mode) == ExecMode.INTERACTIVE)
+        "In the terminal on the host. Slash commands work."
+    else
+        "No terminal. Messages queue while a turn runs."
 
 /**
  * The Codex goal on this thread, and the daemon's watchdog for it.

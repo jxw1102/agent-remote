@@ -55,7 +55,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.bb10d.remote.data.ExecMode
 import com.bb10d.remote.data.Profile
 import com.bb10d.remote.ui.theme.palette
 
@@ -235,10 +234,30 @@ internal fun Composer(
     }
 }
 
+/** The harness's list, plus whatever is selected now if it is not on it. */
+private fun List<String>.withCurrent(current: String): List<String> =
+    if (current.isNotBlank() && current !in this) this + current else this
+
+/** True when [TurnChips] would draw something for this profile. */
+internal fun hasTurnChips(profile: Profile, harness: String?): Boolean {
+    val caps = profile.caps
+    return (caps.canSetModelFor(harness) && caps.modelsFor(harness).isNotEmpty()) ||
+        (caps.canSetEffortFor(harness) && caps.effortsFor(harness).isNotEmpty())
+}
+
 /**
- * Execution, model and effort for the next message, as chips above the
- * composer. They used to be in a sheet behind a toolbar icon, which is how a
- * turn got sent headless by someone who thought it was interactive.
+ * Model and effort for the next message, as chips above the composer.
+ *
+ * These belong to the OPEN SESSION, not to the daemon: [model] and [effort]
+ * are what this one session runs on, and a pick is pinned to it alone. They
+ * used to be one value per daemon, which showed a model the open session was
+ * not running on and moved every other session when you changed it.
+ *
+ * Execution is NOT here: it sits in the session options sheet, where the
+ * BlackBerry client has always kept it. It used to be the first chip in
+ * this row, because a sheet is how a turn once got sent headless by someone
+ * who thought it was interactive — the sheet now spells the mode out in
+ * words instead of hiding it behind an icon.
  *
  * The values shown are the ones [TranscriptViewModel.send] will use.
  */
@@ -246,14 +265,21 @@ internal fun Composer(
 internal fun TurnChips(
     profile: Profile,
     harness: String?,
-    onExecMode: (String) -> Unit,
+    model: String,
+    effort: String,
+    perSession: Boolean,
     onModel: (String) -> Unit,
     onEffort: (String) -> Unit,
 ) {
+    // Nothing to offer: no divider and no empty strip above the message box.
+    if (!hasTurnChips(profile, harness)) return
     val caps = profile.caps
-    val models = caps.modelsFor(harness)
-    val efforts = caps.effortsFor(harness)
-    val scope = "Used for every session on ${profile.displayName}"
+    // A session can run on a model the harness no longer lists (an older id,
+    // a [1m] variant). Show it anyway — it is what the next turn will use.
+    val models = caps.modelsFor(harness).withCurrent(model)
+    val efforts = caps.effortsFor(harness).withCurrent(effort)
+    val scope = if (perSession) "This session only"
+                else "Used for every session on ${profile.displayName}"
     Column(
         Modifier
             .fillMaxWidth()
@@ -268,23 +294,11 @@ internal fun TurnChips(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TurnChip(
-                label = "Execution",
-                options = ExecMode.options(caps.interactiveFor(harness)),
-                selected = profile.effectiveExecMode(harness),
-                display = { ExecMode.label(it) },
-                hint = {
-                    if (it == ExecMode.INTERACTIVE) "In the terminal on the host. Slash commands work."
-                    else "No terminal. Messages queue while a turn runs."
-                },
-                footer = scope,
-                onSelect = onExecMode,
-            )
             if (caps.canSetModelFor(harness) && models.isNotEmpty()) {
                 TurnChip(
                     label = "Model",
                     options = models,
-                    selected = profile.model.takeIf { it in models } ?: models.first(),
+                    selected = model.ifBlank { models.first() },
                     footer = scope,
                     onSelect = onModel,
                 )
@@ -293,7 +307,7 @@ internal fun TurnChips(
                 TurnChip(
                     label = "Effort",
                     options = efforts,
-                    selected = profile.effort.takeIf { it in efforts } ?: efforts.first(),
+                    selected = effort.ifBlank { efforts.first() },
                     footer = scope,
                     onSelect = onEffort,
                 )
@@ -303,7 +317,7 @@ internal fun TurnChips(
 }
 
 @Composable
-private fun TurnChip(
+internal fun TurnChip(
     label: String,
     options: List<String>,
     selected: String,
