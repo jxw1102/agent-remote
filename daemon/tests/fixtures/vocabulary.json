@@ -1,0 +1,131 @@
+{
+  "aliases": {
+    "cbc": "codebuddy",
+    "cursor-agent": "cursor",
+    "dsh": "deepseek",
+    "github-copilot": "copilot"
+  },
+  "palettes": {
+    "claude": {
+      "accent": "#d97757",
+      "banner_bg": "#2a1f1a",
+      "banner_text": "#e8a088",
+      "heading": "#e08a5c",
+      "heading_light": "#a9532f",
+      "inline": "#e0a183",
+      "inline_light": "#a9532f",
+      "label": "Claude",
+      "live_well": "#20180f",
+      "surface": "#20120c",
+      "thought": "#8a92e0"
+    },
+    "codebuddy": {
+      "accent": "#58c08b",
+      "banner_bg": "#0d211a",
+      "banner_text": "#8fdcb4",
+      "heading": "#7fd4a8",
+      "heading_light": "#268253",
+      "inline": "#a8e3c8",
+      "inline_light": "#268253",
+      "label": "CodeBuddy",
+      "live_well": "#131f1a",
+      "surface": "#10281b",
+      "thought": "#7a9a8a"
+    },
+    "codex": {
+      "accent": "#484cf4",
+      "banner_bg": "#1b1c3a",
+      "banner_text": "#9a9df9",
+      "heading": "#7b7ef7",
+      "heading_light": "#3b3fc4",
+      "inline": "#a9abfa",
+      "inline_light": "#3b3fc4",
+      "label": "Codex",
+      "live_well": "#16172c",
+      "surface": "#15162e",
+      "thought": "#8e90b8"
+    },
+    "copilot": {
+      "accent": "#8957e5",
+      "banner_bg": "#1a1228",
+      "banner_text": "#b392f0",
+      "heading": "#b392f0",
+      "heading_light": "#6e40c9",
+      "inline": "#d2a8ff",
+      "inline_light": "#6e40c9",
+      "label": "Copilot",
+      "live_well": "#17131f",
+      "surface": "#160b2a",
+      "thought": "#9a8fb0"
+    },
+    "cursor": {
+      "accent": "#d946ef",
+      "banner_bg": "#24122a",
+      "banner_text": "#e879f9",
+      "heading": "#e879f9",
+      "heading_light": "#a21caf",
+      "inline": "#f0abfc",
+      "inline_light": "#a21caf",
+      "label": "Cursor",
+      "live_well": "#1a1220",
+      "surface": "#24082a",
+      "thought": "#a98fb5"
+    },
+    "deepseek": {
+      "accent": "#4d6bfe",
+      "banner_bg": "#12162a",
+      "banner_text": "#7b93ff",
+      "heading": "#7b93ff",
+      "heading_light": "#5b3fa8",
+      "inline": "#93a8ff",
+      "inline_light": "#5b3fa8",
+      "label": "DeepSeek",
+      "live_well": "#14161f",
+      "surface": "#0b1024",
+      "thought": "#8a92e0"
+    },
+    "grok": {
+      "accent": "#00d4ff",
+      "banner_bg": "#0d1a1f",
+      "banner_text": "#00d4ff",
+      "heading": "#b9a2f0",
+      "heading_light": "#0b7c93",
+      "inline": "#67e8f9",
+      "inline_light": "#0b7c93",
+      "label": "Grok",
+      "live_well": "#17171c",
+      "surface": "#04222a",
+      "thought": "#9a8fb0"
+    }
+  },
+  "states": [
+    {
+      "color": "#e0b454",
+      "color_light": "#8a6100",
+      "id": "needs_answer",
+      "label": "needs answer",
+      "role": "attention"
+    },
+    {
+      "color": "#e5706b",
+      "color_light": "#b3261e",
+      "id": "failed",
+      "label": "failed",
+      "role": "danger"
+    },
+    {
+      "color": "#5fc98b",
+      "color_light": "#1f7a50",
+      "id": "working",
+      "label": "working",
+      "role": "ok"
+    },
+    {
+      "color": "",
+      "color_light": "",
+      "id": "turn_finished",
+      "label": "turn finished",
+      "role": "dim"
+    }
+  ]
+}

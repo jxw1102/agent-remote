@@ -1,5 +1,8 @@
 package com.bb10d.remote.ui.theme
 
+import androidx.compose.runtime.mutableStateMapOf
+import com.bb10d.remote.data.PaletteDto
+import com.bb10d.remote.data.StateDto
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
@@ -24,7 +27,11 @@ import androidx.compose.ui.unit.sp
  * Claude session is warm orange and a Grok session is icon cyan even though
  * they share every screen.
  */
-enum class Accent(val tint: Color, val onTint: Color, val label: String) {
+enum class Accent(
+    private val builtinTint: Color,
+    private val builtinOnTint: Color,
+    private val builtinLabel: String,
+) {
     Claude(Color(0xFFD97757), Color(0xFF20120C), "Claude"),
     Grok(Color(0xFF00D4FF), Color(0xFF04222A), "Grok"),
     Codex(Color(0xFF484CF4), Color(0xFF15162E), "Codex"),
@@ -34,6 +41,11 @@ enum class Accent(val tint: Color, val onTint: Color, val label: String) {
     CodeBuddy(Color(0xFF58C08B), Color(0xFF10281B), "CodeBuddy"),
     Neutral(Color(0xFF9AA4B2), Color(0xFF11151A), "Agent"),
     ;
+
+    // The daemon's value when it has sent one; the built-in otherwise.
+    val tint: Color get() = DaemonVocabulary.colour(this, "accent") ?: builtinTint
+    val onTint: Color get() = DaemonVocabulary.colour(this, "surface") ?: builtinOnTint
+    val label: String get() = DaemonVocabulary.label(this) ?: builtinLabel
 
     companion object {
         fun forProvider(provider: String?): Accent = when (provider?.lowercase()) {
@@ -46,6 +58,75 @@ enum class Accent(val tint: Color, val onTint: Color, val label: String) {
             "codebuddy", "cbc", "codebuddy-code" -> CodeBuddy
             else -> Neutral
         }
+    }
+}
+
+/**
+ * Colours and words the daemon owns: harness palettes (/api/ping) and focus
+ * state labels (/api/focus). Web, BlackBerry and the pager already read
+ * them; this app hard-coded its own copies, and they had drifted (the Claude
+ * heading colour, the Grok light-theme heading). Backed by snapshot state,
+ * so a screen repaints when a ping brings a different value.
+ */
+object DaemonVocabulary {
+    private val palettes = mutableStateMapOf<Accent, PaletteDto>()
+    private val focusLabels = mutableStateMapOf<String, String>()
+    private val states = mutableStateMapOf<String, StateDto>()
+
+    fun usePalettes(byProvider: Map<String, PaletteDto>) {
+        byProvider.forEach { (provider, palette) ->
+            val accent = Accent.forProvider(provider)
+            if (accent == Accent.Neutral || palette.accent.isBlank()) return@forEach
+            if (palettes[accent] != palette) palettes[accent] = palette
+        }
+    }
+
+    fun useFocusLabels(labels: Map<String, String>) {
+        labels.forEach { (state, label) ->
+            if (label.isNotBlank() && focusLabels[state] != label) focusLabels[state] = label
+        }
+    }
+
+    /** null when the daemon has not said, or said something unparseable. */
+    fun colour(accent: Accent, role: String): Color? {
+        val p = palettes[accent] ?: return null
+        return parseHex(
+            when (role) {
+                "accent" -> p.accent
+                "surface" -> p.surface
+                "heading" -> p.heading
+                "inline" -> p.inline
+                "heading_light" -> p.headingLight
+                "inline_light" -> p.inlineLight
+                else -> ""
+            },
+        )
+    }
+
+    fun label(accent: Accent): String? = palettes[accent]?.label?.takeIf { it.isNotBlank() }
+
+    fun useStates(list: List<StateDto>) {
+        list.forEach { state ->
+            if (state.id.isNotBlank() && states[state.id] != state) states[state.id] = state
+        }
+    }
+
+    /** The daemon's word for a state: /api/ping first, then /api/focus. */
+    fun focusLabel(state: String): String? =
+        states[state]?.label?.takeIf { it.isNotBlank() } ?: focusLabels[state]
+
+    /** The daemon's colour for a state on this kind of surface, if it has one. */
+    fun stateColour(state: String, dark: Boolean): Color? {
+        val s = states[state] ?: return null
+        return parseHex(if (dark) s.color else s.colorLight)
+    }
+
+    /** "#rrggbb" -> opaque colour. */
+    fun parseHex(hex: String): Color? {
+        val digits = hex.trim().removePrefix("#")
+        if (digits.length != 6) return null
+        val rgb = digits.toLongOrNull(16) ?: return null
+        return Color(0xFF000000 or rgb)
     }
 }
 
@@ -79,7 +160,7 @@ private fun darkPalette(accent: Accent) = RemotePalette(
     liveWell = Color(0xFF14161A),
     codeBg = Color(0xFF101216),
     codeBorder = Color(0xFF23262D),
-    inlineCode = when (accent) {
+    inlineCode = DaemonVocabulary.colour(accent, "inline") ?: when (accent) {
         Accent.Claude -> Color(0xFFE0A183)
         Accent.Codex -> Color(0xFFA9ABFA)
         Accent.DeepSeek -> Color(0xFF93A8FF)
@@ -88,7 +169,7 @@ private fun darkPalette(accent: Accent) = RemotePalette(
         Accent.CodeBuddy -> Color(0xFFA8E3C8)
         else -> Color(0xFF67E8F9)
     },
-    heading = when (accent) {
+    heading = DaemonVocabulary.colour(accent, "heading") ?: when (accent) {
         Accent.Claude -> Color(0xFFE9A47F)
         Accent.Codex -> Color(0xFF7B7EF7)
         Accent.DeepSeek -> Color(0xFF7B93FF)
@@ -113,7 +194,7 @@ private fun lightPalette(accent: Accent) = RemotePalette(
     liveWell = Color(0xFFF4F6F9),
     codeBg = Color(0xFFF3F4F7),
     codeBorder = Color(0xFFDDE1E8),
-    inlineCode = when (accent) {
+    inlineCode = DaemonVocabulary.colour(accent, "inline_light") ?: when (accent) {
         Accent.Claude -> Color(0xFFA9532F)
         Accent.Codex -> Color(0xFF3B3FC4)
         Accent.Cursor -> Color(0xFFA21CAF)
@@ -121,7 +202,7 @@ private fun lightPalette(accent: Accent) = RemotePalette(
         Accent.CodeBuddy -> Color(0xFF268253)
         else -> Color(0xFF0B7C93)
     },
-    heading = when (accent) {
+    heading = DaemonVocabulary.colour(accent, "heading_light") ?: when (accent) {
         Accent.Claude -> Color(0xFFA9532F)
         Accent.Codex -> Color(0xFF3B3FC4)
         Accent.Cursor -> Color(0xFFA21CAF)

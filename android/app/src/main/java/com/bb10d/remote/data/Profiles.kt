@@ -54,11 +54,21 @@ data class Profile(
 
     val configured: Boolean get() = baseUrl.isNotBlank() && token.isNotBlank()
 
-    /** Stored execution mode (interactive | headless), defaulting by caps. */
-    fun effectiveExecMode(): String = when {
-        execMode.isNotBlank() -> ExecMode.normalize(execMode, caps.interactive)
-        caps.interactive -> ExecMode.INTERACTIVE
-        else -> ExecMode.HEADLESS
+    /**
+     * Stored execution mode (interactive | headless), defaulting by caps.
+     *
+     * Pass the open session's [harness] on a multi-harness daemon: what a
+     * profile prefers is only on offer where that harness can do it (Copilot
+     * and DeepSeek have no terminal), and a session must never be driven in
+     * a mode its harness lacks.
+     */
+    fun effectiveExecMode(harness: String? = null): String {
+        val can = if (harness.isNullOrBlank()) caps.interactive else caps.interactiveFor(harness)
+        return when {
+            execMode.isNotBlank() -> ExecMode.normalize(execMode, can)
+            can -> ExecMode.INTERACTIVE
+            else -> ExecMode.HEADLESS
+        }
     }
 
     /** `permission_mode` value for the HTTP API. */

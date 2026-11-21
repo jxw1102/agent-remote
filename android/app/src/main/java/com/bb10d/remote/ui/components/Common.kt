@@ -1,5 +1,6 @@
 package com.bb10d.remote.ui.components
 
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -249,7 +250,7 @@ fun MetaPill(text: String, modifier: Modifier = Modifier, tint: Color? = null) {
 @Composable
 fun FocusPill(state: String, modifier: Modifier = Modifier, unread: Boolean = false) {
     val pal = palette
-    val (label, tint) = when (state) {
+    val (builtin, tint) = when (state) {
         "needs_answer" -> "needs answer" to pal.warn
         "failed" -> "failed" to pal.danger
         "working" -> "working" to pal.ok
@@ -259,7 +260,27 @@ fun FocusPill(state: String, modifier: Modifier = Modifier, unread: Boolean = fa
             (if (unread) MaterialTheme.colorScheme.onSurface else pal.dim)
         else -> return
     }
-    MetaPill(label, modifier, tint)
+    // The daemon's wording when it has sent it, so every client says the same.
+    val vocabulary = com.bb10d.remote.ui.theme.DaemonVocabulary
+    val label = vocabulary.focusLabel(state) ?: builtin
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    MetaPill(label, modifier, vocabulary.stateColour(state, dark) ?: tint)
 }
 
 val ScreenPadding = PaddingValues(horizontal = 16.dp)
+
+/** Words for a connection state; empty for live (nothing to say). */
+fun connLabel(state: com.bb10d.remote.data.ConnState?): String = when (state) {
+    com.bb10d.remote.data.ConnState.RECONNECTING -> "reconnecting…"
+    com.bb10d.remote.data.ConnState.OFFLINE -> "offline"
+    com.bb10d.remote.data.ConnState.CONNECTING, null -> "connecting…"
+    com.bb10d.remote.data.ConnState.LIVE -> ""
+}
+
+@Composable
+fun connTint(state: com.bb10d.remote.data.ConnState?): Color = when (state) {
+    com.bb10d.remote.data.ConnState.LIVE -> palette.ok
+    com.bb10d.remote.data.ConnState.OFFLINE -> palette.danger
+    com.bb10d.remote.data.ConnState.RECONNECTING -> palette.warn
+    else -> palette.dim
+}

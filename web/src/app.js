@@ -254,7 +254,9 @@ const state = {
   query: "",
   filter: null,          // profileId or null
   active: {},            // profileId -> [activeJobDto]
+  sessionsRev: {},       // profileId -> last sessions_rev seen on its stream
   streams: {},           // profileId -> EventSource
+  conn: {},              // profileId -> { state, since } (see setConn)
   open: null,            // {profileId, sessionId, session}
   items: [],             // transcript rows
   total: 0,
@@ -265,6 +267,10 @@ const state = {
   jobFails: 0,
   liveTui: false,        // Live TUI mode open
   liveTuiTimer: null,
+  liveTuiStream: null,   // EventSource of pushed frames (daemon ≥ 2.22)
+  liveTuiRetry: null,    // timer: ask for the stream again after falling back to polling
+  liveTuiPolling: false, // a polled frame request is in flight
+  liveTuiPollAgain: false,
   liveTuiSeq: 0,
   liveTuiKeys: false,    // pane has keyboard focus
   liveTuiCols: 0,        // host pane width in columns (frame.cols)
@@ -550,7 +556,7 @@ async function paintOpenAfterJob(profileId, jobId, snap, meta = {}) {
     try { await paintAfterJobInFlight; } catch { /* ignore */ }
     return;
   }
-  paintAfterJobInFlight = loadTail(gen, { keepLive: false })
+  paintAfterJobInFlight = loadTail(gen, { keepLive: false, follow: true })
     .catch(() => {})
     .finally(() => { paintAfterJobInFlight = null; });
   await paintAfterJobInFlight;
@@ -600,7 +606,7 @@ function runProcessRefresh() {
   const gen = state.openGen;
   const sid = state.open.sessionId;
   const pid = state.open.profileId;
-  processRefreshInFlight = loadTail(gen, { keepLive: true })
+  processRefreshInFlight = loadTail(gen, { keepLive: true, follow: true })
     .catch(() => {})
     .finally(() => { processRefreshInFlight = null; });
   // Fire-and-forget; openGen guard inside loadTail drops stale paints.
@@ -1085,10 +1091,51 @@ function applyRemotePalettes(ping) {
   return changed;
 }
 
+/**
+ * Session-state words and colours from the daemon (≥ 2.23). The built-in
+ * FOCUS_LABELS and CSS colours stay as the fallback for an older daemon.
+ */
+const STATE_ROLE_VARS = { attention: ["--attention", "--warn"], danger: ["--danger"], ok: ["--ok"] };
+function applyRemoteStates(ping) {
+  const states = (ping && Array.isArray(ping.states)) ? ping.states : [];
+  let changed = false;
+  const root = document.documentElement;
+  states.forEach((st) => {
+    if (!st || !st.id) return;
+    if (st.label && FOCUS_LABELS[st.id] !== st.label) {
+      FOCUS_LABELS[st.id] = st.label;
+      changed = true;
+    }
+    const vars = STATE_ROLE_VARS[st.role] || [];
+    if (!/^#[0-9a-fA-F]{6}$/.test(st.color || "")) return;
+    vars.forEach((name) => {
+      if (root.style.getPropertyValue(name).trim() !== st.color) {
+        root.style.setProperty(name, st.color);
+        changed = true;
+      }
+    });
+  });
+  return changed;
+}
+
 async function pingProfile(profile) {
   try {
     const ping = await call(profile, "/api/ping", { timeout: 10000 });
-    if (applyRemotePalettes(ping)) render();
+    if (applyRemotePalettes(ping)) {
+      // Palettes changed: repaint what is coloured by provider. (This used
+      // to call an undefined render(), and the ReferenceError skipped every
+      // assignment below - caps, models, focus, share - for this ping.)
+      renderFilters();
+      renderSessions();
+      if (state.open) {
+        const op = profileById(state.open.profileId);
+        applyAccent(sessionProvider(state.open.session, op));
+      }
+    }
+    if (applyRemoteStates(ping)) {
+      renderSessions();
+      renderStatus();
+    }
     profile.provider = ping.provider || "";
     profile.caps = ping.caps || {};
     profile.slashCommands = ping.slash_commands || [];
@@ -1107,6 +1154,10 @@ async function pingProfile(profile) {
     profile.share = !!ping.share;
     // Linked host files (agentremoted ≥ 2.20): /api/sessions/<id>/file.
     profile.linkedFiles = !!ping.linked_files;
+    // Changes view (agentremoted ≥ 2.24): /api/sessions/<id>/changes.
+    profile.changes = !!ping.changes;
+    // Live TUI frames pushed over SSE + ordered key batches (agentremoted ≥ 2.22).
+    profile.tuiStream = !!ping.tui_stream;
     profile.chunkedUpload = !!ping.chunked_upload
       || !!(ping.caps && ping.caps.chunked_upload);
     if (typeof ping.max_upload_mb === "number" && ping.max_upload_mb > 0) {
@@ -1114,6 +1165,8 @@ async function pingProfile(profile) {
     }
     store.save();
     syncShareButton();
+    // Models, efforts and capabilities may have just arrived or changed.
+    if (state.open && state.open.profileId === profile.id) { syncComposer(); syncChangesButton(); }
     return true;
   } catch {
     return false;
@@ -1838,104 +1891,256 @@ function blockedKeys() {
 }
 
 function renderStatus() {
-  renderFilters();   // the Focus chip carries the row count
-  const box = $("list-status");
-  box.textContent = "";
-  const problems = Object.entries(state.feeds).filter(([, f]) => f.error);
-  if (state.loading) {
-    box.appendChild(el("span", "spinner"));
-    box.appendChild(document.createTextNode(" Loading…"));
-  } else if (focusMode()) {
-    // Focus mode counts by state — "3 sessions" says nothing about what to do
-    // next, whereas "1 needs you" does.
-    const rows = visibleRows();
+  // What the Focus view holds, by state: "1 needs answer" says what to do
+  // next. It rides on the Focus switch (its tooltip), not on a line of its own.
+  state.focusTally = "";
+  if (focusMode() && !state.loading) {
     const tally = {};
-    rows.forEach((r) => {
+    visibleRows().forEach((r) => {
       const s = r.session.focus_state;
       if (s) tally[s] = (tally[s] || 0) + 1;
     });
-    const bits = FOCUS_STATES.filter((s) => tally[s])
-      .map((s) => `${tally[s]} ${FOCUS_LABELS[s]}`);
-    box.appendChild(document.createTextNode(
-      rows.length ? bits.join(" · ") : "Nothing in focus"));
-  } else {
-    const working = workingKeys().size;
-    const bits = [`${visibleRows().length} sessions`];
-    if (working) bits.push(`${working} working`);
-    box.appendChild(document.createTextNode(bits.join(" · ")));
+    state.focusTally = FOCUS_STATES.filter((s) => tally[s])
+      .map((s) => `${tally[s]} ${FOCUS_LABELS[s]}`).join(" · ");
   }
-  // A dead daemon must never read as "it has no sessions".
-  problems.forEach(([pid, f]) => {
-    const p = profileById(pid);
-    const line = el("div", "err", `${(p && p.name) || "Daemon"}: ${f.error}`);
-    box.appendChild(line);
-  });
+  renderFilters();
+  const box = $("list-status");
+  box.textContent = "";
+  if (state.loading) {
+    const spin = el("span", "spinner");
+    spin.setAttribute("aria-label", "Loading");
+    box.appendChild(spin);
+  }
+  // A dead daemon must never read as "it has no sessions". With several
+  // daemons the daemon button and its menu say which and why; with one there
+  // is no such button, so it is said here.
+  if (enabledProfiles().length < 2) {
+    Object.entries(state.feeds).filter(([, f]) => f.error).forEach(([pid, f]) => {
+      const p = profileById(pid);
+      const line = el("div", "err", `${(p && p.name) || "Daemon"}: ${f.error}`);
+      line.title = line.textContent;
+      box.appendChild(line);
+    });
+  }
 }
 
 /**
- * One chip row: the Focus toggle, then the per-daemon filters.
+ * The list is narrowed by two different questions, and each gets the control
+ * that fits it, folded into a row that was already there (the header is two
+ * rows: view and tools, then find / where / new):
  *
- * Focus rides in the same row rather than getting its own control — it is one
- * more way to narrow the same list, and a full-width switch above the row made
- * it look like a different screen.
+ *   which sessions   Focus | All     two views of one list, so a two-way
+ *                                    switch that names both
+ *   on which daemon  All daemons ▾   one button and a menu, however many
+ *                                    daemons there are
+ *
+ * They used to be one run of look-alike chips: "Focus" was a toggle that never
+ * said what the other choice was, "All" sat beside it meaning all *daemons*,
+ * and a chip per daemon wrapped onto a second row from the third daemon on.
+ *
+ * Called on every status frame, so it only touches the page when what it
+ * would draw has changed (otherwise the menu would close under the pointer).
  */
-function renderFilters() {
-  const box = $("filters");
-  box.textContent = "";
+let filtersDrawn = "";
 
-  // Focus toggle. Always present (a single-daemon setup still wants it), and
-  // the count only shows while Focus is on, where it means "rows below".
-  if (state.profiles.some((p) => focusCapable(p))) {
-    const n = (focusMode() && state.rowsFocus && !state.loading)
-      ? visibleRows().length : 0;
-    const chip = el("button", "chip chip-focus");
-    chip.type = "button";
-    chip.setAttribute("aria-pressed", String(focusMode()));
-    chip.title = focusMode()
-      ? "Showing only the projects you are carrying"
-      : "Show only the projects you are carrying";
-    chip.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none"'
-      + ' stroke="currentColor" stroke-width="2.2" stroke-linecap="round"'
-      + ' stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg>';
-    chip.appendChild(document.createTextNode(n ? `Focus · ${n}` : "Focus"));
-    chip.addEventListener("click", () => setFocusMode(!focusMode()));
-    box.appendChild(chip);
+function renderFilters() {
+  const box = $("filters");          // row 1: Focus | All
+  const dbox = $("filter-daemon");   // row 2, beside the search field
+  const focusOn = focusMode();
+  // Only daemons that are switched on. One that is off in Daemons has no
+  // connection to speak of, and used to be listed here as "connecting…".
+  const active = enabledProfiles();
+  const hasFocus = active.some((p) => focusCapable(p));
+  // How many sessions are being carried. Only the Focus fetch knows: the
+  // other view is a page of the newest sessions, which holds some of them.
+  let carried = 0;
+  if (hasFocus && focusOn && state.rowsFocus && !state.loading) {
+    carried = visibleRows().length;
+  }
+  const picked = state.filter ? active.find((p) => p.id === state.filter) || null : null;
+  if (state.filter && !picked) state.filter = null;   // removed, or switched off
+  const daemons = active.length >= 2 ? active.map((p) => {
+    const feed = state.feeds[p.id];
+    return [p.id, p.name || p.baseUrl, profileHostAccent(p), (feed && feed.error) || "",
+            connOf(p.id), p.version || ""];
+  }) : [];
+  const sig = JSON.stringify([hasFocus, focusOn, carried, state.focusTally || "",
+                              state.filter, daemons]);
+  if (sig === filtersDrawn) return;
+  filtersDrawn = sig;
+  const menuWasOpen = !!dbox.querySelector(".filter-pop");
+  box.textContent = "";
+  dbox.textContent = "";
+
+  if (hasFocus) {
+    const seg = el("div", "seg");
+    seg.setAttribute("role", "group");
+    seg.setAttribute("aria-label", "Which sessions to list");
+    const mk = (label, on, title, count) => {
+      const b = el("button", "seg-opt", label);
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(on));
+      b.title = title;
+      if (count) b.appendChild(el("span", "seg-count", String(count)));
+      return b;
+    };
+    const f = mk("Focus", focusOn, "Only the sessions you are carrying"
+      + (focusOn ? `\n${carried ? carried + " in focus: " : ""}${state.focusTally || "Nothing in focus"}` : ""), carried);
+    const a = mk("All", !focusOn, "Every session, newest first", 0);
+    f.addEventListener("click", () => { if (!focusMode()) setFocusMode(true); });
+    a.addEventListener("click", () => { if (focusMode()) setFocusMode(false); });
+    seg.append(f, a);
+    box.appendChild(seg);
   }
 
-  if (state.profiles.length < 2) return;
-  const mk = (label, id, accent) => {
-    const b = el("button", "chip", label);
-    b.type = "button";
-    b.setAttribute("aria-pressed", String(state.filter === id));
-    if (accent) {
-      b.style.setProperty("--chip", accent);
-      b.style.setProperty("--chip-soft", accent + "24");
-    }
-    b.addEventListener("click", () => {
-      state.filter = state.filter === id ? null : id;
-      renderFilters();
-      renderSessions();
-      renderStatus();
-    });
-    return b;
+  if (!daemons.length) return;
+  const broken = daemons.filter((d) => d[3]).length;
+  const btn = el("button", "chip chip-daemon");
+  btn.type = "button";
+  btn.setAttribute("aria-haspopup", "true");
+  btn.setAttribute("aria-expanded", "false");
+  if (picked) {
+    btn.style.setProperty("--chip", profileHostAccent(picked));
+    btn.style.setProperty("--chip-soft", profileHostAccent(picked) + "24");
+    btn.setAttribute("aria-pressed", "true");
+  }
+  if (picked) {
+    btn.appendChild(el("span", "chip-daemon-name", picked.name || picked.baseUrl));
+  } else {
+    // Every daemon: a funnel, not words — this sits beside the search field.
+    const ico = el("span", "chip-daemon-ico");
+    ico.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none"'
+      + ' stroke="currentColor" stroke-width="1.9" stroke-linecap="round"'
+      + ' stroke-linejoin="round"><path d="M4 6h16l-6 7v5l-4 2v-7z"/></svg>';
+    btn.appendChild(ico);
+  }
+  btn.setAttribute("aria-label", picked
+    ? `Showing ${picked.name || picked.baseUrl} only — choose a daemon`
+    : "Showing every daemon — choose one");
+  if (broken) {
+    const warn = el("span", "chip-daemon-warn");
+    warn.title = broken === 1 ? "One daemon cannot be reached" : `${broken} daemons cannot be reached`;
+    warn.setAttribute("aria-label", warn.title);
+    btn.appendChild(warn);
+  }
+  btn.appendChild(el("span", "chip-caret", "▾"));
+  btn.title = picked ? `Only ${picked.name || picked.baseUrl} — choose a daemon`
+                     : "Every daemon — choose one";
+  dbox.appendChild(btn);
+
+  const closeMenu = () => {
+    const pop = dbox.querySelector(".filter-pop");
+    if (pop) pop.remove();
+    btn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("click", onOutside, true);
+    document.removeEventListener("keydown", onKey, true);
   };
-  box.appendChild(mk("All", null, null));
-  state.profiles.forEach((p) => {
-    const b = mk(p.name || p.baseUrl, p.id, profileHostAccent(p));
-    const feed = state.feeds[p.id];
-    if (feed && feed.error) {
-      b.classList.add("chip-error");
-      b.title = feed.error;
-    } else if (p.host) {
-      b.title = p.host + (p.version ? ` · v${p.version}` : "");
-    }
-    box.appendChild(b);
+  const onOutside = (e) => { if (!dbox.contains(e.target)) closeMenu(); };
+  const onKey = (e) => {
+    if (e.key !== "Escape") return;
+    e.stopPropagation();
+    closeMenu();
+    btn.focus();
+  };
+  const pick = (id) => {
+    state.filter = id;
+    closeMenu();
+    renderStatus();     // redraws this row
+    renderSessions();
+    dbox.querySelector(".chip-daemon")?.focus();
+  };
+  const openMenu = ({ focus = true } = {}) => {
+    const pop = el("div", "filter-pop");
+    pop.setAttribute("role", "menu");
+    // One entry: a dot in the colour of its state, the name, and under it
+    // the state in words (never colour alone), then what identifies it.
+    const item = (id, name, st, word, detail) => {
+      const o = el("button", "pop-opt filter-opt st-" + st);
+      o.type = "button";
+      o.setAttribute("role", "menuitemradio");
+      o.setAttribute("aria-checked", String((state.filter || null) === id));
+      o.setAttribute("aria-selected", String((state.filter || null) === id));
+      o.appendChild(el("span", "filter-state"));
+      const text = el("span", "filter-text");
+      text.appendChild(el("span", "pop-main", name));
+      const hint = el("span", "pop-hint");
+      hint.appendChild(el("span", "filter-word", word));
+      if (detail) hint.appendChild(document.createTextNode(" · " + detail));
+      text.appendChild(hint);
+      o.appendChild(text);
+      o.addEventListener("click", () => pick(id));
+      return o;
+    };
+    // A daemon whose list could not be fetched is offline whatever its
+    // stream last said.
+    const stateOf = (error, conn) => (error ? "offline" : conn);
+    const up = daemons.filter((d) => stateOf(d[3], d[4]) === "live").length;
+    pop.appendChild(el("div", "filter-head", "Show sessions from"));
+    pop.appendChild(item(null, "All daemons",
+      up === daemons.length ? "live" : (up ? "reconnecting" : "offline"),
+      up === daemons.length ? `${up} connected` : `${up} of ${daemons.length} connected`, ""));
+    daemons.forEach(([id, name, _accent, error, conn, version]) => {
+      const st = stateOf(error, conn);
+      // The name says which daemon it is; where it lives is in Daemons.
+      const detail = error || (version ? "v" + version : "");
+      pop.appendChild(item(id, name, st, CONN_WORD[st] || st, detail));
+    });
+    dbox.appendChild(pop);
+    btn.setAttribute("aria-expanded", "true");
+    document.addEventListener("click", onOutside, true);
+    document.addEventListener("keydown", onKey, true);
+    if (focus) (pop.querySelector('[aria-checked="true"]') || pop.firstChild).focus();
+  };
+  btn.addEventListener("click", () => {
+    if (dbox.querySelector(".filter-pop")) closeMenu(); else openMenu();
   });
+  // A daemon came or went while the menu was open: draw it again, open.
+  if (menuWasOpen) openMenu({ focus: false });
+}
+
+/**
+ * The list is repainted on every status frame (about once a second per
+ * daemon). It used to be emptied and rebuilt each time, which restarted the
+ * "working" animation, dropped keyboard focus and hover, and made a row jump
+ * under the pointer. Now each row is built, compared with what is already on
+ * screen, and only swapped in if it differs.
+ */
+const listNodes = new Map();   // key -> { html, node }
+
+function reconcileList(host, want) {
+  const keys = new Set(want.map(([k]) => k));
+  for (const [k, old] of listNodes) {
+    if (!keys.has(k)) { old.node.remove(); listNodes.delete(k); }
+  }
+  let cursor = host.firstChild;
+  for (const [key, fresh] of want) {
+    const html = fresh.outerHTML;
+    const old = listNodes.get(key);
+    let node;
+    let refocus = false;
+    if (old && old.html === html && old.node.parentNode === host) {
+      node = old.node;
+      node._row = fresh._row;   // same pixels, newer data behind the click
+    } else {
+      node = fresh;
+      if (old) {
+        refocus = old.node.contains(document.activeElement);
+        if (cursor === old.node) cursor = cursor.nextSibling;
+        old.node.remove();
+      }
+      listNodes.set(key, { html, node });
+    }
+    if (node === cursor) cursor = cursor.nextSibling;
+    else host.insertBefore(node, cursor);
+    // A row that changed while it had the keyboard keeps it.
+    if (refocus && node.focus) node.focus({ preventScroll: true });
+  }
+  while (cursor) { const next = cursor.nextSibling; cursor.remove(); cursor = next; }
 }
 
 function renderSessions() {
   const host = $("sessions");
-  host.textContent = "";
+  const want = [];
   const rows = visibleRows();
   const working = workingKeys();
   const blocked = blockedKeys();
@@ -1945,7 +2150,7 @@ function renderSessions() {
     // never paint it twice (list + main). This column is the session list.
     const empty = el("div", "empty list-quiet");
     empty.appendChild(el("p", null, "Sessions appear here."));
-    host.appendChild(empty);
+    reconcileList(host, [["empty:none", empty]]);
     return;
   }
   if (!rows.length && !state.loading) {
@@ -1954,23 +2159,27 @@ function renderSessions() {
     empty.appendChild(el("p", null, state.query
       ? `No session on any daemon mentions “${state.query}”.`
       : "Start a session and it will show up here, whichever daemon runs it."));
-    host.appendChild(empty);
+    reconcileList(host, [["empty:" + state.query, empty]]);
     return;
   }
 
   let lastDay = "";
+  const used = new Set();
   rows.forEach((row) => {
     if (!state.query) {
       const day = dayLabel(row.sortKey);
       if (day !== lastDay) {
         lastDay = day;
-        host.appendChild(el("div", "day", day));
+        want.push(["day:" + day, el("div", "day", day)]);
       }
     }
     const key = `${row.profileId}/${row.session.id}`;
     const pal = providerOf(row.provider);
     const btn = el("button", "row");
     btn.type = "button";
+    // Handlers read the row through the node: a row that is kept on screen
+    // is handed the newer data (see reconcileList).
+    btn._row = row;
     if (state.open && state.open.profileId === row.profileId
         && state.open.sessionId === row.session.id) {
       btn.setAttribute("aria-current", "true");
@@ -1995,7 +2204,7 @@ function renderSessions() {
       done.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        setRowFocus(row, false);
+        setRowFocus(btn._row, false);
       });
       btn.appendChild(done);
     }
@@ -2026,9 +2235,18 @@ function renderSessions() {
       : "Daemon profile";
     meta.appendChild(hostTag);
     const folder = String(row.session.cwd || "").replace(/\/+$/, "").split("/").pop();
-    if (folder) meta.appendChild(el("span", "tag", folder));
-    if (row.session.git_branch) meta.appendChild(el("span", "tag", "⑂ " + row.session.git_branch));
-    if (blocked.has(key)) meta.appendChild(el("span", "tag waiting", "waiting for you"));
+    if (folder) {
+      const f = el("span", "row-folder", folder);
+      f.title = row.session.cwd;
+      meta.appendChild(f);
+    }
+    if (row.session.git_branch) {
+      const br = el("span", "row-branch", "⑂ " + row.session.git_branch);
+      br.title = "Branch " + row.session.git_branch;
+      meta.appendChild(br);
+    }
+    // The daemon's word for it, so the list, Focus and every other client agree.
+    if (blocked.has(key)) meta.appendChild(el("span", "tag waiting", FOCUS_LABELS.needs_answer));
     // Focus state tag. Same row layout as any other session — one more chip.
     // Focus mode only: in All mode it is noise on rows the human never
     // enrolled, and it duplicates the working dot. Suppressed when the row
@@ -2047,14 +2265,16 @@ function renderSessions() {
       meta.appendChild(tag);
     }
     if (row.session.id) {
-      // Full id when space allows (CSS ellipsis); click copies without opening.
-      const idTag = el("button", "tag session-id-tag", row.session.id);
+      // Enough of the id to tell two sessions apart; the tooltip has all of
+      // it and a click copies all of it, without opening the session.
+      const idTag = el("button", "tag session-id-tag", String(row.session.id).slice(0, 8));
+      idTag.setAttribute("aria-label", "Copy session id " + row.session.id);
       idTag.type = "button";
       idTag.title = `Copy session id\n${row.session.id}`;
       idTag.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        copySessionId(row.session.id);
+        copySessionId(btn._row.session.id);
       });
       meta.appendChild(idTag);
     }
@@ -2062,19 +2282,26 @@ function renderSessions() {
 
     btn.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      if (row.session.id) copySessionId(row.session.id);
+      if (btn._row.session.id) copySessionId(btn._row.session.id);
     });
 
     const preview = listPreview(row.session, state.query);
     if (preview) {
       const box = el("div", "row-preview");
-      highlightInto(box, String(preview).replace(/\s+/g, " ").trim(), state.query);
+      // One line of what was last said, as prose: the markdown marks of a
+      // reply ("**Progress:**") are noise at this size.
+      highlightInto(box, String(preview).replace(/\*\*|__|`/g, "")
+        .replace(/\s+/g, " ").trim(), state.query);
       btn.appendChild(box);
     }
 
-    btn.addEventListener("click", () => openSession(row));
-    host.appendChild(btn);
+    btn.addEventListener("click", () => openSession(btn._row));
+    let nodeKey = "row:" + key;
+    while (used.has(nodeKey)) nodeKey += "+";
+    used.add(nodeKey);
+    want.push([nodeKey, btn]);
   });
+  reconcileList(host, want);
 }
 
 /** Case-insensitive query highlight, built with DOM nodes (never innerHTML). */
@@ -2093,6 +2320,86 @@ function highlightInto(host, text, query) {
   if (at < text.length) host.appendChild(document.createTextNode(text.slice(at)));
 }
 
+// ------------------------------------------------- panes (compact width)
+//
+// At phone width the list and the chat take turns. Opening a session shows
+// the chat and adds a history entry, so the browser's Back (and the Android
+// back gesture) returns to the list instead of leaving the page.
+
+const compactQuery = window.matchMedia("(max-width: 720px)");
+const isCompact = () => compactQuery.matches;
+let chatHistoryPushed = false;
+
+function showChatPane(on) {
+  const app = $("app");
+  const was = app.classList.contains("show-chat");
+  app.classList.toggle("show-chat", !!on);
+  if (on && !was && isCompact() && !chatHistoryPushed) {
+    try {
+      history.pushState({ pane: "chat" }, "");
+      chatHistoryPushed = true;
+    } catch { /* file:// or a sandboxed frame: the Back button still works */ }
+  }
+}
+
+function backToList() {
+  if (chatHistoryPushed) history.back();   // popstate does the rest
+  else showChatPane(false);
+}
+
+window.addEventListener("popstate", () => {
+  chatHistoryPushed = false;
+  $("app").classList.remove("show-chat");
+});
+
+// ---------------------------------------------------------- follow scroll
+//
+// New output follows the bottom only while the reader is already there.
+// Someone reading earlier messages keeps their place and gets a pill that
+// counts what arrived; it takes them down when they choose.
+
+const NEAR_BOTTOM_PX = 120;
+let unseenLive = 0;
+
+function nearBottom(view) {
+  return view.scrollHeight - view.scrollTop - view.clientHeight <= NEAR_BOTTOM_PX;
+}
+
+function syncJumpPill() {
+  const pill = $("jump-latest");
+  if (!pill) return;
+  const view = $("transcript");
+  const show = !!state.open && !nearBottom(view)
+    && view.scrollHeight > view.clientHeight + NEAR_BOTTOM_PX;
+  pill.classList.toggle("hidden", !show);
+  if (!show) { unseenLive = 0; return; }
+  pill.textContent = unseenLive > 0
+    ? `↓ ${unseenLive} new`
+    : "↓ Jump to latest";
+  // Keep it just above the composer, whatever height that currently is.
+  // Keep it just above whatever is docked under the transcript.
+  const h = ["composer", "gate"].reduce((sum, id) => {
+    const n = $(id);
+    return sum + (n && !n.classList.contains("hidden") ? n.offsetHeight : 0);
+  }, 0);
+  pill.style.setProperty("--jump-bottom", `${h + 14}px`);
+}
+
+function scrollToLatest(smooth) {
+  const view = $("transcript");
+  unseenLive = 0;
+  state.stick = true;
+  state.gestureAt = 0;
+  // Animate a short hop; a long transcript would take seconds to glide.
+  const far = view.scrollHeight - view.scrollTop > view.clientHeight * 3;
+  if (smooth && !far && view.scrollTo) {
+    view.scrollTo({ top: view.scrollHeight, behavior: "smooth" });
+  } else {
+    view.scrollTop = view.scrollHeight;
+  }
+  syncJumpPill();
+}
+
 // ------------------------------------------------------------ transcript
 
 function applyAccent(provider) {
@@ -2107,6 +2414,9 @@ function applyAccent(provider) {
 async function openSession(row) {
   stopJobWatch();
   closeLiveTui();
+  showChatPane(true);
+  clearGate();
+  unseenLive = 0;
   // Bump openGen BEFORE any await so an in-flight loadTail/pollJob from the
   // previous session can never paint into this transcript (two running jobs
   // used to cross-wire session A text into session B).
@@ -2133,6 +2443,11 @@ async function openSession(row) {
   $("chat-head").classList.remove("hidden");
   syncShareButton();
   $("composer").classList.remove("hidden");
+  closePop();
+  syncComposer();
+  syncChangesButton();
+  side.msg = "";      // a commit message belongs to the session it was typed in
+  if (side.open) { side.data = null; side.out = ""; side.form = false; loadChanges(); }
   $("chat-title").textContent = row.session.title || "Session";
   renderChatSub();
   updateLiveTuiButton();
@@ -2238,6 +2553,303 @@ function syncShareButton() {
   const open = state.open;
   const profile = open && profileById(open.profileId);
   btn.classList.toggle("hidden", !shareCapable(profile));
+}
+
+// ----------------------------------------------------------------- changes
+//
+// What the agent changed, before you answer it: the session folder's working
+// tree against its last commit. Read-only on the daemon; commit and push are
+// explicit actions here, run through the same /api/shell as a "!command".
+
+const side = { open: false, loading: false, data: null, error: "", gen: 0, out: "", form: false, busy: false, msg: "" };
+
+function syncChangesButton() {
+  const btn = $("btn-changes");
+  if (!btn) return;
+  const profile = state.open && profileById(state.open.profileId);
+  const can = !!(profile && profile.changes && state.open.session
+    && state.open.session.cwd);
+  btn.classList.toggle("hidden", !can);
+  btn.setAttribute("aria-pressed", String(side.open));
+  if (!can && side.open) closeSide();
+}
+
+function openSide() {
+  if (!state.open) return;
+  side.open = true;
+  side.out = "";
+  side.form = false;
+  $("side").classList.remove("hidden");
+  $("app").classList.add("with-side");
+  $("btn-changes").setAttribute("aria-pressed", "true");
+  loadChanges();
+  // On a narrow window the pane covers everything: put focus inside it.
+  if (window.matchMedia("(max-width: 1100px)").matches) $("side-back").focus();
+}
+
+function closeSide() {
+  const hadFocus = $("side").contains(document.activeElement);
+  side.open = false;
+  side.gen += 1;
+  $("side").classList.add("hidden");
+  $("app").classList.remove("with-side");
+  $("btn-changes").setAttribute("aria-pressed", "false");
+  // In a narrow window the button lives in the More menu, which is closed.
+  if (hadFocus) {
+    const btn = $("btn-changes");
+    (btn.offsetParent ? btn : $("btn-more")).focus();
+  }
+}
+
+async function loadChanges() {
+  if (!side.open || !state.open) return;
+  const profile = profileById(state.open.profileId);
+  const sid = state.open.sessionId;
+  const gen = ++side.gen;
+  side.loading = true;
+  side.error = "";
+  renderSide();
+  try {
+    const data = await call(profile,
+      `/api/sessions/${encodeURIComponent(sid)}/changes`, { timeout: 30000 });
+    if (gen !== side.gen) return;
+    side.data = data;
+  } catch (e) {
+    if (gen !== side.gen) return;
+    side.error = e.message || "Could not read the changes";
+  }
+  side.loading = false;
+  renderSide();
+}
+
+/** Split one unified diff into per-file sections. */
+function splitDiff(text) {
+  const out = [];
+  let cur = null;
+  String(text || "").split("\n").forEach((line) => {
+    if (line.startsWith("diff --git ")) {
+      const m = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
+      cur = { path: m ? m[2] : line.slice(11), lines: [] };
+      out.push(cur);
+      return;
+    }
+    if (cur) cur.lines.push(line);
+  });
+  return out;
+}
+
+/**
+ * What kind of line this is. `inHunk` is false for a file's header, the only
+ * place "--- a/x" and "+++ b/x" are names: after the first "@@", a line that
+ * starts "---" is a removed line whose text starts "--" (a SQL comment, a
+ * Markdown rule), and it must be shown as removed.
+ */
+function diffLineClass(line, inHunk) {
+  if (line.startsWith("@@")) return "hunk";
+  if (!inHunk) return "meta";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  if (line.startsWith(" ")) return "";
+  return "meta";
+}
+
+function renderSide() {
+  const body = $("side-body");
+  const sub = $("side-sub");
+  const foot = $("side-foot");
+  const keepScroll = body.scrollTop;
+  body.textContent = "";
+  foot.textContent = "";
+  foot.classList.add("hidden");
+  const d = side.data;
+  if (side.out) body.appendChild(el("pre", "side-out", side.out));
+  if (side.loading && !d) {
+    sub.textContent = "";
+    const note = el("div", "side-note");
+    note.appendChild(el("span", "spinner"));
+    note.appendChild(document.createTextNode(" Reading the working tree…"));
+    body.appendChild(note);
+    return;
+  }
+  if (side.error) {
+    sub.textContent = "";
+    body.appendChild(el("div", "side-note err", side.error));
+    return;
+  }
+  if (!d) return;
+  if (!d.repo) {
+    sub.textContent = d.cwd || "";
+    body.appendChild(el("div", "side-note",
+      "This session's folder is not a git repository, so there is nothing to compare with."));
+    return;
+  }
+  const bits = [d.branch || "detached"];
+  if (d.ahead) bits.push(`↑${d.ahead}`);
+  if (d.behind) bits.push(`↓${d.behind}`);
+  const files = d.files || [];
+  bits.push(files.length
+    ? `${files.length} ${files.length === 1 ? "file" : "files"} · +${d.added} −${d.removed}`
+    : "no changes");
+  sub.textContent = bits.join(" · ") + (side.loading ? " · refreshing…" : "");
+  sub.title = d.root || "";
+
+  if (!files.length) {
+    body.appendChild(el("div", "side-note",
+      "Nothing differs from the last commit."
+      + (d.ahead ? ` ${d.ahead} ${d.ahead === 1 ? "commit is" : "commits are"} not pushed yet.` : "")));
+  } else {
+    const sections = splitDiff(d.diff);
+    const anchors = new Map();
+    const list = el("ul", "chg-files");
+    files.forEach((f) => {
+      const li = el("li");
+      const row = el("button", "chg-file");
+      row.type = "button";
+      row.appendChild(el("span", "chg-path", f.from ? `${f.from} → ${f.path}` : f.path));
+      row.appendChild(el("span", "chg-kind k-" + String(f.status).replace(/\s+/g, "-"), f.status));
+      const count = el("span", "chg-count");
+      if (f.binary) count.textContent = "binary";
+      else if (f.added || f.removed) {
+        count.appendChild(el("span", "chg-add", "+" + f.added));
+        count.appendChild(document.createTextNode(" "));
+        count.appendChild(el("span", "chg-del", "−" + f.removed));
+      }
+      row.appendChild(count);
+      row.addEventListener("click", () => {
+        const target = anchors.get(f.path);
+        if (target) target.scrollIntoView({ block: "start" });
+      });
+      // No section to jump to: binary, too large, or past the diff's cap.
+      row.disabled = !sections.some((sec) => sec.path === f.path);
+      li.appendChild(row);
+      list.appendChild(li);
+    });
+    body.appendChild(list);
+    if (d.more_files) {
+      body.appendChild(el("div", "side-note", `…and ${d.more_files} more files not listed.`));
+    }
+    sections.forEach((sec) => {
+      const box = el("section", "diff-file");
+      box.appendChild(el("div", "diff-name", sec.path));
+      const pre = el("pre", "diff-lines");
+      let inHunk = false;
+      sec.lines.forEach((line) => {
+        if (line.startsWith("@@")) inHunk = true;
+        if (!inHunk && /^(index |similarity index |new file mode|deleted file mode|old mode|new mode)/.test(line)) return;
+        const cls = diffLineClass(line, inHunk);
+        pre.appendChild(el("span", "diff-line" + (cls ? " " + cls : ""), line || " "));
+      });
+      box.appendChild(pre);
+      anchors.set(sec.path, box);
+      body.appendChild(box);
+    });
+    if (d.truncated) {
+      body.appendChild(el("div", "side-note",
+        "The diff is too long to show in full. The file list above is complete."));
+    }
+  }
+  body.scrollTop = keepScroll;
+
+  // Git actions. Each one says exactly what it will run.
+  if (!files.length && !d.ahead && !d.can_publish) return;
+  foot.classList.remove("hidden");
+  if (side.form) {
+    const msg = el("textarea");
+    msg.id = "side-commit-msg";
+    msg.placeholder = "Commit message";
+    msg.setAttribute("aria-label", "Commit message");
+    foot.appendChild(msg);
+    foot.appendChild(el("span", "help",
+      `Stages and commits all ${files.length} changed ${files.length === 1 ? "file" : "files"} on ${d.branch || "this branch"}.`));
+    const cancel = el("button", null, "Cancel");
+    cancel.type = "button";
+    cancel.addEventListener("click", () => { side.form = false; renderSide(); });
+    const go = el("button", "primary", "Commit");
+    go.type = "button";
+    // Kept until a commit succeeds: a failed one (a hook, no user.email, a
+    // timeout) must not cost the message.
+    msg.value = side.msg || "";
+    go.disabled = !msg.value.trim() || side.busy;
+    msg.addEventListener("input", () => {
+      side.msg = msg.value;
+      go.disabled = !msg.value.trim() || side.busy;
+    });
+    go.addEventListener("click", () => {
+      const text = msg.value.trim();
+      if (!text) return;
+      // Single-quoted for the shell: the message is data, never syntax.
+      runGit("git add -A && git commit -m '" + text.replace(/'/g, "'\\''") + "'",
+             { commit: true });
+    });
+    foot.appendChild(cancel);
+    foot.appendChild(go);
+    msg.focus();
+    return;
+  }
+  if (files.length) {
+    const commit = el("button", null, "Commit…");
+    commit.type = "button";
+    commit.disabled = side.busy;
+    commit.addEventListener("click", () => { side.form = true; renderSide(); });
+    foot.appendChild(commit);
+  }
+  // Push what is ahead of the upstream; or, for a branch that has none yet
+  // and somewhere to go (the daemon says so: not a detached HEAD, not a
+  // repository without an origin), publish it and track it.
+  if ((d.upstream && d.ahead) || d.can_publish) {
+    const cmd = d.upstream ? "git push" : "git push -u origin HEAD";
+    const push = el("button", null, d.upstream ? `Push ${d.ahead}` : "Publish branch");
+    push.type = "button";
+    push.disabled = side.busy;
+    push.title = cmd;
+    push.addEventListener("click", () => {
+      const where = d.upstream ? ` to ${d.upstream}` : " to origin";
+      if (!window.confirm(`Push ${d.branch || "this branch"}${where}? Others will see these commits.`)) return;
+      runGit(cmd);
+    });
+    foot.appendChild(push);
+  }
+  foot.appendChild(el("span", "help", side.busy ? "Running…" : ""));
+}
+
+/** Run one git command in the session's folder and show what it printed. */
+async function runGit(command, { commit = false } = {}) {
+  if (!state.open || side.busy) return;
+  const profile = profileById(state.open.profileId);
+  // Which session this was started in. Not side.gen: every reload of the
+  // pane bumps that (a turn ending, Refresh), and the result was then
+  // dropped without a repaint, leaving "Running…" on a dead footer.
+  const { profileId, sessionId } = state.open;
+  side.busy = true;
+  side.form = false;
+  renderSide();
+  let out = "";
+  let ok = false;
+  try {
+    const res = await call(profile, "/api/shell", {
+      method: "POST",
+      timeout: 40000,
+      body: { command, session_id: sessionId,
+              cwd: (side.data && side.data.root) || state.open.session.cwd || "" },
+    });
+    ok = !res.exit_code;
+    out = `$ ${command.split(" -m ")[0]}\n` + ((res.output || "").trim() || "(no output)")
+      + (res.exit_code ? `\n(exit code ${res.exit_code})` : "");
+  } catch (e) {
+    out = `$ ${command.split(" -m ")[0]}\n${e.message || "failed"}`;
+  }
+  side.busy = false;
+  // Another session was opened, or the pane closed, while this ran: its
+  // output belongs to neither. The pane is still repainted.
+  const same = side.open && state.open
+    && state.open.profileId === profileId && state.open.sessionId === sessionId;
+  if (!same) { renderSide(); return; }
+  side.out = out;
+  if (commit) {
+    if (ok) side.msg = "";
+    else side.form = true;      // back to the form, message intact
+  }
+  loadChanges();
 }
 
 /**
@@ -2514,17 +3126,81 @@ function openLiveTui() {
   // straight back.
   focusLiveTuiPane();
   updateLiveTuiCapture();
-  pollLiveTui(true);
+  startLiveTuiFeed();
+}
+
+/**
+ * Where frames come from. A daemon ≥ 2.22 pushes one the moment the pane
+ * changes (GET /sse/sessions/<id>/tui), so an echo is one hop behind the
+ * key. Older daemons are polled every 400 ms, as before.
+ */
+function startLiveTuiFeed() {
+  stopLiveTuiFeed();
+  const open = state.open;
+  const profile = open && profileById(open.profileId);
+  if (!profile) return;
+  if (!profile.tuiStream || typeof EventSource === "undefined") {
+    startLiveTuiPolling();
+    return;
+  }
+  const gen = state.openGen;
+  const { profileId, sessionId } = open;
+  // EventSource cannot send headers; the daemon takes the token in the query
+  // on its stream endpoints (same as /sse/status).
+  const src = new EventSource(profile.baseUrl.replace(/\/+$/, "")
+    + `/sse/sessions/${encodeURIComponent(sessionId)}/tui?ansi=1&token=`
+    + encodeURIComponent(profile.token));
+  state.liveTuiStream = src;
+  let first = true;
+  src.onmessage = (ev) => {
+    if (state.liveTuiStream !== src) return;
+    if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) { src.close(); return; }
+    let frame = null;
+    try { frame = JSON.parse(ev.data); } catch { return; }
+    paintLiveTuiFrame(frame, first);
+    first = false;
+  };
+  src.onerror = () => {
+    if (state.liveTuiStream !== src) return;
+    if (src.readyState === EventSource.CLOSED) {
+      // Refused outright (an old proxy, a daemon restarting under us): poll
+      // for now, and ask for the stream again shortly. Polling used to be
+      // where this ended, for as long as the pane stayed open.
+      state.liveTuiStream = null;
+      startLiveTuiPolling();
+      state.liveTuiRetry = setTimeout(() => {
+        if (state.liveTui && isOpenStill(gen, profileId, sessionId)) startLiveTuiFeed();
+      }, LIVE_TUI_STREAM_RETRY_MS);
+      return;
+    }
+    $("live-tui-status").textContent = "Host TUI · reconnecting…";
+    $("live-tui-status").classList.remove("live");
+    first = true;   // repaint whatever comes back, even if it looks the same
+  };
+}
+
+const LIVE_TUI_STREAM_RETRY_MS = 10000;
+
+function startLiveTuiPolling() {
   clearInterval(state.liveTuiTimer);
+  pollLiveTui(true);
   state.liveTuiTimer = setInterval(() => pollLiveTui(false), 400);
+}
+
+function stopLiveTuiFeed() {
+  clearInterval(state.liveTuiTimer);
+  state.liveTuiTimer = null;
+  clearTimeout(state.liveTuiRetry);
+  state.liveTuiRetry = null;
+  if (state.liveTuiStream) state.liveTuiStream.close();
+  state.liveTuiStream = null;
 }
 
 function closeLiveTui() {
   flushLiveTuiText();
   state.liveTui = false;
   state.liveTuiKeys = false;
-  clearInterval(state.liveTuiTimer);
-  state.liveTuiTimer = null;
+  stopLiveTuiFeed();
   const box = $("live-tui");
   if (box) box.classList.add("hidden");
   const tr = $("transcript");
@@ -2543,6 +3219,14 @@ async function pollLiveTui(force) {
   const sessionId = state.open.sessionId;
   const profile = profileById(profileId);
   if (!profile) return;
+  // One request at a time. The timer used to send another every 400 ms
+  // whether or not the last had come back, so a daemon that was slow to
+  // answer was sent more work the slower it got.
+  if (state.liveTuiPolling) {
+    if (force) state.liveTuiPollAgain = true;
+    return;
+  }
+  state.liveTuiPolling = true;
   try {
     // Colour clients opt in; default daemon payload is plain for BB.
     const frame = await call(
@@ -2551,12 +3235,32 @@ async function pollLiveTui(force) {
     );
     // Drop the frame if the user switched sessions (or left Live TUI).
     if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) return;
+    paintLiveTuiFrame(frame, force);
+  } catch (e) {
+    if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) return;
+    $("live-tui-status").textContent = e.message || "Live TUI error";
+    $("live-tui-status").classList.remove("live");
+  } finally {
+    state.liveTuiPolling = false;
+    if (state.liveTuiPollAgain) {
+      // A repaint was asked for (a key was sent, another session was opened)
+      // while this one was out.
+      state.liveTuiPollAgain = false;
+      pollLiveTui(true);
+    }
+  }
+}
+
+/** Draw one frame, however it arrived (pushed or polled). */
+function paintLiveTuiFrame(frame, force) {
+  {
     const status = $("live-tui-status");
     const pane = $("live-tui-pane");
     const screen = $("live-tui-screen");
     if (!frame || frame.attached === false) {
       status.textContent = frame?.error || "No host TUI attached";
       status.classList.remove("live");
+      state.liveTuiSeq = 0;
       if (force || !pane.dataset.hadFrame) {
         screen.textContent = frame?.error
           || "No interactive TUI for this session. Start a turn in Interactive mode.";
@@ -2590,10 +3294,6 @@ async function pollLiveTui(force) {
       ? `Host TUI · job ${String(frame.job_id).slice(0, 8)}`
       : "Host TUI · live";
     status.classList.add("live");
-  } catch (e) {
-    if (!state.liveTui || !isOpenStill(gen, profileId, sessionId)) return;
-    $("live-tui-status").textContent = e.message || "Live TUI error";
-    $("live-tui-status").classList.remove("live");
   }
 }
 
@@ -2642,64 +3342,74 @@ function fitLiveTuiPane() {
   pane.style.fontSize = size + "px";
 }
 
-// Keystrokes are a stream, so they are sent as one: each POST waits for the
-// one before it. Fired off in parallel they can reach a threaded daemon out
-// of order, and "cd " arriving as "c d" is not a typo the user made.
-let _tuiSendChain = Promise.resolve();
+// Keystrokes are a stream, so they are sent as one, in order, and never two
+// requests at a time: fired off in parallel they can reach a threaded daemon
+// out of order, and "cd " arriving as "c d" is not a typo the user made.
+//
+// What is pressed while a request is in flight is gathered and goes out as
+// ONE request when it returns (`events`, agentremoted ≥ 2.22). Typing is then
+// never more than one round trip behind, however slow the link; before, each
+// key queued its own round trip and a fast typist outran a tunnel.
+const _tuiQueue = [];      // { text } | { keys } | { line: { text, keys } }
+let _tuiSending = false;
 
 function sendLiveTuiKeys(keys, text) {
-  // Anything queued as plain typing goes first, or a chord would overtake it.
-  if (!(text && !keys)) flushLiveTuiText();
-  _tuiSendChain = _tuiSendChain
-    .catch(() => {})
-    .then(() => postLiveTuiKeys(keys, text));
-  return _tuiSendChain;
+  if (text && keys && keys.length) {
+    // A whole line from the text field: text, a pause, then Enter. The
+    // pause is the daemon's (some harnesses read a fast CR as pasted text).
+    _tuiQueue.push({ line: { text, keys } });
+  } else if (text) {
+    const last = _tuiQueue[_tuiQueue.length - 1];
+    if (last && last.text !== undefined) last.text += text;
+    else _tuiQueue.push({ text });
+  } else if (keys && keys.length) {
+    _tuiQueue.push({ keys: keys.slice() });
+  }
+  pumpLiveTuiKeys();
 }
 
-async function postLiveTuiKeys(keys, text) {
-  if (!state.open || !state.open.sessionId) return;
-  const profile = profileById(state.open.profileId);
-  if (!profile) return;
-  const body = {};
-  if (keys && keys.length) body.keys = keys;
-  if (text) body.text = text;
-  if (!body.keys && !body.text) return;
+async function pumpLiveTuiKeys() {
+  if (_tuiSending) return;
+  _tuiSending = true;
   try {
-    await call(
-      profile,
-      `/api/sessions/${encodeURIComponent(state.open.sessionId)}/tui/keys`,
-      { method: "POST", body },
-    );
-    // Immediate refresh so typing feels snappy.
-    setTimeout(() => pollLiveTui(true), 80);
-  } catch (e) {
-    toast(e.message || "TUI input failed");
+    while (_tuiQueue.length) {
+      const open = state.open;
+      const profile = open && profileById(open.profileId);
+      if (!profile || !open.sessionId) { _tuiQueue.length = 0; break; }
+      let body;
+      if (_tuiQueue[0].line) {
+        body = _tuiQueue.shift().line;
+      } else if (profile.tuiStream) {
+        const events = [];
+        while (_tuiQueue.length && !_tuiQueue[0].line && events.length < 200) {
+          events.push(_tuiQueue.shift());
+        }
+        body = { events };
+      } else {
+        body = _tuiQueue.shift();      // older daemon: one item per request
+      }
+      try {
+        await call(
+          profile,
+          `/api/sessions/${encodeURIComponent(open.sessionId)}/tui/keys`,
+          { method: "POST", body },
+        );
+        // A pushed stream is already bringing the echo; a polled one is asked.
+        if (!state.liveTuiStream) setTimeout(() => pollLiveTui(true), 80);
+      } catch (e) {
+        _tuiQueue.length = 0;          // do not type the rest into a dead pane
+        toast(e.message || "TUI input failed");
+      }
+    }
+  } finally {
+    _tuiSending = false;
   }
 }
 
-// Typed characters are gathered for a frame or two before they are sent. One
-// POST per keystroke (each behind a CORS preflight) is fine on localhost and
-// miserable over a tunnel — a fast typist would outrun the link.
-let _tuiTextBuf = "";
-let _tuiTextTimer = null;
-const TUI_TYPE_COALESCE_MS = 35;
-
-function typeLiveTuiText(ch) {
-  _tuiTextBuf += ch;
-  if (_tuiTextTimer === null) {
-    _tuiTextTimer = setTimeout(flushLiveTuiText, TUI_TYPE_COALESCE_MS);
-  }
-}
-
-function flushLiveTuiText() {
-  if (_tuiTextTimer !== null) {
-    clearTimeout(_tuiTextTimer);
-    _tuiTextTimer = null;
-  }
-  const text = _tuiTextBuf;
-  _tuiTextBuf = "";
-  if (text) sendLiveTuiKeys(null, text);
-}
+// Kept for callers that flush before a chord: typed text now goes straight
+// into the queue, so there is nothing held back to flush.
+function typeLiveTuiText(ch) { sendLiveTuiKeys(null, ch); }
+function flushLiveTuiText() {}
 
 // ---- keyboard capture ---------------------------------------------------
 // Two keyboards share this view. The pane forwards raw keystrokes to the
@@ -2793,7 +3503,14 @@ function updateLiveTuiCapture() {
   const on = !!state.liveTuiKeys;
   const chip = $("btn-tui-capture");
   if (chip) {
-    chip.textContent = on ? "Keys: TUI" : "Keys: text field";
+    // Two spellings: the long one, and a short one for a narrow window
+    // where the chip shares a row with the soft keys.
+    chip.textContent = "";
+    chip.append(el("span", "cap-long", on ? "Keys: TUI" : "Keys: text field"),
+                el("span", "cap-short", on ? "Keys ✓" : "Keys"));
+    chip.setAttribute("aria-label", on
+      ? "Keystrokes go to the host terminal"
+      : "Keystrokes go to the text field");
     chip.setAttribute("aria-pressed", on ? "true" : "false");
     chip.classList.toggle("on", on);
   }
@@ -2824,6 +3541,15 @@ function renderChatSub() {
   const tag = el("span", "tag provider", tagText);
   tag.style.setProperty("--tag", pal.accent);
   sub.appendChild(tag);
+  // Only when it is NOT live: what is on screen may be out of date.
+  const conn = connOf(open.profileId);
+  if (conn === "reconnecting" || conn === "offline") {
+    const lost = el("span", "tag conn-tag conn-" + conn, CONN_TEXT[conn]);
+    lost.title = conn === "offline"
+      ? "This daemon cannot be reached. What you see may be out of date."
+      : "The live connection dropped and is being restored.";
+    sub.appendChild(lost);
+  }
   const cwd = open.session && open.session.cwd;
   if (cwd) sub.appendChild(el("span", "chat-cwd", cwd));
   const sid = open.sessionId;
@@ -2841,7 +3567,7 @@ function renderChatSub() {
   }
 }
 
-async function loadTail(gen = state.openGen, { keepLive = false } = {}) {
+async function loadTail(gen = state.openGen, { keepLive = false, follow = false } = {}) {
   const open = state.open;
   if (!open) return;
   const profileId = open.profileId;
@@ -2873,7 +3599,7 @@ async function loadTail(gen = state.openGen, { keepLive = false } = {}) {
     } else {
       state.items = fetched;
     }
-    renderTranscript(true);
+    renderTranscript(follow ? "follow" : true);
   } catch (e) {
     if (!isOpenStill(gen, profileId, sessionId)) return;
     $("transcript").innerHTML = "";
@@ -3017,6 +3743,7 @@ function renderTranscript(toBottom) {
   } else if (toBottom) {
     jumpBottom(view);
   }
+  syncJumpPill();
 }
 
 /**
@@ -3346,6 +4073,302 @@ function composerNote(text, isError) {
   if (!isError) composerNote._t = setTimeout(() => box.classList.add("hidden"), 2500);
 }
 
+// --------------------------------------- composer: per-turn chips, commands
+//
+// Execution, model and effort are choices about the NEXT message, so they
+// sit on the composer where the message is written. They used to be three
+// rows deep in the Options dialog, which is how a turn got sent headless by
+// someone who thought it was interactive.
+
+/** Daemon + harness the open session's next turn goes to. */
+function turnContext() {
+  if (!state.open) return null;
+  const profile = profileById(state.open.profileId);
+  if (!profile) return null;
+  return { profile, harness: sessionProvider(state.open.session, profile) || null };
+}
+
+const EXEC_HINT = {
+  interactive: "Runs in the terminal on the host. Slash commands work.",
+  headless: "Runs without a terminal. Messages queue while a turn runs.",
+};
+
+/** One entry per chip: what it is, what it can be, what it is now. */
+function turnChoices() {
+  const ctx = turnContext();
+  if (!ctx) return [];
+  const { profile, harness } = ctx;
+  const out = [];
+  const canInteractive = capOf(profile, "interactive", true, harness);
+  out.push({
+    key: "exec", label: "Execution",
+    values: canInteractive ? ["interactive", "headless"] : ["headless"],
+    current: execModeOf(profile, harness),
+    display: execModeLabel,
+    hint: (v) => EXEC_HINT[v] || "",
+    set: (v) => { profile.execMode = normalizeExecMode(v, canInteractive); },
+  });
+  const models = modelsOf(profile, harness);
+  if (capOf(profile, "can_set_model", true, harness) && models.length) {
+    out.push({
+      key: "model", label: "Model", values: models,
+      current: modelOf(profile, harness),
+      display: (v) => v, hint: () => "",
+      set: (v) => setModelFor(profile, harness, v),
+    });
+  }
+  const efforts = effortsOf(profile, harness);
+  if (capOf(profile, "can_set_effort", false, harness) && efforts.length) {
+    out.push({
+      key: "effort", label: "Effort", values: efforts,
+      current: effortOf(profile, harness),
+      display: (v) => v, hint: () => "",
+      set: (v) => setEffortFor(profile, harness, v),
+    });
+  }
+  return out;
+}
+
+// The one popup above the composer: a chip's menu, or the command list.
+const pop = {
+  kind: null,        // null | "chip" | "slash"
+  key: "",           // which chip
+  anchor: null,
+  items: [],         // slash: the commands on offer
+  index: 0,          // slash: highlighted row
+  dismissed: null,   // slash: the text Escape was pressed on
+};
+let chipSig = "";
+
+function closePop({ refocus = false } = {}) {
+  const box = $("composer-pop");
+  const anchor = pop.anchor;
+  if (pop.kind === "chip" && anchor) anchor.setAttribute("aria-expanded", "false");
+  pop.kind = null;
+  pop.key = "";
+  pop.anchor = null;
+  pop.items = [];
+  box.classList.add("hidden");
+  box.innerHTML = "";
+  $("prompt").removeAttribute("aria-activedescendant");
+  if (refocus && anchor && anchor.isConnected) anchor.focus();
+}
+
+/** Show the popup with its left edge on `anchor`, kept inside the composer. */
+function placePop(anchor) {
+  const box = $("composer-pop");
+  const host = $("composer").getBoundingClientRect();
+  box.classList.remove("hidden");
+  box.style.left = "0px";
+  const want = anchor.getBoundingClientRect().left - host.left;
+  const max = host.width - box.offsetWidth - 8;
+  box.style.left = Math.max(8, Math.min(want, max)) + "px";
+}
+
+function renderChips({ force = false } = {}) {
+  const bar = $("composer-chips");
+  const choices = turnChoices();
+  const sig = JSON.stringify(choices.map((c) => [c.key, c.current, c.values]));
+  if (!force && sig === chipSig) return;
+  chipSig = sig;
+  if (pop.kind === "chip") closePop();
+  bar.innerHTML = "";
+  bar.classList.toggle("hidden", !choices.length);
+  choices.forEach((c) => {
+    const b = el("button", "cchip");
+    b.type = "button";
+    b.dataset.key = c.key;
+    b.appendChild(el("span", "cchip-k", c.label));
+    b.appendChild(el("span", "cchip-v", c.display(c.current) || "default"));
+    const what = `${c.label}: ${c.display(c.current) || "default"}`;
+    b.title = what;
+    if (c.values.length < 2) {
+      // Nothing to choose, but still worth seeing what the turn will use.
+      b.disabled = true;
+      b.setAttribute("aria-label", what);
+    } else {
+      b.setAttribute("aria-label", what + ". Change");
+      b.setAttribute("aria-haspopup", "listbox");
+      b.setAttribute("aria-expanded", "false");
+      b.addEventListener("click", () => {
+        if (pop.kind === "chip" && pop.key === c.key) closePop();
+        else openChipMenu(c.key, b);
+      });
+    }
+    bar.appendChild(b);
+  });
+}
+
+function openChipMenu(key, anchor) {
+  const choice = turnChoices().find((c) => c.key === key);
+  const ctx = turnContext();
+  if (!choice || !ctx) return;
+  closePop();
+  const box = $("composer-pop");
+  box.setAttribute("role", "listbox");
+  box.setAttribute("aria-label", choice.label);
+  let current = null;
+  choice.values.forEach((v) => {
+    const o = el("button", "pop-opt");
+    o.type = "button";
+    o.setAttribute("role", "option");
+    o.setAttribute("aria-selected", String(v === choice.current));
+    o.appendChild(el("span", "pop-main", choice.display(v)));
+    const hint = choice.hint(v);
+    if (hint) o.appendChild(el("span", "pop-hint", hint));
+    o.addEventListener("click", () => {
+      choice.set(v);
+      store.save();
+      closePop();
+      syncComposer();
+      syncSlashMenu();
+      const again = $("composer-chips").querySelector(`[data-key="${key}"]`);
+      if (again) again.focus();
+    });
+    if (v === choice.current) current = o;
+    box.appendChild(o);
+  });
+  box.appendChild(el("div", "pop-foot",
+    `Used for every session on ${ctx.profile.name}`
+    + (ctx.profile.multi && ctx.harness && key !== "exec" ? ` · ${ctx.harness}` : "")));
+  pop.kind = "chip";
+  pop.key = key;
+  pop.anchor = anchor;
+  anchor.setAttribute("aria-expanded", "true");
+  placePop(anchor);
+  (current || box.querySelector(".pop-opt"))?.focus();
+}
+
+/** Arrow keys inside a chip's menu; Escape hands focus back to the chip. */
+function onPopKeydown(e) {
+  if (pop.kind !== "chip") return;
+  const opts = [...$("composer-pop").querySelectorAll(".pop-opt")];
+  const at = opts.indexOf(document.activeElement);
+  let to = -1;
+  if (e.key === "ArrowDown") to = (at + 1) % opts.length;
+  else if (e.key === "ArrowUp") to = (at - 1 + opts.length) % opts.length;
+  else if (e.key === "Home") to = 0;
+  else if (e.key === "End") to = opts.length - 1;
+  else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePop({ refocus: true }); return; }
+  else if (e.key === "Tab") { closePop(); return; }
+  if (to >= 0) { e.preventDefault(); opts[to].focus(); }
+}
+
+/** The commands this session's harness advertises that match what is typed. */
+function slashMatches(text) {
+  const ctx = turnContext();
+  if (!ctx || !/^\/[A-Za-z0-9_-]*$/.test(text)) return [];
+  const typed = text.toLowerCase();
+  return slashOf(ctx.profile, ctx.harness)
+    .filter((c) => c.toLowerCase().startsWith(typed));
+}
+
+/** Open, update or close the command list to match the composer text. */
+function syncSlashMenu() {
+  const prompt = $("prompt");
+  const text = prompt.value;
+  if (pop.kind === "chip") return;
+  const items = document.activeElement === prompt ? slashMatches(text) : [];
+  // Nothing to offer, or the only match is already typed out in full.
+  if (!items.length || (items.length === 1 && items[0] === text)
+      || pop.dismissed === text) {
+    if (pop.kind === "slash") closePop();
+    if (pop.dismissed !== text) pop.dismissed = null;
+    return;
+  }
+  pop.dismissed = null;
+  const ctx = turnContext();
+  const headless = execModeOf(ctx.profile, ctx.harness) !== "interactive";
+  const keep = pop.kind === "slash" ? pop.items[pop.index] : null;
+  pop.kind = "slash";
+  pop.anchor = prompt;
+  pop.items = items;
+  pop.index = Math.max(0, items.indexOf(keep));
+  const box = $("composer-pop");
+  box.innerHTML = "";
+  box.setAttribute("role", "listbox");
+  box.setAttribute("aria-label", "Commands");
+  items.forEach((cmd, i) => {
+    const o = el("div", "pop-opt");
+    o.id = "slash-opt-" + i;
+    o.setAttribute("role", "option");
+    o.appendChild(el("span", "pop-main mono", cmd));
+    // /rewind is done by the daemon itself, so it works in either mode.
+    if (headless && cmd !== "/rewind") o.appendChild(el("span", "pop-hint", "needs Interactive"));
+    // mousedown, not click: keep the caret in the composer.
+    o.addEventListener("mousedown", (e) => { e.preventDefault(); pickSlash(cmd); });
+    box.appendChild(o);
+  });
+  box.appendChild(el("div", "pop-foot", "↑↓ choose · Enter or Tab fill in · Esc close"));
+  paintSlashIndex();
+  placePop(prompt);
+}
+
+function paintSlashIndex() {
+  const box = $("composer-pop");
+  [...box.querySelectorAll(".pop-opt")].forEach((o, i) => {
+    o.setAttribute("aria-selected", String(i === pop.index));
+    if (i === pop.index) {
+      $("prompt").setAttribute("aria-activedescendant", o.id);
+      o.scrollIntoView({ block: "nearest" });
+    }
+  });
+}
+
+function pickSlash(cmd) {
+  const prompt = $("prompt");
+  prompt.value = cmd + " ";
+  closePop();
+  prompt.dispatchEvent(new Event("input"));
+  prompt.focus();
+  prompt.setSelectionRange(prompt.value.length, prompt.value.length);
+}
+
+/**
+ * Keys the command list takes from the composer. Returns true when the key
+ * was used, so Enter fills in a command instead of sending half of one.
+ */
+function slashKeydown(e) {
+  if (pop.kind !== "slash" || !pop.items.length) return false;
+  const n = pop.items.length;
+  if (e.key === "ArrowDown") pop.index = (pop.index + 1) % n;
+  else if (e.key === "ArrowUp") pop.index = (pop.index - 1 + n) % n;
+  else if (e.key === "Escape") {
+    pop.dismissed = $("prompt").value;
+    closePop();
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  } else if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+    const cmd = pop.items[pop.index];
+    // The command is already typed in full: Enter means send it.
+    if (e.key === "Enter" && cmd === $("prompt").value) { closePop(); return false; }
+    e.preventDefault();
+    pickSlash(cmd);
+    return true;
+  } else return false;
+  e.preventDefault();
+  paintSlashIndex();
+  return true;
+}
+
+/** Send says what it will do: a headless turn in progress queues the message. */
+function syncSendButton() {
+  const ctx = turnContext();
+  const running = !!(state.job && jobBelongsToOpen(state.job));
+  const queues = running && ctx
+    && execModeOf(ctx.profile, ctx.harness) !== "interactive";
+  const b = $("btn-send");
+  b.textContent = queues ? "Queue" : "Send";
+  b.title = queues ? "Runs after the current turn"
+    : (running ? "Typed into the running session" : "");
+}
+
+function syncComposer() {
+  renderChips();
+  syncSendButton();
+}
+
 /**
  * The composer's contract, same as the apps:
  *  - `!cmd` runs a shell command on the daemon in this session's folder;
@@ -3372,7 +4395,8 @@ async function send(text) {
 
   if (/^\/[A-Za-z][A-Za-z0-9_-]*$/.test(raw.split(" ")[0])) {
     const cmd = raw.split(" ")[0];
-    const interactive = execModeOf(profile) === "interactive";
+    const interactive = execModeOf(profile,
+      sessionProvider(state.open && state.open.session, profile)) === "interactive";
     // /rewind never reaches the harness — the daemon rewinds the session
     // journal itself (≥ 2.5) — so it is exempt from the interactive-only
     // rule. The advertised-list check below still gates it (old daemons
@@ -3400,7 +4424,8 @@ async function send(text) {
   appendLive({ role: "user", text: raw }, paint);
 
   if (job) {
-    const interactive = execModeOf(profile) === "interactive";
+    const interactive = execModeOf(profile,
+      sessionProvider(state.open && state.open.session, profile)) === "interactive";
     const jobId = job.id;
     try {
       await call(profile, `/api/jobs/${jobId}/${interactive ? "input" : "queue"}`,
@@ -3477,7 +4502,7 @@ async function runShell(command) {
     const harness = sessionProvider(state.open && state.open.session, profile);
     const started = await call(profile,
       `/api/sessions/${encodeURIComponent(openSessionId)}/continue`,
-      { method: "POST", body: { prompt, permission_mode: wireExecMode(execModeOf(profile)),
+      { method: "POST", body: { prompt, permission_mode: wireExecMode(execModeOf(profile, harness)),
                                 model: modelOf(profile, harness),
                                 effort: effortOf(profile, harness) } });
     if (started && started.job_id && isOpenStill(openGen, openProfileId, openSessionId)) {
@@ -3511,9 +4536,14 @@ function appendLive(item, { gen = state.openGen, profileId = null, sessionId = n
     syncWorkingTail();
     const view = $("transcript");
     // The reader's own prompt pulls them back down; the agent's output does
-    // not — reading back through a long turn has to survive new rows.
+    // not — reading back through a long turn has to survive new rows, and
+    // the pill counts what arrived below them.
     if (row.role === "user") jumpBottom(view);
-    else followBottom(view);
+    else {
+      followBottom(view);
+      if (!nearBottom(view)) unseenLive += 1;
+    }
+    syncJumpPill();
   } else {
     renderTranscript(true);
   }
@@ -3612,18 +4642,21 @@ function attachJob(jobId, sessionId = null, { adopted = false } = {}) {
   chimeLastStatusMs = 0;
   renderBanner();
   setIconIdle($("btn-stop"), false);
+  syncSendButton();
   state.jobTimer = setInterval(pollJob, 250);
   pollJob();
 }
 
 /** Tear down the job watch without touching the banner (see attachJob). */
 function detachJobWatch() {
+  clearGate();
   if (state.jobTimer) clearInterval(state.jobTimer);
   state.jobTimer = null;
   state.job = null;
   state.jobLastFetch = 0;
   // Keep the 34×34 Stop slot empty — do not collapse the row.
   setIconIdle($("btn-stop"), true);
+  syncSendButton();
 }
 
 function stopJobWatch() {
@@ -3779,18 +4812,18 @@ async function pollJob() {
   // the user can reopen (same idea as the phone's QuestionSheet banner).
   // Do not clear askedQuestion when pending flickers null (race while the
   // daemon applies picks) — that reopened the same panel after Submit.
+  syncGate(job);
   if (!job.pendingPermission) state.askedPermission = null;
+  // The card is idempotent per request id, so it is offered on every tick
+  // (also after leaving this session and coming back). What must not come
+  // back is an ask already answered here while the daemon catches up.
   if (job.pendingPermission
-      && job.pendingPermission.request_id !== state.askedPermission
-      && !state.answeredQuestions.has(job.pendingPermission.request_id)) {
+      && !state.answeredQuestions.has(`p:${job.pendingPermission.request_id}`)) {
     state.askedPermission = job.pendingPermission.request_id;
     showPermission(job.pendingPermission);
   }
   const qid = job.pendingQuestion && job.pendingQuestion.request_id;
-  if (job.pendingQuestion
-      && qid
-      && qid !== state.askedQuestion
-      && !state.answeredQuestions.has(qid)) {
+  if (job.pendingQuestion && qid && !state.answeredQuestions.has(qid)) {
     state.askedQuestion = qid;
     showQuestion(job.pendingQuestion);
   }
@@ -3826,6 +4859,8 @@ async function pollJob() {
     || snap.pending_question || snap.pending_permission);
   if (["done", "error", "stopped"].includes(snap.status) && !gateOpen) {
     const notes = [];
+    // The turn is over: what it changed is now worth a fresh look.
+    if (side.open) loadChanges();
     // Only real job errors — never "failed" for empty/unknown status.
     if (snap.status === "error") notes.push(snap.error || "The turn failed");
     if (snap.status === "stopped") notes.push("Stopped");
@@ -4086,17 +5121,72 @@ async function reopenPermission() {
 
 // ---------------------------------------------------------------- streams
 
+// Per daemon: "connecting" | "live" | "reconnecting" | "offline".
+// A dropped stream used to blank every "working" mark at once and say
+// nothing, so a turn that was still running looked finished.
+const CONN_GRACE_MS = 15000;
+const connTimers = {};
+const connRetry = {};          // profileId -> { delay, timer }
+
+function connOf(profileId) {
+  return (state.conn[profileId] && state.conn[profileId].state) || "connecting";
+}
+
+function setConn(id, next) {
+  const cur = state.conn[id];
+  if (cur && cur.state === next) return;
+  state.conn[id] = { state: next, since: Date.now() };
+  clearTimeout(connTimers[id]);
+  delete connTimers[id];
+  if (next === "reconnecting" || next === "connecting") {
+    // Keep showing what was last known while the browser retries, but not
+    // for ever: after the grace period it is no longer worth believing.
+    connTimers[id] = setTimeout(() => setConn(id, "offline"), CONN_GRACE_MS);
+  }
+  if (next === "offline") {
+    state.active[id] = [];
+    renderStatus();
+    renderSessions();
+    renderBanner();
+  }
+  renderConn();
+}
+
+function dropStream(id, { forget = false } = {}) {
+  const src = state.streams[id];
+  if (src) src.close();
+  delete state.streams[id];
+  if (connRetry[id]) clearTimeout(connRetry[id].timer);
+  if (forget) {
+    clearTimeout(connTimers[id]);
+    delete connTimers[id];
+    delete connRetry[id];
+    delete state.conn[id];
+    delete state.active[id];
+    delete state.sessionsRev[id];
+    // Tear-down is not "job finished" — forget without end-chimes.
+    chimeForgetProfile(id);
+  }
+}
+
+/** Reconnect every daemon that is not live, now (Retry, or the network is back). */
+function reconnectNow() {
+  enabledProfiles().forEach((p) => {
+    if (connOf(p.id) === "live") return;
+    dropStream(p.id);
+    if (connRetry[p.id]) connRetry[p.id].delay = 0;
+  });
+  syncStreams();
+}
+
 function syncStreams() {
   const wanted = new Map(enabledProfiles().map((p) => [p.id, p]));
   for (const [id, src] of Object.entries(state.streams)) {
     const p = wanted.get(id);
-    if (!p || src._url !== streamUrl(p)) {
-      src.close();
-      delete state.streams[id];
-      delete state.active[id];
-      // Tear-down is not "job finished" — forget without end-chimes.
-      chimeForgetProfile(id);
-    }
+    if (!p || src._url !== streamUrl(p)) dropStream(id, { forget: true });
+  }
+  for (const id of Object.keys(state.conn)) {
+    if (!wanted.has(id)) dropStream(id, { forget: true });
   }
   wanted.forEach((profile, id) => {
     if (state.streams[id]) return;
@@ -4105,26 +5195,101 @@ function syncStreams() {
     // accepts the token as a query parameter on this endpoint.
     const src = new EventSource(url);
     src._url = url;
+    if (!state.conn[id]) setConn(id, "connecting");
+    src.onopen = () => {
+      if (connRetry[id]) connRetry[id].delay = 0;
+      setConn(id, "live");
+    };
     src.onmessage = (ev) => {
       let jobs = [];
+      let newSession = false;
       try {
         const frame = JSON.parse(ev.data);
         jobs = frame.active || [];
         state.active[id] = jobs;
+        // sessions_rev (daemon ≥ 2.21) bumps when a new session appears —
+        // started from the host TUI, another client, or a headless turn.
+        // Re-list so it shows without a manual refresh. The first frame only
+        // records the baseline: connecting must not trigger a reload.
+        if (typeof frame.sessions_rev === "number") {
+          const prev = state.sessionsRev[id];
+          state.sessionsRev[id] = frame.sessions_rev;
+          if (prev !== undefined && frame.sessions_rev !== prev) newSession = true;
+        }
       } catch { return; }
+      setConn(id, "live");
       // Chimes for every session on this daemon, open or not.
       chimeFromActive(id, jobs);
       renderStatus();
       renderSessions();
       renderBanner();
+      if (newSession) refreshSessions();
     };
     src.onerror = () => {
-      // EventSource reconnects on its own; drop the stale view meanwhile.
       // Do NOT chime ends here — a glitch would bi-bi every running job.
-      state.active[id] = [];
+      if (state.streams[id] !== src) return;
+      if (src.readyState === EventSource.CLOSED) {
+        // The browser gave up (the daemon answered with an error, e.g. a
+        // rejected token). It will not retry on its own, so we do, slower
+        // each time.
+        setConn(id, "offline");
+        dropStream(id);
+        const r = connRetry[id] || (connRetry[id] = { delay: 0, timer: 0 });
+        r.delay = Math.min(60000, r.delay ? r.delay * 2 : 5000);
+        r.timer = setTimeout(syncStreams, r.delay);
+      } else if (connOf(id) === "live") {
+        // EventSource is reconnecting by itself; say so and keep the last
+        // known state on screen for the grace period.
+        setConn(id, "reconnecting");
+      }
     };
     state.streams[id] = src;
   });
+  renderConn();
+}
+
+const CONN_TEXT = { live: "live", connecting: "connecting…",
+                    reconnecting: "reconnecting…", offline: "offline" };
+// The same states as a daemon's standing in the daemon menu.
+const CONN_WORD = { live: "Connected", connecting: "Connecting…",
+                    reconnecting: "Reconnecting…", offline: "Offline" };
+
+/** The line under the session list, and the tag in the open session's header. */
+function renderConn() {
+  const box = $("conn");
+  if (!box) return;
+  const profiles = enabledProfiles();
+  box.classList.toggle("hidden", !profiles.length);
+  const states = profiles.map((p) => connOf(p.id));
+  const sig = JSON.stringify(profiles.map((p, i) => [p.id, p.name, states[i]]));
+  if (sig !== box.dataset.sig) {
+    box.dataset.sig = sig;
+    box.textContent = "";
+    const allLive = states.every((st) => st === "live");
+    if (allLive && profiles.length > 1) {
+      const item = el("span", "conn-item conn-live");
+      item.appendChild(el("span", "conn-dot"));
+      item.appendChild(document.createTextNode(`Live · ${profiles.length} daemons`));
+      box.appendChild(item);
+    } else {
+      profiles.forEach((p, i) => {
+        if (profiles.length > 1 && states[i] === "live") return;
+        const item = el("span", "conn-item conn-" + states[i]);
+        item.appendChild(el("span", "conn-dot"));
+        const text = profiles.length > 1 ? `${p.name} ${CONN_TEXT[states[i]]}`
+          : CONN_TEXT[states[i]].replace(/^./, (ch) => ch.toUpperCase());
+        item.appendChild(document.createTextNode(text));
+        box.appendChild(item);
+      });
+    }
+    if (states.some((st) => st === "offline" || st === "reconnecting")) {
+      const retry = el("button", "conn-retry", "Retry");
+      retry.type = "button";
+      retry.addEventListener("click", () => { reconnectNow(); refreshSessions(); });
+      box.appendChild(retry);
+    }
+    if (state.open) renderChatSub();
+  }
 }
 
 function streamUrl(profile) {
@@ -4173,12 +5338,53 @@ function modal({ title, build, actions = [], wide = false }) {
     buttons.push(b);
     foot.appendChild(b);
   });
+  // Remember where focus was the first time the dialog opens (a dialog that
+  // repaints itself must not overwrite that with one of its own buttons).
+  if (host.classList.contains("hidden")) {
+    const active = document.activeElement;
+    modalReturnFocus = active && !host.contains(active) ? active : null;
+  }
   host.classList.remove("hidden");
   host.querySelector(".modal-card").style.width = wide ? "min(900px, 100%)" : "";
+  if (!host.contains(document.activeElement)) {
+    const first = body.querySelector(MODAL_FOCUSABLE)
+      || foot.querySelector(".primary:not(:disabled)")
+      || $("modal-close");
+    if (first) first.focus({ preventScroll: true });
+  }
   return { body, foot };
 }
+
+let modalReturnFocus = null;
+const MODAL_FOCUSABLE = 'button:not(:disabled), [href], input:not(:disabled), '
+  + 'select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+/** Keep Tab inside the open dialog (it is aria-modal). */
+function trapModalTab(e) {
+  if (e.key !== "Tab") return;
+  const host = $("modal");
+  if (host.classList.contains("hidden")) return;
+  const items = [...host.querySelectorAll(MODAL_FOCUSABLE)]
+    .filter((n) => n.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  if (!host.contains(document.activeElement)) {
+    e.preventDefault(); first.focus();
+  } else if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault(); first.focus();
+  }
+}
+
 function closeModal() {
+  const wasOpen = !$("modal").classList.contains("hidden");
   $("modal").classList.add("hidden");
+  if (wasOpen && modalReturnFocus && document.contains(modalReturnFocus)) {
+    modalReturnFocus.focus({ preventScroll: true });
+  }
+  modalReturnFocus = null;
   // New-session (and other) modals may recolor chrome via applyAccent(harness);
   // restore the open session's brand, or neutral multi chrome when idle.
   if (state.open) {
@@ -4457,6 +5663,7 @@ function normalizeProfile(p) {
     focus: !!p.focus,
     share: !!p.share,
     linkedFiles: !!p.linkedFiles,
+    tuiStream: !!p.tuiStream,
     chunkedUpload: !!p.chunkedUpload,
     ...(typeof p.maxUploadMb === "number" && p.maxUploadMb > 0
       ? { maxUploadMb: p.maxUploadMb } : {}),
@@ -4779,54 +5986,245 @@ async function pendingNewJob(profile, jobId, prompt) {
 
 // ------------------------------------------------------ permission / ask
 
+// The open session's pending permission or question, shown as a card docked
+// above the composer. It used to be a dialog raised on arrival, and the page
+// has one dialog: a permission arriving while you filled in New session or
+// edited a daemon replaced that form. A card never takes anything over, can
+// be hidden without cancelling the ask, and keeps your picks across the
+// poll's repaints because it is only rebuilt when the request id changes.
+
+const gate = {
+  key: "",          // "p:<request_id>" | "q:<request_id>" | ""
+  kind: "",         // "permission" | "question" | "plan"
+  pending: null,
+  picks: [],
+  notes: [],
+  collapsed: false,
+  busy: false,
+};
+
+const isPlanQuestion = (questions) => questions.some((q) =>
+  (q.header || "").toLowerCase().includes("plan")
+  || (q.question || "").length > 800);
+
+function clearGate() {
+  if (!gate.key && $("gate").classList.contains("hidden")) return;
+  gate.key = "";
+  gate.kind = "";
+  gate.pending = null;
+  gate.busy = false;
+  const box = $("gate");
+  const pinned = nearBottom($("transcript"));
+  box.textContent = "";
+  box.classList.add("hidden");
+  if (pinned) $("transcript").scrollTop = $("transcript").scrollHeight;
+  syncJumpPill();
+}
+
+/** Drop the card once the daemon no longer has that ask pending. */
+function syncGate(job) {
+  if (!gate.key) return;
+  const perm = job && job.pendingPermission;
+  const q = job && job.pendingQuestion;
+  const live = (gate.kind === "permission")
+    ? perm && `p:${perm.request_id}` === gate.key
+    : q && `q:${q.request_id}` === gate.key
+      && !state.answeredQuestions.has(q.request_id);
+  if (!live && !gate.busy) clearGate();
+}
+
+function gateButton(label, cls, run) {
+  const b = el("button", cls, label);
+  b.type = "button";
+  b.addEventListener("click", async () => {
+    if (gate.busy) return;
+    gate.busy = true;
+    $("gate").querySelectorAll(".gate-foot button").forEach((x) => { x.disabled = true; });
+    try { await run(); } finally { gate.busy = false; }
+  });
+  return b;
+}
+
+function renderGate({ focus = false } = {}) {
+  const box = $("gate");
+  const pending = gate.pending;
+  if (!gate.key || !pending) { clearGate(); return; }
+  const hadFocus = box.contains(document.activeElement);
+  // The card takes height from the transcript: someone reading the latest
+  // output stays on the latest output.
+  const pinned = nearBottom($("transcript"));
+  box.textContent = "";
+  box.classList.remove("hidden");
+  box.classList.toggle("collapsed", gate.collapsed);
+  const inner = el("div", "gate-inner");
+
+  const head = el("div", "gate-head");
+  head.appendChild(el("span", "gate-dot"));
+  const questions = pending.questions || [];
+  const title = gate.kind === "permission"
+    ? `Allow ${pending.tool_name || "this tool"}?`
+    : gate.kind === "plan"
+      ? (questions[0].header || "Plan ready for review")
+      : (questions.length === 1
+        ? (questions[0].header || "The agent is asking")
+        : `The agent is asking ${questions.length} things`);
+  head.appendChild(el("div", "gate-title", title));
+  const toggle = el("button", "ghost gate-toggle", gate.collapsed ? "Show" : "Hide");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", String(!gate.collapsed));
+  toggle.title = gate.collapsed
+    ? "Show what is being asked"
+    : "Hide for now — this does not answer or cancel it";
+  toggle.addEventListener("click", () => {
+    gate.collapsed = !gate.collapsed;
+    renderGate({ focus: true });
+  });
+  head.appendChild(toggle);
+  inner.appendChild(head);
+
+  const body = el("div", "gate-body");
+  const foot = el("div", "gate-foot");
+  const profile = () => profileById(state.open.profileId);
+
+  if (gate.kind === "permission") {
+    if (pending.detail) body.appendChild(el("pre", null, pending.detail));
+    const answer = async (allow) => {
+      try {
+        await call(profile(), `/api/jobs/${state.job.id}/permission`,
+          { method: "POST", body: { request_id: pending.request_id, allow } });
+        state.answeredQuestions.add(`p:${pending.request_id}`);
+        clearGate();
+      } catch (e) { toast(e.message); renderGate(); }
+    };
+    foot.appendChild(el("div", "help", "The turn is paused until you answer."));
+    foot.appendChild(gateButton("Deny", "danger", () => answer(false)));
+    foot.appendChild(gateButton("Allow", "primary", () => answer(true)));
+  } else if (gate.kind === "plan") {
+    body.appendChild(el("div", "help",
+      "The agent wrote a plan and is waiting for you to approve it, ask for changes or quit."));
+    const open = el("button", "primary", "Review plan");
+    open.type = "button";
+    open.addEventListener("click", () => showPlanModal(pending));
+    foot.appendChild(open);
+  } else {
+    questions.forEach((q, qi) => {
+      const block = el("div", "q-block");
+      if (q.header && questions.length > 1) block.appendChild(el("div", "q-head", q.header));
+      if (q.question) {
+        const text = el("div", "md");
+        text.appendChild(renderMarkdown(q.question));
+        block.appendChild(text);
+      }
+      if (q.multi_select) block.appendChild(el("div", "help", "Pick as many as apply"));
+      (q.options || []).forEach((opt) => {
+        const active = gate.picks[qi].includes(opt.label);
+        const b = el("button", "q-opt");
+        b.type = "button";
+        b.setAttribute("aria-pressed", String(active));
+        b.appendChild(el("span", "qmark",
+          q.multi_select ? (active ? "[x]" : "[ ]") : (active ? "(o)" : "( )")));
+        const col = el("div");
+        col.appendChild(el("div", null, opt.label));
+        if (opt.description) col.appendChild(el("div", "qdesc", opt.description));
+        b.appendChild(col);
+        b.addEventListener("click", () => {
+          if (q.multi_select) {
+            const at = gate.picks[qi].indexOf(opt.label);
+            if (at >= 0) gate.picks[qi].splice(at, 1); else gate.picks[qi].push(opt.label);
+          } else {
+            gate.picks[qi] = [opt.label];
+          }
+          const top = body.scrollTop;
+          renderGate({ focus: true });
+          const nb = $("gate").querySelector(".gate-body");
+          if (nb) nb.scrollTop = top;
+        });
+        block.appendChild(b);
+        // Some options take free text with the pick (grok's "Request
+        // changes" becomes the revision note it then waits for).
+        if (q.note_for && q.note_for === opt.label && active) {
+          const input = el("input");
+          input.placeholder = q.note_hint || "Your answer";
+          input.value = gate.notes[qi];
+          input.addEventListener("input", () => { gate.notes[qi] = input.value; });
+          block.appendChild(input);
+        }
+      });
+      body.appendChild(block);
+    });
+    const settle = async (payload) => {
+      try {
+        await call(profile(), `/api/jobs/${state.job.id}/question`,
+          { method: "POST", body: { request_id: pending.request_id, ...payload } });
+        // Optimistically dismiss so a lagging poll cannot re-open this id.
+        state.answeredQuestions.add(pending.request_id);
+        state.askedQuestion = pending.request_id;
+        if (state.job) {
+          state.job.pendingQuestion = null;
+          state.job.lastPendingQuestion = null;
+        }
+        clearGate();
+        renderBanner();
+      } catch (e) { toast(e.message); renderGate(); }
+    };
+    foot.appendChild(gateButton("Cancel", null, () => settle({ cancel: true })));
+    const send = gateButton("Send answer", "primary",
+      () => settle({ answers: gate.picks, notes: gate.notes }));
+    send.disabled = gate.picks.some((p) => !p.length);
+    foot.appendChild(send);
+  }
+  inner.appendChild(body);
+  inner.appendChild(foot);
+  box.appendChild(inner);
+  if (focus || hadFocus) {
+    const target = gate.collapsed ? toggle
+      : (box.querySelector('.q-opt[aria-pressed="true"]')
+        || box.querySelector(".gate-foot .primary:not(:disabled)")
+        || box.querySelector(".q-opt") || toggle);
+    if (target) target.focus({ preventScroll: true });
+  }
+  if (pinned) $("transcript").scrollTop = $("transcript").scrollHeight;
+  syncJumpPill();
+}
+
+/** force = the banner's Respond / Answer: bring a hidden card back. */
 function showPermission(pending, { force = false } = {}) {
   if (!pending) return;
-  // Suppress a re-paint when the same modal is already up (poll ticks);
-  // force=true is the banner's "Respond" after a dismiss.
-  if (!force && !$("modal").classList.contains("hidden")
-      && $("modal-title").textContent.startsWith("Allow ")) {
-    return;
-  }
-  const answer = async (allow) => {
-    const profile = profileById(state.open.profileId);
-    try {
-      await call(profile, `/api/jobs/${state.job.id}/permission`,
-        { method: "POST", body: { request_id: pending.request_id, allow } });
-    } catch (e) { toast(e.message); }
-  };
-  modal({
-    title: `Allow ${pending.tool_name || "this tool"}?`,
-    build(body) {
-      if (pending.detail) {
-        const pre = el("pre", null, pending.detail);
-        pre.style.whiteSpace = "pre-wrap";
-        pre.style.fontFamily = "var(--mono)";
-        pre.style.fontSize = "12.5px";
-        body.appendChild(pre);
-      }
-      body.appendChild(el("div", "help",
-        "The turn is paused until you answer. Closing this dialog does not deny — use Respond in the banner to reopen."));
-    },
-    actions: [
-      { label: "Deny", danger: true, close: true, run: () => answer(false) },
-      { label: "Allow", primary: true, close: true, run: () => answer(true) },
-    ],
-  });
+  const key = `p:${pending.request_id}`;
+  if (gate.key === key && !force) return;   // poll tick: already showing
+  const same = gate.key === key;
+  gate.key = key;
+  gate.kind = "permission";
+  gate.pending = pending;
+  if (!same || force) gate.collapsed = false;
+  renderGate({ focus: force });
 }
 
 function showQuestion(pending, { force = false } = {}) {
   if (!pending) return;
   const questions = pending.questions || [];
   if (!questions.length) return;
-  // Plan approval and AskUserQuestion share this modal. Suppress re-paint
-  // when either is already open (poll ticks); force=true is banner Answer.
-  const openTitle = ($("modal-title").textContent || "");
-  if (!force && !$("modal").classList.contains("hidden")
-      && (openTitle.startsWith("The agent is asking")
-          || openTitle === "Plan approval"
-          || openTitle.startsWith("Review plan"))) {
-    return;
+  const key = `q:${pending.request_id}`;
+  const plan = isPlanQuestion(questions);
+  if (gate.key === key && !force) return;
+  if (gate.key !== key) {
+    gate.key = key;
+    gate.kind = plan ? "plan" : "question";
+    gate.pending = pending;
+    gate.picks = questions.map(() => []);
+    gate.notes = questions.map(() => "");
   }
+  gate.collapsed = false;
+  renderGate({ focus: force });
+  // A plan is pages long and is read in a dialog, but only when asked for:
+  // raising it on arrival is what used to replace other dialogs.
+  if (plan && force) showPlanModal(pending);
+}
+
+function showPlanModal(pending) {
+  if (!pending) return;
+  const questions = pending.questions || [];
+  if (!questions.length) return;
   const picks = questions.map(() => []);
   const notes = questions.map(() => "");
   const isPlan = questions.some((q) =>
@@ -4914,6 +6312,7 @@ function showQuestion(pending, { force = false } = {}) {
               state.job.lastPendingQuestion = null;
             }
             renderBanner();
+            clearGate();
           } catch (e) { toast(e.message); }
         },
       },
@@ -4935,6 +6334,7 @@ function showQuestion(pending, { force = false } = {}) {
               state.job.lastPendingQuestion = null;
             }
             renderBanner();
+            clearGate();
           } catch (e) { toast(e.message); }
         },
       },
@@ -5338,8 +6738,11 @@ async function openInbox() {
         const del = el("button", "danger", isDir ? "Delete folder" : "Delete");
         del.type = "button";
         del.addEventListener("click", async () => {
-          if (isDir && !window.confirm(
-            `Delete folder “${row.file.name}” on the host? All files inside are removed.`)) {
+          // Files too: it is gone from the host for good, one click away
+          // from Download.
+          if (!window.confirm(isDir
+            ? `Delete folder “${row.file.name}” on the host? All files inside are removed.`
+            : `Delete “${row.file.name}” on the host? It cannot be brought back.`)) {
             return;
           }
           try {
@@ -5650,43 +7053,16 @@ function openOptions() {
       // Open session's harness (multi tags each row); else profile default.
       const harness = sessionProvider(state.open && state.open.session, profile)
         || (profileHarnesses(profile)[0] || profile.provider || "");
-      const canInteractive = capOf(profile, "interactive", true, harness || null);
-      const modes = canInteractive ? ["interactive", "headless"] : ["headless"];
-      group("Execution", modes,
-        normalizeExecMode(execModeOf(profile, harness || null), canInteractive),
-        (v) => { profile.execMode = normalizeExecMode(v, canInteractive); },
-        execModeLabel);
-      body.appendChild(el("div", "help",
-        "Both modes auto-run tools (no permission prompts on the phone)."));
-      const models = modelsOf(profile, harness || null);
-      // BB Session sheet parity: show what the OPEN session last used.
+      // Execution, model and effort are per message: they are chips on the
+      // composer now, not rows in here.
       const sessionModel = String(
         (state.open.session && state.open.session.model) || "").trim();
-      // The picker is about this session: keep a model the CLI list omits
-      // (e.g. a CodeBuddy session on a model the help text does not list).
-      const modelOptions = (sessionModel && sessionModel !== "default"
-        && !models.includes(sessionModel))
-        ? [...models, sessionModel] : models;
       if (sessionModel && sessionModel !== "default" && sessionModel !== "interactive") {
         body.appendChild(el("div", "help",
           `This session last ran on ${sessionModel}`));
       }
-      if (capOf(profile, "can_set_model", true, harness || null) && modelOptions.length) {
-        // Prefer an explicit choice; otherwise show what the session ran on
-        // instead of the first list entry ("default" for CodeBuddy).
-        const stored = ((profile.modelByHarness || {})[
-          (harness || "").toLowerCase()] || "");
-        const cur = stored && modelOptions.includes(stored) ? stored
-          : (sessionModel && modelOptions.includes(sessionModel) ? sessionModel
-            : modelOf(profile, harness || null));
-        group("Model", modelOptions, cur,
-          (v) => { setModelFor(profile, harness || null, v); });
-      }
-      const efforts = effortsOf(profile, harness || null);
-      if (capOf(profile, "can_set_effort", false, harness || null) && efforts.length) {
-        const curE = effortOf(profile, harness || null);
-        group("Reasoning effort", efforts, curE, (v) => { setEffortFor(profile, harness || null, v); });
-      }
+      body.appendChild(el("div", "help",
+        "Execution, model and effort are set on the message box, under the transcript."));
       const toggle = (label, checked, onChange) => {
         const f = el("div", "field");
         const cb = el("label");
@@ -5739,6 +7115,10 @@ function wire() {
   document.addEventListener("pointerdown", unlock, { capture: true });
   document.addEventListener("keydown", unlock, { capture: true });
 
+  $("btn-back").addEventListener("click", backToList);
+  $("jump-latest").addEventListener("click", () => scrollToLatest(true));
+  $("transcript").addEventListener("scroll", syncJumpPill, { passive: true });
+  window.addEventListener("resize", syncJumpPill);
   $("btn-sound").addEventListener("click", () => setSoundCues(!soundCuesOn()));
   syncSoundButton();
 
@@ -5748,6 +7128,29 @@ function wire() {
   $("btn-new").addEventListener("click", openNewSession);
   $("btn-inbox").addEventListener("click", openInbox);
   $("btn-usage").addEventListener("click", openUsage);
+  // Narrow windows: the occasional actions are a menu under "More".
+  const more = $("chat-more"), moreBtn = $("btn-more");
+  const setMore = (open) => {
+    more.classList.toggle("open", open);
+    moreBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  moreBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = !more.classList.contains("open");
+    setMore(open);
+    if (open) more.querySelector("button:not(.hidden)")?.focus();
+  });
+  more.addEventListener("click", () => setMore(false));
+  document.addEventListener("click", () => setMore(false));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && more.classList.contains("open")) {
+      setMore(false);
+      moreBtn.focus();
+    }
+  });
+  $("btn-copy-id").addEventListener("click", () => {
+    if (state.open && state.open.sessionId) copySessionId(state.open.sessionId);
+  });
   $("btn-options").addEventListener("click", openOptions);
   $("btn-rename").addEventListener("click", openRename);
   $("btn-share")?.addEventListener("click", openShare);
@@ -5850,6 +7253,7 @@ function wire() {
     } catch (e) { toast(e.message); }
   });
   $("modal-close").addEventListener("click", closeModal);
+  document.addEventListener("keydown", trapModalTab);
   $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) closeModal(); });
 
   let searchTimer;
@@ -5885,7 +7289,32 @@ function wire() {
     prompt.style.height = Math.min(Math.max(prompt.scrollHeight, 38), 220) + "px";
   };
   prompt.addEventListener("input", grow);
+  prompt.addEventListener("input", syncSlashMenu);
+  prompt.addEventListener("focus", syncSlashMenu);
+  prompt.addEventListener("blur", () => { if (pop.kind === "slash") closePop(); });
+  $("composer-pop").addEventListener("keydown", onPopKeydown);
+  $("btn-changes").addEventListener("click", () => { if (side.open) closeSide(); else openSide(); });
+  $("side-close").addEventListener("click", closeSide);
+  $("side-back").addEventListener("click", closeSide);
+  $("side-refresh").addEventListener("click", loadChanges);
+  $("side").addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("modal").classList.contains("hidden")) { e.stopPropagation(); closeSide(); }
+  });
+  // The machine itself lost or regained its network.
+  window.addEventListener("offline", () => {
+    enabledProfiles().forEach((p) => { if (connOf(p.id) === "live") setConn(p.id, "reconnecting"); });
+  });
+  window.addEventListener("online", reconnectNow);
+  // A click anywhere else closes a chip's menu.
+  document.addEventListener("mousedown", (e) => {
+    if (pop.kind !== "chip") return;
+    if ($("composer-pop").contains(e.target) || (pop.anchor && pop.anchor.contains(e.target))) return;
+    closePop();
+  });
   prompt.addEventListener("keydown", (e) => {
+    // Enter that confirms an IME candidate (CJK input) is not a send.
+    if (e.isComposing || e.keyCode === 229) return;
+    if (slashKeydown(e)) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       const text = prompt.value;

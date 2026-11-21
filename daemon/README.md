@@ -19,6 +19,112 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.25.1** Second review pass. The transcript scan takes its file size after
+it holds the session's lock, not before: a request that waited for another's
+scan carried a stale size, read it as "the file got shorter" and scanned the
+whole transcript again, once per waiter. The Live TUI stream watches at the
+fast rate only for two seconds after a key into that session's pane; a pane
+that redraws by itself (a spinner) is watched at the warm rate, and a key in
+one session no longer wakes every other session's streams. On a
+multi-harness daemon the polled frame, stream and key routes use the
+remembered scope check instead of looking the session up on every request.
+`/api/ping` reports `changes: false` to isolated guests, who always got 403
+from the route. The Changes diff is read up to its cap and git is stopped
+there, instead of being read whole and cut down; reading untracked files
+stops after eight seconds. Web: a commit or push result is no longer dropped
+(leaving "Running…") when the pane reloads meanwhile; with one daemon on and
+one off, a failing daemon's error is shown again. Web and Android 1.7.15: a
+failed commit keeps its message. Android: the Execution chip and the send
+path follow the open session's harness, as on the web; after following a
+reply taller than the screen, the next row does not pull the reader off it.
+
+**2.25.0** Changes, after review. `GET /api/sessions/<id>/changes` now
+shows files git does not track yet as a diff against nothing, with their line
+counts (up to 40 files of 200 KB each): a client's Commit stages everything,
+so a new file must be reviewable too. `can_publish` says whether "publish this
+branch" makes sense (a real branch with commits, no upstream, an `origin`);
+clients offered it on a detached HEAD and in repositories with no remote. A
+`git status` that times out or fails is a 504 with the reason, where it used
+to be reported as "not a git repository". The transcript scan of 2.24.1
+re-checks the bytes before its saved offset, so a transcript rewound in
+place and regrown is scanned from the top rather than from a stale offset.
+Correction to the 2.24.0 note below: external diff drivers, textconv and
+fsmonitor are off, but clean filters named by the repository (git-lfs,
+git-crypt) still run, as they do for any `git status` there; without them
+every filtered file would read as modified. Web and Android 1.7.10: lines
+that start `---` or `+++` inside a hunk are shown as removed or added (they
+were dimmed as file names); Web: a git command's output is not shown under
+another session. Changes is on Web and Android; BlackBerry 10 and the pager
+do not show it (deferred: neither has a view that fits a diff, and neither
+is built in this tree's CI).
+
+**2.24.1** A long transcript no longer stalls the daemon. Finding a
+session's title source re-read the whole transcript whenever the file had
+changed, with no limit on how many requests did so at once. On a 245 MB
+transcript of a session that was still working, a client polling
+`GET /api/sessions/<id>/tui` (which looked the session up on every frame)
+piled up 800 threads each parsing the file, and the daemon stopped answering.
+Now the scan reads only what was appended since the last look, one reader per
+session at a time, and the Live TUI routes remember for a minute whether the
+caller may see the pane. Web: the polled Live TUI fallback sends one request
+at a time, and goes back to the pushed stream ten seconds after a refusal
+instead of polling for as long as the pane is open. Covered by
+`tests/scan_session_test.py`.
+
+**2.24.0** Changes: what differs from the last commit in a session's folder.
+`GET /api/sessions/<id>/changes` returns the branch (with upstream, ahead and
+behind), each changed file with its status and added/removed line counts, and
+the diff against `HEAD` (staged and unstaged together, capped at 400 KB with
+`truncated`). `{"repo": false}` when the folder is not a git work tree.
+Read-only: git runs with a fixed argument list and with external diff
+drivers, textconv filters and fsmonitor switched off (clean filters still
+run, see 2.25.0). Not available to
+isolated guest accounts. `/api/ping` advertises `changes: true`. Covered by
+`tests/changes_test.py`.
+
+**2.23.0** One vocabulary for session states. `/api/ping` carries `states`:
+the four focus states in urgency order, each with its `label`, a `role`
+(`attention`, `danger`, `ok`, `dim`) and a `color` / `color_light` (empty for
+"no state colour"). Clients had each chosen their own words and colours for
+"this session is waiting on you". Web and Android read it; the others keep
+their built-in values, which `tests/vocabulary_test.py` checks against the
+daemon's. The same test pins palettes and states to
+`tests/fixtures/vocabulary.json`, so a colour or label cannot change by
+accident.
+
+**2.22.0** The Live TUI is pushed, not polled. Clients asked for the pane
+every 400 ms, so a keystroke was echoed up to 400 ms plus a round trip late
+however fast the link was. `GET /sse/sessions/<id>/tui[?ansi=1]` now streams
+the same frame the moment the pane changes (measured: about 50 ms from key to
+echo on the host). The daemon looks at the pane every 40 ms right after a key
+or a change, eases to 120 ms and then 350 ms while it sits still, and a key
+sent through `…/tui/keys` wakes every open stream at once. With no TUI yet the
+stream says so and picks the pane up when one is launched, without a
+reconnect. `POST …/tui/keys` also takes `{"events": [{"text"}|{"keys"}, …]}`:
+ordered typing in one request, so a client can send whatever was pressed
+during its last round trip as one. A frame costs one tmux call instead of two
+and a key no longer runs a capture per harness plus an "is it alive" call
+before it is sent. `/api/ping` advertises `tui_stream: 1` (also in `caps`).
+The polled route is unchanged; BlackBerry, iOS and the pager still use it.
+Covered by `tests/tui_stream_test.py`.
+
+**2.21.0** New sessions show up on every client without a refresh. The
+status stream (`/sse/status`, `/ws/status`) carries `sessions_rev`, which
+goes up when a session is created or removed anywhere on the host - its own
+TUI, another phone, a headless turn - and clients re-list when it changes.
+One shared watcher fingerprints each store's per-project session counts at
+most every 2 s, so N connected clients cost one scan. Guests get a watcher
+over their own harness home. New capability `session_events` on every
+provider.
+**2.20.12** An interactive Claude turn in a folder Claude has never trusted
+starts. Claude Code 2.1.3xx lists "No, exit" first on its folder-trust
+dialog, so the blind Enter that dismisses startup screens picked it and the
+TUI quit with "exit status 1". The daemon now moves onto "Yes, I trust this
+folder" before confirming. Also: a Cursor chat whose project folder was
+renamed or moved is found again - the transcript is read from whichever
+project dir holds the newest copy, and its working folder is taken from a
+path that still exists instead of the stale one in meta.json.
+
 **2.20.11** Codex sessions are listed under the name Codex gave them.
 Codex summarises a thread into `threads.name` ("Diagnose Android app
 crashes") a turn or two in; the daemon was reading `threads.title`, which
@@ -772,6 +878,7 @@ GET  /api/sessions/<id>
 GET  /api/sessions/<id>/messages?offset=&limit=[&detail=steps]
 GET  /api/sessions/<id>/steps/<ref>             full text behind a truncated step
 GET  /api/sessions/<id>/file?path=<abs>         a host file the session linked (2.20+)
+GET  /api/sessions/<id>/changes                 working-tree changes of the session folder (2.24+)
 POST /api/sessions/new {cwd?, prompt, provider?, permission_mode?, …}
 POST /api/sessions/<id>/continue {prompt, permission_mode?, …}
 GET  /api/jobs
@@ -782,7 +889,9 @@ POST /api/jobs/<id>/stop
 POST /api/jobs/<id>/permission {request_id, allow}
 POST /api/jobs/<id>/input {prompt}              type a full line into interactive TUI
 GET  /api/sessions/<id>/tui[?ansi=1]            Live TUI pane (plain default; ansi=1 for SGR)
+GET  /sse/sessions/<id>/tui[?ansi=1]            SSE: the same frame, pushed when the pane changes
 POST /api/sessions/<id>/tui/keys {keys?,text?}  key/text injection into Live TUI
+                                 or {events:[…]}  ordered typing in one request (tui_stream)
 POST /api/attachments
 GET  /api/focus                                 focus rows only, urgency-sorted
 POST /api/focus/<key>/done                      take a row out of Focus
@@ -793,9 +902,16 @@ GET  /api/drop                                  files and folders (type=file|dir
                                                 skips macOS "Drop Box")
 GET  /api/drop/<name>                           a folder downloads as <name>.zip
 POST /api/drop/<name>/delete                    file or folder (recursive)
-GET  /ws/status
-GET  /sse/status
+GET  /ws/status                                 {type, active, sessions_rev}
+GET  /sse/status                                same frame as /ws/status
 ```
+
+`sessions_rev` (capability `session_events`) is a counter that goes up when
+the set of sessions changes - one started from the host TUI, another client or
+a headless turn, or one removed - but not on activity inside a session. A
+client keeps the last value per daemon, ignores the first frame after it
+connects, and re-lists when the value changes. It restarts at 0 with the
+daemon. A guest's stream counts only the guest's own sessions.
 
 ### Focus
 
@@ -832,9 +948,14 @@ overrides live in `focus.json` beside the config, shared by every client of the
 daemon so Focus looks the same on web, phone, BlackBerry and the pager.
 `/api/ping` reports `"focus": true`; clients gate the mode on it.
 
-Cap `live_tui` on `/api/ping` when the harness can host a tmux TUI. Clients
-poll `GET …/tui` (~2–5 Hz; plain by default, `?ansi=1` for colour) and send
-keys via `POST …/tui/keys`.
+Cap `live_tui` on `/api/ping` when the harness can host a tmux TUI. With
+`tui_stream: 1` a client opens `GET /sse/sessions/<id>/tui` (token in the
+query, like `/sse/status`) and is sent a frame whenever the pane, its job or
+its attached state changes, with a `:` keepalive every 15 s. Without it,
+clients poll `GET …/tui` (~2–5 Hz). Both are plain by default, `?ansi=1` for
+colour. Keys go to `POST …/tui/keys`; `{"events": [...]}` sends several
+`{text}` / `{keys}` items in order with no pause between them, while
+`{text, keys}` remains "a whole line, then Enter" with the settle pause.
 
 The frame carries `cols` — the host pane width (120) — so a client can size
 its font to the grid rather than reflowing it, and blank rows below the last

@@ -16,12 +16,14 @@ _PUSH_INTERVAL = 1.0
 _KEEPALIVE_INTERVAL = 15.0
 
 
-def serve_status(handler, jobs, active_fn=None):
+def serve_status(handler, jobs, active_fn=None, rev_fn=None):
     """Write SSE events until the client disconnects.
     Runs on the request's own thread (ThreadingHTTPServer).
 
     active_fn: optional callable → list of active job dicts (multi-provider
     root stream). When set, jobs may be None.
+    rev_fn: optional callable → int session revision; included as
+    `sessions_rev` so a client re-lists when a new session appears.
     """
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
@@ -40,7 +42,10 @@ def serve_status(handler, jobs, active_fn=None):
     try:
         while True:
             active = active_fn() if active_fn is not None else jobs.active_status()
-            payload = json.dumps({"type": "status", "active": active})
+            msg = {"type": "status", "active": active}
+            if rev_fn is not None:
+                msg["sessions_rev"] = rev_fn()
+            payload = json.dumps(msg)
             if payload != last_sent:
                 handler.wfile.write(("data: %s\n\n" % payload).encode("utf-8"))
                 handler.wfile.flush()

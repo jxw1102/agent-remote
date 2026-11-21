@@ -48,6 +48,7 @@ Endpoints (all under /api, all JSON):
   GET  /api/jobs                                  running/recent jobs
   GET  /ws/status                                 WebSocket: active-job status pushes
   GET  /sse/status                                SSE: active-job status pushes
+  GET  /sse/sessions/<id>/tui[?ansi=1]            SSE: Live TUI frames, pushed on change
   GET  /api/jobs/<id>?since=<seq>                 job status + new events
   POST /api/jobs/<id>/input {prompt}              type into an interactive TUI
   POST /api/jobs/<id>/queue {prompt}              queue a prompt behind the job
@@ -97,9 +98,11 @@ from urllib.parse import urlparse, parse_qs, unquote, quote
 from . import __version__
 from . import palette
 from . import accounts
+from . import changes
 from . import focus as focus_store
 from . import linked_files
 from . import shares as share_store
+from . import session_watch
 from . import ssestream
 from . import wstream
 from .live_tui import TUI_COLS, TUI_ROWS
@@ -112,7 +115,17 @@ _SESSION_STEP = re.compile(r"^/api/sessions/([^/]+)/steps/([^/]+)$")
 _SESSION_CONT = re.compile(r"^/api/sessions/([^/]+)/continue$")
 _SESSION_TUI = re.compile(r"^/api/sessions/([^/]+)/tui$")
 _SESSION_FILE = re.compile(r"^/api/sessions/([^/]+)/file$")
+_SESSION_CHANGES = re.compile(r"^/api/sessions/([^/]+)/changes$")
 _SESSION_TUI_KEYS = re.compile(r"^/api/sessions/([^/]+)/tui/keys$")
+_SESSION_TUI_STREAM = re.compile(r"^/sse/sessions/([^/]+)/tui$")
+# session id -> the runner whose TUI answered for it. A session never changes
+# harness, so this only saves probing every runner on every frame and key.
+_TUI_RUNNERS = {}
+# (account, isolate root, session id) -> (expires, may this caller see the
+# pane). The answer does not change while a pane is watched, and a polled
+# frame is asked for several times a second.
+_TUI_SCOPE = {}
+_TUI_SCOPE_TTL_S = 60.0
 # Same shape jobs.py runs as a daemon rewind.
 _TUI_REWIND_LINE = re.compile(r"^/rewind(?:\s+\d+)?$")
 _SESSION_ONE = re.compile(r"^/api/sessions/([^/]+)$")
@@ -1803,12 +1816,16 @@ class ApiHandler(BaseHTTPRequestHandler):
         guessing from the version string.
         """
         payload["tui_keys"] = 2
+        # 1: GET /sse/sessions/<id>/tui pushes frames, and POST …/tui/keys
+        # takes an ordered `events` list. Absent: poll GET …/tui.
+        payload["tui_stream"] = 1
         payload["tui_cols"] = TUI_COLS
         payload["tui_rows"] = TUI_ROWS
         caps = payload.get("caps")
         if isinstance(caps, dict):
             caps = dict(caps)
             caps["tui_keys"] = 2
+            caps["tui_stream"] = 1
             payload["caps"] = caps
 
     def _stamp_upload_caps(self, payload: dict) -> None:
@@ -1857,6 +1874,29 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _merged_active_status_scoped(self):
         return self._active_status_scoped()
+
+    def _sessions_rev(self):
+        """Session revision for the status stream; bumps on a new session.
+
+        A guest gets a watcher over its own harness home, so it neither
+        misses its own new sessions nor learns when the host starts one.
+        """
+        p = self.principal
+        if p is not None and p.is_guest and p.root:
+            return self._guest_session_watcher(p.root).rev()
+        watcher = getattr(self, "session_watcher", None)
+        return watcher.rev() if watcher is not None else 0
+
+    def _guest_session_watcher(self, root: str):
+        watchers = self.guest_session_watchers
+        with self.guest_session_watchers_lock:
+            w = watchers.get(root)
+            if w is None:
+                w = session_watch.SessionWatcher(
+                    {n: self._make_guest_store(n, root)
+                     for n in (self.bundles or {})})
+                watchers[root] = w
+            return w
 
     def _read_body(self):
         """Read and parse the request body.
@@ -2032,6 +2072,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "stop": True,
                     "projects": True,
                     "ws_status": True,
+                    "session_events": True,
                 }
                 for _n, b in bundle_items:
                     for key, val in (b.runner.capabilities() or {}).items():
@@ -2046,10 +2087,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 # Focus list support: clients gate the mode toggle,
                 # rename, and regenerate on this flag.
                 payload["focus"] = self.focus is not None
+                # One vocabulary for session states (labels + colours).
+                payload["states"] = palette.states()
                 payload["focus_states"] = list(focus_store.STATES)
                 payload["share"] = self.shares is not None
                 # GET /api/sessions/<id>/file: open a host path the agent linked.
                 payload["linked_files"] = True
+                # GET /api/sessions/<id>/changes: what differs from the last commit.
+                payload["changes"] = self._changes_allowed()
                 self._stamp_tui_caps(payload)
                 self._stamp_upload_caps(payload)
                 self._send_json(payload)
@@ -2099,10 +2144,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             # Focus list support: clients gate the mode toggle,
             # rename, and regenerate on this flag.
             payload["focus"] = self.focus is not None
+            # One vocabulary for session states (labels + colours).
+            payload["states"] = palette.states()
             payload["focus_states"] = list(focus_store.STATES)
             payload["share"] = self.shares is not None
             # GET /api/sessions/<id>/file: open a host path the agent linked.
             payload["linked_files"] = True
+            # GET /api/sessions/<id>/changes: what differs from the last commit.
+            payload["changes"] = self._changes_allowed()
             self._stamp_tui_caps(payload)
             self._stamp_upload_caps(payload)
             self._send_json(payload)
@@ -2132,12 +2181,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             # Hijacks the connection until the client leaves; nothing may
             # be written through the normal HTTP path afterwards.
             self.close_connection = True
-            wstream.serve_status(self, None, active_fn=self._active_status_scoped)
+            wstream.serve_status(self, None, active_fn=self._active_status_scoped,
+                                 rev_fn=self._sessions_rev)
             return
 
         if path == "/sse/status":
             self.close_connection = True
-            ssestream.serve_status(self, None, active_fn=self._active_status_scoped)
+            ssestream.serve_status(self, None, active_fn=self._active_status_scoped,
+                                   rev_fn=self._sessions_rev)
             return
 
         if path == "/api/usage":
@@ -2223,6 +2274,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_session_step(m.group(1), m.group(2))
             return
 
+        m = _SESSION_CHANGES.match(path)
+        if m:
+            self._send_session_changes(m.group(1))
+            return
+
         m = _SESSION_FILE.match(path)
         if m:
             self._send_session_file(m.group(1), query)
@@ -2231,6 +2287,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         m = _SESSION_TUI.match(path)
         if m:
             self._handle_tui_capture(m.group(1), query)
+            return
+
+        m = _SESSION_TUI_STREAM.match(path)
+        if m:
+            self._handle_tui_stream(m.group(1), query)
             return
 
         m = _SESSION_ONE.match(path)
@@ -2275,12 +2336,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/ws/status" and wstream.is_upgrade(self.headers):
             self.close_connection = True
             wstream.serve_status(
-                self, None, active_fn=self._merged_active_status_scoped)
+                self, None, active_fn=self._merged_active_status_scoped,
+                rev_fn=self._sessions_rev)
             return
         if path == "/sse/status":
             self.close_connection = True
             ssestream.serve_status(
-                self, None, active_fn=self._merged_active_status_scoped)
+                self, None, active_fn=self._merged_active_status_scoped,
+                rev_fn=self._sessions_rev)
             return
         if path == "/api/goals":
             out = []
@@ -2457,6 +2520,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._bind_bundle(name)
             self._send_session_step(m.group(1), m.group(2))
             return
+        m = _SESSION_CHANGES.match(path)
+        if m:
+            self._send_session_changes(m.group(1))
+            return
         m = _SESSION_FILE.match(path)
         if m:
             name, b, session = self._find_session(m.group(1))
@@ -2466,18 +2533,17 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._bind_bundle(name)
             self._send_session_file(m.group(1), query)
             return
+        m = _SESSION_TUI_STREAM.match(path)
+        if m:
+            if self._tui_route(m.group(1)):
+                self._handle_tui_stream(m.group(1), query)
+            return
         m = _SESSION_TUI.match(path)
         if m:
-            name, b, session = self._find_session(m.group(1))
-            if b is None:
-                # TUI may exist for a brand-new session before store indexes it.
+            # A TUI may exist for a brand-new session before the store
+            # indexes it; _tui_route lets that through.
+            if self._tui_route(m.group(1)):
                 self._handle_tui_capture(m.group(1), query)
-                return
-            if not self._session_in_scope(session or {}):
-                self._error(404, "session not found")
-                return
-            self._bind_bundle(name)
-            self._handle_tui_capture(m.group(1), query)
             return
         m = _SESSION_ONE.match(path)
         if m:
@@ -2844,13 +2910,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         m = _SESSION_TUI_KEYS.match(path)
         if m:
-            name, b, session = self._find_session(m.group(1))
-            if b is not None:
-                if not self._session_in_scope(session or {}):
-                    self._error(404, "session not found")
-                    return
-                self._bind_bundle(name)
-            self._handle_tui_keys(m.group(1), body)
+            if self._tui_route(m.group(1)):
+                self._handle_tui_keys(m.group(1), body)
             return
         m = _JOB_PERM.match(path)
         if m:
@@ -2951,6 +3012,48 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(400, str(e))
             return
         self._send_json({"ok": True, "goal": row})
+
+    def _changes_allowed(self) -> bool:
+        """Whether this caller may read a session folder's changes.
+
+        Not an isolated guest: git would run as the daemon's user on a tree
+        the guest owns. /api/ping advertises exactly this, so a guest's
+        client does not offer a Changes view that can only answer 403.
+        """
+        p = self.principal or accounts.main_principal()
+        return not (p.is_guest and p.isolate_root)
+
+    def _send_session_changes(self, session_id):
+        """GET /api/sessions/<id>/changes: the session folder's working tree.
+
+        Read-only (see changes.py). Same access rules as running a shell
+        command in that folder: the session must be in scope and its cwd
+        inside what this principal may touch.
+        """
+        _name, _b, session = self._find_session(session_id)
+        if session is None or not self._session_in_scope(session):
+            self._error(404, "session not found")
+            return
+        p = self.principal or accounts.main_principal()
+        if not self._changes_allowed():
+            self._error(403, "changes are not available for isolated accounts")
+            return
+        raw = session.get("cwd") or ""
+        cwd, cerr = accounts.confine_cwd(raw.strip() if isinstance(raw, str) else "", p)
+        if cerr:
+            self._error(403, cerr)
+            return
+        if not cwd or not os.path.isdir(cwd):
+            self._send_json({"ok": True, "repo": False, "cwd": cwd or ""})
+            return
+        try:
+            payload = changes.collect(cwd)
+        except changes.ChangesError as e:
+            self._error(504, str(e))
+            return
+        payload["ok"] = True
+        payload["cwd"] = cwd
+        self._send_json(payload)
 
     def _handle_shell(self, body):
         if not isinstance(body, dict) or not isinstance(body.get("command"), str) \
@@ -3313,25 +3416,119 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         self._error(404, "job not found")
 
+    def _tui_runners(self) -> list:
+        """Every runner that can host a TUI, the bound one first."""
+        out = []
+        for r in [self.runner] + [b.runner for b in (self.bundles or {}).values()]:
+            if r is not None and hasattr(r, "capture_tui") and r not in out:
+                out.append(r)
+        return out
+
     def _tui_runner_for_session(self, session_id: str):
         """Pick the runner that owns a live TUI for session_id (multi or single)."""
         sid = (session_id or "").strip()
         if not sid:
             return None
-        # Prefer the already-bound runner (path prefix or find_session).
-        if self.runner is not None and hasattr(self.runner, "capture_tui"):
-            frame = self.runner.capture_tui(sid)
-            if frame.get("attached"):
-                return self.runner
-        # Multi: probe every harness.
-        for b in (self.bundles or {}).values():
-            r = b.runner
-            if not hasattr(r, "capture_tui"):
-                continue
-            frame = r.capture_tui(sid)
-            if frame.get("attached"):
+        runners = self._tui_runners()
+        cached = _TUI_RUNNERS.get(sid)
+        if cached is not None and cached in runners:
+            return cached
+        for r in runners:
+            if r.capture_tui(sid).get("attached"):
+                self._remember_tui_runner(sid, r)
                 return r
         return self.runner if hasattr(self.runner or object(), "capture_tui") else None
+
+    @staticmethod
+    def _remember_tui_runner(sid: str, runner) -> None:
+        if len(_TUI_RUNNERS) > 512:
+            _TUI_RUNNERS.clear()
+        _TUI_RUNNERS[sid] = runner
+
+    def _tui_frame(self, session_id: str, want_ansi: bool) -> dict:
+        """One Live TUI frame, from whichever harness has the pane."""
+        from .live_tui import frame_payload
+        runners = self._tui_runners()
+        cached = _TUI_RUNNERS.get(session_id)
+        if cached is not None and cached in runners:
+            # Ask the known owner first: one capture, not one per harness.
+            runners.remove(cached)
+            runners.insert(0, cached)
+        last = None
+        for r in runners:
+            frame = r.capture_tui(session_id, ansi=want_ansi)
+            last = frame
+            if frame.get("attached"):
+                self._remember_tui_runner(session_id, r)
+                return frame
+        if last is not None:
+            return last
+        return frame_payload(
+            session_id, "", False,
+            error="live TUI not available on this daemon",
+            ansi=want_ansi,
+        )
+
+    def _tui_lookup(self, session_id: str):
+        """(may this caller see the pane, which harness owns the session).
+
+        Remembered for a minute per caller: finding the session means reading
+        its transcript, which is too much to do again for every polled frame
+        and every key. The harness is "" when the session is not indexed yet
+        (a brand-new TUI), which is allowed and not remembered.
+        """
+        p = self.principal
+        key = (getattr(p, "account", ""), getattr(p, "isolate_root", ""),
+               session_id)
+        now = time.time()
+        hit = _TUI_SCOPE.get(key)
+        if hit is not None and hit[0] > now:
+            return hit[1], hit[2]
+        name, _b, sess = self._find_session(session_id)
+        if sess is None and self.store is not None:
+            sess = self.store.get_session(session_id)
+        if sess is None:
+            return True, ""
+        ok = self._session_in_scope(sess)
+        if len(_TUI_SCOPE) > 512:
+            _TUI_SCOPE.clear()
+        _TUI_SCOPE[key] = (now + _TUI_SCOPE_TTL_S, ok, name or "")
+        return ok, name or ""
+
+    def _tui_in_scope(self, session_id: str) -> bool:
+        """Never show or drive another account's pane."""
+        return self._tui_lookup(session_id)[0]
+
+    def _tui_route(self, session_id: str) -> bool:
+        """Scope check and harness binding for a multi-harness TUI route.
+
+        False after answering 404. Goes through the same remembered lookup as
+        the handlers, so a polled frame or a key does not read the transcript.
+        """
+        ok, name = self._tui_lookup(session_id)
+        if not ok:
+            self._error(404, "session not found")
+            return False
+        if name and name in (self.bundles or {}):
+            self._bind_bundle(name)
+        return True
+
+    def _handle_tui_stream(self, session_id: str, query=None):
+        """GET /sse/sessions/<id>/tui — Live TUI frames, pushed when the pane
+        changes. Same frame as GET …/tui; `?ansi=1` for colour.
+
+        The session is looked up and scope-checked once, here, instead of on
+        every frame as the polled route has to.
+        """
+        from . import live_tui
+        if not self._tui_in_scope(session_id):
+            self._error(404, "session not found")
+            return
+        want_ansi = self._flag(query or {}, "ansi")
+        self.close_connection = True
+        live_tui.serve_stream(
+            self, lambda: self._tui_frame(session_id, want_ansi),
+            session_id=session_id)
 
     def _handle_tui_capture(self, session_id: str, query=None):
         """GET /api/sessions/<id>/tui — live host TUI pane text.
@@ -3339,46 +3536,69 @@ class ApiHandler(BaseHTTPRequestHandler):
         Default text is plain (no SGR, simplified chrome) for BB and simple
         clients. Colour clients pass ``?ansi=1`` (or true/yes/on).
         """
-        from .live_tui import frame_payload
-        # Never stream another account's pane.
-        sess = None
-        if self.store is not None:
-            sess = self.store.get_session(session_id)
-        if sess is None:
-            _n, _b, sess = self._find_session(session_id)
-        if sess is not None and not self._session_in_scope(sess):
+        if not self._tui_in_scope(session_id):
             self._error(404, "session not found")
             return
-        want_ansi = self._flag(query or {}, "ansi")
-        last = None
-        # Multi: try every harness so an attached TUI is found regardless of
-        # path binding; keep the last unattached frame for a useful error.
-        if self.bundles:
-            for b in self.bundles.values():
-                r = b.runner
-                if not hasattr(r, "capture_tui"):
-                    continue
-                frame = r.capture_tui(session_id, ansi=want_ansi)
-                last = frame
-                if frame.get("attached"):
-                    self._send_json(frame)
-                    return
-            if last is not None:
-                self._send_json(last)
-                return
-        if self.runner is not None and hasattr(self.runner, "capture_tui"):
-            self._send_json(self.runner.capture_tui(session_id, ansi=want_ansi))
+        self._send_json(self._tui_frame(
+            session_id, self._flag(query or {}, "ansi")))
+
+    def _handle_tui_events(self, session_id, events):
+        if not isinstance(events, list) or not events or len(events) > 256:
+            self._error(400, "'events' must be a list of 1-256 items")
             return
-        self._send_json(frame_payload(
-            session_id, "", False,
-            error="live TUI not available on this daemon",
-            ansi=want_ansi,
-        ))
+        steps = []
+        for ev in events:
+            if not isinstance(ev, dict):
+                self._error(400, "each event is {text} or {keys}")
+                return
+            text, keys = ev.get("text"), ev.get("keys")
+            if isinstance(text, str) and text:
+                steps.append({"text": text})
+            if isinstance(keys, list) and keys:
+                steps.append({"keys": keys})
+        if not steps:
+            self._error(400, "no input in 'events'")
+            return
+        if not self._tui_in_scope(session_id):
+            self._error(404, "session not found")
+            return
+        missing = "no interactive TUI for this session"
+        owner = self._tui_runner_for_session(session_id)
+        runners = [r for r in ([owner] + self._tui_runners())
+                   if r is not None and hasattr(r, "send_tui_keys")]
+        err = missing
+        for r in runners:
+            err = r.send_tui_keys(session_id, **steps[0])
+            if err != missing:
+                owner = r
+                break
+        if not err:
+            self._remember_tui_runner(session_id, owner)
+            for step in steps[1:]:
+                err = owner.send_tui_keys(session_id, **step)
+                if err:
+                    break
+        if err:
+            _TUI_RUNNERS.pop(session_id, None)
+            self._error(409, err)
+            return
+        self._send_json({"ok": True, "events": len(steps)})
 
     def _handle_tui_keys(self, session_id, body):
-        """POST /api/sessions/<id>/tui/keys {keys?:[], text?:str}."""
+        """POST /api/sessions/<id>/tui/keys {keys?:[], text?:str} or
+        {events:[{text}|{keys}, …]}.
+
+        `events` is typing, in order: a client gathers what was pressed while
+        its last request was in flight and sends it as one, instead of one
+        round trip per keystroke. No event waits on the one before it (the
+        text-then-keys pause is for a whole line sent with `text` + `keys`).
+        """
         if not isinstance(body, dict):
             self._error(400, "body must be JSON")
+            return
+        events = body.get("events")
+        if events is not None:
+            self._handle_tui_events(session_id, events)
             return
         keys = body.get("keys")
         text = body.get("text") or ""
@@ -3390,12 +3610,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if (not keys) and not text:
             self._error(400, "provide 'keys' and/or 'text'")
             return
-        sess = None
-        if self.store is not None:
-            sess = self.store.get_session(session_id)
-        if sess is None:
-            _n, _b, sess = self._find_session(session_id)
-        if sess is not None and not self._session_in_scope(sess):
+        if not self._tui_in_scope(session_id):
             self._error(404, "session not found")
             return
         runner = self._tui_runner_for_session(session_id)
@@ -4188,6 +4403,12 @@ def make_server(config, token, bundles) -> ThreadingHTTPServer:
         # One focus list per daemon, shared by every harness and every client.
         "focus": focus_store.Focus(),
         "shares": share_store.ShareStore(),
+        # Detects newly created sessions and drives `sessions_rev` on the
+        # status streams so clients re-list. One watcher, every connection.
+        "session_watcher": session_watch.SessionWatcher(
+            {n: b.store for n, b in (bundles or {}).items()}),
+        "guest_session_watchers": {},
+        "guest_session_watchers_lock": threading.Lock(),
     })
     server = _HttpServer((config.bind, int(config.port)), handler)
     cert = str(getattr(config, "tls_cert", "") or "")

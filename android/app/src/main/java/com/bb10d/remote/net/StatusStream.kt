@@ -29,8 +29,9 @@ import java.util.concurrent.TimeUnit
 class StatusStream(private val client: DaemonClient) {
 
     sealed interface Event {
-        data class Frame(val active: List<ActiveJobDto>) : Event
-        data class Down(val reason: String) : Event
+        data class Frame(val active: List<ActiveJobDto>, val sessionsRev: Int) : Event
+        /** [refused]: the daemon answered and said no — retrying soon will not help. */
+        data class Down(val reason: String, val refused: Boolean = false) : Event
         data object Up : Event
     }
 
@@ -69,7 +70,7 @@ class StatusStream(private val client: DaemonClient) {
                         val frame = runCatching {
                             Json.decodeFromString(StatusFrameDto.serializer(), data)
                         }.getOrNull() ?: return
-                        trySend(Event.Frame(frame.active))
+                        trySend(Event.Frame(frame.active, frame.sessionsRev))
                     }
 
                     override fun onClosed(eventSource: EventSource) {
@@ -89,8 +90,11 @@ class StatusStream(private val client: DaemonClient) {
                             response != null -> "HTTP ${response.code}"
                             else -> t?.message ?: "connection lost"
                         }
+                        // A stream that breaks mid-flight still carries its
+                        // original 200 response; only an error status is a refusal.
+                        val refused = response != null && !response.isSuccessful
                         response?.close()
-                        trySend(Event.Down(reason))
+                        trySend(Event.Down(reason, refused = refused))
                         // A rejected token will not fix itself by reconnecting
                         // in a tight loop; back off to the ceiling immediately.
                         retry(if (response?.code == 401) MAX_ATTEMPT else attempt + 1)

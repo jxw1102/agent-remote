@@ -41,7 +41,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,11 +54,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bb10d.remote.data.AgentRepository
 import com.bb10d.remote.data.SessionRef
+import com.bb10d.remote.data.TuiFrameDto
+import com.bb10d.remote.net.TuiStream
 import com.bb10d.remote.ui.AnsiText
 import com.bb10d.remote.ui.theme.palette
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.ui.platform.LocalDensity
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+
+/** The daemon answered 404 to the frame stream: it predates it. */
+private class StreamUnsupported : Exception()
 
 /**
  * Live TUI — shows the host tmux pane for an Interactive session and
@@ -73,26 +79,79 @@ fun LiveTuiScreen(
     onBack: () -> Unit,
 ) {
     val pal = palette
-    val scope = rememberCoroutineScope()
     var text by remember { mutableStateOf("Connecting to host TUI…") }
     var status by remember { mutableStateOf("Host TUI") }
     var live by remember { mutableStateOf(false) }
     var line by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var seq by remember { mutableStateOf(0L) }
+    // The host pane's width in columns (the daemon says; 120 before it does).
+    var cols by remember { mutableStateOf(120) }
     val scroll = rememberScrollState()
 
+    // Keys are a stream: one sender, in the order they were pressed. Each tap
+    // used to launch its own request, and two taps could arrive swapped.
+    val outbox = remember { Channel<Pair<List<String>, String>>(Channel.UNLIMITED) }
+
     fun sendKeys(keys: List<String> = emptyList(), body: String = "") {
-        val client = repo.client(ref.profileId) ?: return
-        scope.launch {
+        outbox.trySend(keys to body)
+    }
+
+    LaunchedEffect(ref.key) {
+        val client = repo.client(ref.profileId) ?: return@LaunchedEffect
+        for ((keys, body) in outbox) {
             runCatching { client.tuiKeys(ref.sessionId, keys, body) }
                 .onFailure { error = repo.reason(it) }
                 .onSuccess { error = null }
         }
     }
 
+    fun show(frame: TuiFrameDto) {
+        error = null
+        if (!frame.attached) {
+            live = false
+            status = frame.error.ifBlank { "No host TUI attached" }
+            if (seq == 0L) {
+                text = frame.error.ifBlank {
+                    "No interactive TUI for this session. Start a turn in Interactive mode."
+                }
+            }
+        } else if (frame.seq != seq) {
+            seq = frame.seq
+            if (frame.cols > 0) cols = frame.cols
+            live = true
+            status = if (frame.jobId.isNotBlank()) {
+                "Live · job ${frame.jobId.take(8)}"
+            } else {
+                "Live"
+            }
+            text = frame.text.ifBlank { "(empty pane)" }
+        } else {
+            live = true
+        }
+    }
+
     LaunchedEffect(ref.key) {
         val client = repo.client(ref.profileId) ?: return@LaunchedEffect
+        // Daemon ≥ 2.22 pushes a frame when the pane changes; the echo of a
+        // key is then one hop away instead of up to a 400 ms poll.
+        if (repo.profile(ref.profileId)?.caps?.tuiStream == true) {
+            try {
+                TuiStream(client, ref.sessionId).events().collect { ev ->
+                    when (ev) {
+                        is TuiStream.Event.Frame -> show(ev.frame)
+                        is TuiStream.Event.Down -> {
+                            if (ev.unsupported) throw StreamUnsupported()
+                            live = false
+                            status = "Reconnecting…"
+                        }
+                    }
+                }
+            } catch (_: StreamUnsupported) {
+                // Fall through to polling.
+            }
+        }
+        // Older daemons: ask for the pane every 400 ms.
         while (isActive) {
             val frame = runCatching { client.tui(ref.sessionId) }.getOrElse {
                 error = repo.reason(it)
@@ -101,27 +160,7 @@ fun LiveTuiScreen(
                 delay(1200)
                 continue
             }
-            error = null
-            if (!frame.attached) {
-                live = false
-                status = frame.error.ifBlank { "No host TUI attached" }
-                if (seq == 0L) {
-                    text = frame.error.ifBlank {
-                        "No interactive TUI for this session. Start a turn in Interactive mode."
-                    }
-                }
-            } else if (frame.seq != seq) {
-                seq = frame.seq
-                live = true
-                status = if (frame.jobId.isNotBlank()) {
-                    "Live · job ${frame.jobId.take(8)}"
-                } else {
-                    "Live"
-                }
-                text = frame.text.ifBlank { "(empty pane)" }
-            } else {
-                live = true
-            }
+            show(frame)
             delay(400)
         }
     }
@@ -131,7 +170,11 @@ fun LiveTuiScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text("Live TUI", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Live TUI",
+                            fontWeight = FontWeight.SemiBold,
+                            style = MaterialTheme.typography.titleSmall,
+                        )
                         Text(
                             text = buildString {
                                 append(if (live) "● " else "")
@@ -158,58 +201,50 @@ fun LiveTuiScreen(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
+                // The strip under the text line belongs to the controls, not
+                // to the terminal.
+                .background(MaterialTheme.colorScheme.surface)
                 .imePadding()
                 .navigationBarsPadding(),
         ) {
-            // Soft keys as real chrome buttons (surface + border) so they stay
-            // readable on the near-black TUI pane — flat TextButtons vanish in dark.
-            // Horizontal scroll: 8 keys never squeeze the input row off-screen.
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surface)
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                listOf(
-                    "Esc" to listOf("Escape"),
-                    "Tab" to listOf("Tab"),
-                    "\u2191" to listOf("Up"),
-                    "\u2193" to listOf("Down"),
-                    "\u2190" to listOf("Left"),
-                    "\u2192" to listOf("Right"),
-                    "^C" to listOf("Ctrl+C"),
-                    "\u21B5" to listOf("Enter"),
-                ).forEach { (label, keys) ->
-                    LiveTuiKeyButton(
-                        label = label,
-                        onClick = { sendKeys(keys) },
-                        modifier = Modifier.width(48.dp),
-                    )
-                }
-            }
             // weight must sit on a Column direct child — AnsiText wraps Text
             // in SelectionContainer, so weight on its modifier was ignored and
             // the pane grew to full content height, pushing the input off-screen.
-            Box(
+            // The terminal first: it is the whole point of this screen. A TUI
+            // is a grid, so it is never reflowed; the glyphs are scaled until
+            // the host's own column count fits the screen, down to a floor,
+            // after which the pane scrolls sideways (as on the web).
+            BoxWithConstraints(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
                     .background(Color(0xFF0A0C10)),
             ) {
-                AnsiText(
+                val density = LocalDensity.current
+                val fit = with(density) {
+                    ((maxWidth - 16.dp).toPx() / (cols * MONO_GLYPH_WIDTH)).toSp()
+                }
+                val size = fit.value.coerceIn(TUI_FONT_MIN_SP, TUI_FONT_MAX_SP).sp
+                if (seq == 0L) {
+                    // Not a frame yet: words about the terminal, at reading
+                    // size and in a colour that shows on the dark pane.
+                    Text(
+                        text,
+                        color = Color(0xFF9AA3B2),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    )
+                } else AnsiText(
                     text = text,
                     modifier = Modifier
                         .fillMaxSize()
                         .verticalScroll(scroll)
                         .horizontalScroll(rememberScrollState())
-                        .padding(12.dp),
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
                     defaultColor = Color(0xFFD0D4DC),
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
+                    fontSize = size,
+                    lineHeight = size * 1.3f,
                 )
             }
             if (error != null) {
@@ -222,6 +257,35 @@ fun LiveTuiScreen(
                         .background(MaterialTheme.colorScheme.surface)
                         .padding(horizontal = 12.dp, vertical = 4.dp),
                 )
+            }
+            // Soft keys, under the terminal and above the text line, within
+            // reach of the thumbs. Real chrome buttons (surface + border) so
+            // they stay readable beside the near-black pane. All eight share
+            // the row: none is ever scrolled out of sight.
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(start = 8.dp, end = 8.dp, top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                listOf(
+                    Triple("Esc", listOf("Escape"), 1f),
+                    Triple("Enter", listOf("Enter"), 1.5f),
+                    Triple("Tab", listOf("Tab"), 1f),
+                    Triple("\u2191", listOf("Up"), 1f),
+                    Triple("\u2193", listOf("Down"), 1f),
+                    Triple("\u2190", listOf("Left"), 1f),
+                    Triple("\u2192", listOf("Right"), 1f),
+                    Triple("^C", listOf("Ctrl+C"), 1f),
+                ).forEach { (label, keys, share) ->
+                    LiveTuiKeyButton(
+                        label = label,
+                        onClick = { sendKeys(keys) },
+                        modifier = Modifier.weight(share),
+                    )
+                }
             }
             // Pinned input chrome — never inside the pane scroll.
             fun submitLine() {
@@ -267,6 +331,12 @@ fun LiveTuiScreen(
     }
 }
 
+// Width of one monospace glyph as a fraction of the font size, and the
+// range the terminal's font may be scaled within.
+private const val MONO_GLYPH_WIDTH = 0.6f
+private const val TUI_FONT_MIN_SP = 8f
+private const val TUI_FONT_MAX_SP = 13f
+
 /** Compact mono keycap for the Live TUI toolbar. */
 @Composable
 private fun LiveTuiKeyButton(
@@ -289,7 +359,7 @@ private fun LiveTuiKeyButton(
         Text(
             text = label,
             color = MaterialTheme.colorScheme.onSurface,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
             fontFamily = FontFamily.Monospace,
             maxLines = 1,

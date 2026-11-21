@@ -301,6 +301,8 @@ class CodebuddyStore(ClaudeStore):
         self.home = Path(home)
         super().__init__(self.home / "projects", config)
 
+    _scan_marker = b""    # ptc records are folded into user records by _rec
+
     def _rec(self, obj):
         # Old sessions are already Claude-shaped (identity-convert); ptc
         # sessions need the fold. Cheap either way: dict copies, no I/O.
@@ -366,6 +368,7 @@ class CodebuddyRunner:
             "stop": True,
             "projects": True,
             "ws_status": True,
+            "session_events": True,
             # Headless turns auto-approve. Interactive can still lift a
             # pane dialog onto the phone; that does not need this flag.
             "permissions": False,

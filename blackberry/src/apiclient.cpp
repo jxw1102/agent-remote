@@ -1456,10 +1456,13 @@ void ApiClient::onExtraStatusFrame(const QByteArray &payload)
     QVariant data = parseBody(payload, &ok);
     if (!ok)
         return;
-    m_extraStatuses[profileIndex] = data.toMap().value("active").toList();
+    const QVariantMap frame = data.toMap();
+    m_extraStatuses[profileIndex] = frame.value("active").toList();
     // Working markers / count only. Banner, doorbell and job adoption stay
     // active-profile concerns (onStatusFrame).
     updateWorkingSet();
+    // A new session on this secondary daemon should still refresh the list.
+    maybeRefreshOnSessionsRev(profileIndex, frame);
 #else
     Q_UNUSED(payload);
 #endif
@@ -5786,13 +5789,31 @@ void ApiClient::setJobTicker(const QString &text)
 
 // ------------------------------------------------------- status stream
 
+// Re-list when a status frame's sessions_rev (daemon >= 2.21) changes for this
+// profile: a new session appeared here (host TUI, another client, headless
+// turn). The first frame per profile only records the baseline, so connecting
+// never triggers a reload; older daemons omit the field and never fire.
+void ApiClient::maybeRefreshOnSessionsRev(int profileIndex, const QVariantMap &frame)
+{
+    if (!frame.contains("sessions_rev"))
+        return;
+    const int rev = frame.value("sessions_rev").toInt();
+    const bool seen = m_lastSessionsRev.contains(profileIndex);
+    const bool changed = seen && m_lastSessionsRev.value(profileIndex) != rev;
+    m_lastSessionsRev.insert(profileIndex, rev);
+    if (changed)
+        refreshSessions();
+}
+
 void ApiClient::onStatusFrame(const QByteArray &payload)
 {
     bool ok = false;
     QVariant data = parseBody(payload, &ok);
     if (!ok)
         return;
-    m_activeStatuses = data.toMap()["active"].toList();
+    const QVariantMap frame = data.toMap();
+    m_activeStatuses = frame["active"].toList();
+    maybeRefreshOnSessionsRev(m_activeProfile, frame);
 
     // Keep the session->job map fresh for every session the daemon reports
     // (lets a later openTranscript re-attach without a scan), and adopt the

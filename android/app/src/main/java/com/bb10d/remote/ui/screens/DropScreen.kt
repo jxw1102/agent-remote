@@ -18,7 +18,9 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -32,6 +34,8 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,6 +69,9 @@ fun DropScreen(vm: DropViewModel, onBack: () -> Unit) {
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     val pal = palette
+    // One tap on the bin used to delete the file on the host at once, and
+    // there is no way to bring it back.
+    var confirmDelete by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     LaunchedEffect(Unit) { vm.refresh() }
     LaunchedEffect(message) {
@@ -72,6 +79,34 @@ fun DropScreen(vm: DropViewModel, onBack: () -> Unit) {
             snackbar.showSnackbar(it)
             vm.clearMessage()
         }
+    }
+
+    confirmDelete?.let { (profileId, name) ->
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text("Delete this file on the host?") },
+            text = {
+                Column {
+                    Text(name, style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "It is removed from the host's drop folder and cannot be " +
+                            "brought back. A copy already downloaded to this phone stays.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = pal.dim,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = null
+                    vm.delete(profileId, name)
+                }) { Text("Delete", color = pal.danger) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = null }) { Text("Cancel") }
+            },
+        )
     }
 
     Scaffold(
@@ -148,7 +183,7 @@ fun DropScreen(vm: DropViewModel, onBack: () -> Unit) {
                     downloading = vm.isDownloading(row.profileId, row.file.name),
                     progress = vm.downloadProgress(row.profileId, row.file.name),
                     onDownload = { vm.download(context, row.profileId, row.file.name) },
-                    onDelete = { vm.delete(row.profileId, row.file.name) },
+                    onDelete = { confirmDelete = row.profileId to row.file.name },
                 )
                 Hairline(inset = 16)
             }

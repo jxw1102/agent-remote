@@ -5,9 +5,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,32 +15,22 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Difference
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Share
-import androidx.compose.material.icons.automirrored.outlined.Send
-import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Tag
 import androidx.compose.material.icons.outlined.Timeline
 import androidx.compose.material.icons.outlined.Terminal
@@ -53,18 +40,13 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -72,41 +54,34 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.derivedStateOf
+import com.bb10d.remote.ui.components.MetaPill
 import androidx.compose.runtime.getValue
+import com.bb10d.remote.ui.components.connLabel
+import com.bb10d.remote.ui.components.connTint
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bb10d.remote.data.ExecMode
-import com.bb10d.remote.data.Time
 import com.bb10d.remote.ui.components.ErrorBanner
-import com.bb10d.remote.ui.components.WorkingDots
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.IntrinsicSize
 import com.bb10d.remote.ui.components.Hairline
-import com.bb10d.remote.ui.components.MetaPill
 import com.bb10d.remote.ui.components.rememberClip
-import com.bb10d.remote.ui.components.WorkingPulse
 import com.bb10d.remote.ui.markdown.LocalHostLinkHandler
-import com.bb10d.remote.ui.markdown.MarkdownText
 import com.bb10d.remote.ui.theme.Accent
 import com.bb10d.remote.ui.theme.AgentRemoteTheme
-import com.bb10d.remote.data.StepDto
 import com.bb10d.remote.ui.theme.MonoStyle
 import com.bb10d.remote.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -124,6 +99,7 @@ fun TranscriptScreen(
     val profile by vm.profile.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
     val harness by vm.harnessProvider.collectAsStateWithLifecycle()
+    val conn by vm.conn.collectAsStateWithLifecycle()
 
     // Theme follows THIS session's harness (multi hosts), not the profile's
     // default ping provider — matches BB/web chrome.
@@ -146,6 +122,7 @@ fun TranscriptScreen(
             settings = settings,
             accent = accent,
             harness = harness,
+            conn = conn,
         )
     }
 }
@@ -164,6 +141,7 @@ private fun TranscriptScreenBody(
     settings: com.bb10d.remote.data.AppSettings,
     accent: Accent,
     harness: String,
+    conn: com.bb10d.remote.data.ConnState?,
 ) {
     val pal = palette
     val ref by vm.ref.collectAsStateWithLifecycle()
@@ -182,6 +160,7 @@ private fun TranscriptScreenBody(
     val openSteps by vm.openSteps.collectAsStateWithLifecycle()
     val share by vm.share.collectAsStateWithLifecycle()
     val hostFile by vm.hostFile.collectAsStateWithLifecycle()
+    val changes by vm.changes.collectAsStateWithLifecycle()
     var menuOpen by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showOptions by remember { mutableStateOf(false) }
@@ -229,19 +208,72 @@ private fun TranscriptScreenBody(
     LaunchedEffect(ui.scrollTick) {
         if (ui.items.isNotEmpty()) listState.scrollToItem(bottomRow)
     }
-    // The tail appearing at the bottom is followed like new output.
-    LaunchedEffect(jobState.running) {
-        if (!jobState.running || ui.items.isEmpty()) return@LaunchedEffect
-        val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (last >= bottomRow - 2) listState.animateScrollToItem(bottomRow)
-    }
     // Keyed on the LAST item, not the count, so loading older messages (which
     // also changes the count) can never be mistaken for new output arriving.
-    LaunchedEffect(ui.items.lastOrNull()?.id) {
+    // Two distances from the newest output. "Away": the newest message is
+    // not on screen at all. "Behind": it is, but its end is more than a
+    // little below the screen. Pixels, not rows, for the second: one reply
+    // can be several screens tall, so "within three rows of the end" used to
+    // be true a long way up, and new output pulled the reader down.
+    val slackPx = with(LocalDensity.current) { 160.dp.roundToPx() }
+    val awayFromLatest by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val tail = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf false
+            tail.index < info.totalItemsCount - 1
+        }
+    }
+    val behindLatest by remember(slackPx) {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val tail = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf false
+            tail.offset + tail.size > info.viewportEndOffset + slackPx
+        }
+    }
+    // New output that arrived while reading further up: the pill says so.
+    var unseen by remember { mutableStateOf(false) }
+    // Where the reader was BEFORE the newest row was added; by the time the
+    // effect below runs, the list already contains it.
+    val wasReadingBack = remember { booleanArrayOf(false) }
+    // True while the list is being scrolled to new output by the effect
+    // below. A row that has just arrived is under the screen until that
+    // scroll reaches it, which looks exactly like the reader having scrolled
+    // away; a second row arriving meanwhile was taken for that and the
+    // transcript stopped following.
+    val following = remember { booleanArrayOf(false) }
+    val lastId = ui.items.lastOrNull()?.id
+    LaunchedEffect(lastId) {
         if (ui.items.isEmpty()) return@LaunchedEffect
-        val atBottom = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index
-            ?.let { it >= bottomRow - 3 } ?: true
-        if (atBottom) listState.animateScrollToItem(bottomRow)
+        if (wasReadingBack[0]) {
+            unseen = true
+            return@LaunchedEffect
+        }
+        following[0] = true
+        try {
+            listState.animateScrollToItem(bottomRow)
+        } finally {
+            following[0] = false
+        }
+        // Reached only when the scroll ran to its end (a newer row cancels
+        // it above). Where the reader is now: a reply taller than the screen
+        // leaves them at its first line, reading, and the next row must not
+        // pull them off it.
+        wasReadingBack[0] = awayFromLatest || behindLatest
+    }
+    // The working tail appearing at the bottom is followed like new output.
+    LaunchedEffect(jobState.running) {
+        if (!jobState.running || ui.items.isEmpty() || wasReadingBack[0]) return@LaunchedEffect
+        following[0] = true
+        try {
+            listState.animateScrollToItem(bottomRow)
+        } finally {
+            following[0] = false
+        }
+    }
+    LaunchedEffect(awayFromLatest, behindLatest, lastId) {
+        if (following[0]) return@LaunchedEffect
+        wasReadingBack[0] = awayFromLatest || behindLatest
+        if (!wasReadingBack[0]) unseen = false
     }
     // Older messages went in above: shift the anchor by exactly as many rows,
     // so the message you were reading stays under your thumb.
@@ -281,7 +313,16 @@ private fun TranscriptScreenBody(
                                     color = pal.dim,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false),
                                 )
+                                // Only when it is NOT live: what is on screen
+                                // may be out of date.
+                                if (conn == com.bb10d.remote.data.ConnState.RECONNECTING ||
+                                    conn == com.bb10d.remote.data.ConnState.OFFLINE
+                                ) {
+                                    Spacer(Modifier.width(6.dp))
+                                    MetaPill(connLabel(conn), tint = connTint(conn))
+                                }
                             }
                         }
                     },
@@ -307,41 +348,36 @@ private fun TranscriptScreenBody(
                                 }
                             }
                         }
+                        // In the bar at every width, as on the web: how the
+                        // next turn runs, and the host terminal. The rest is
+                        // what you do now and then, under More.
                         IconButton(onClick = { showOptions = true }) {
-                            Icon(Icons.Outlined.Tune, contentDescription = "Turn options")
+                            Icon(Icons.Outlined.Tune, contentDescription = "Session options")
+                        }
+                        if (showLiveTui) {
+                            IconButton(onClick = onLiveTui) {
+                                Icon(Icons.Outlined.Terminal, contentDescription = "Live TUI")
+                            }
                         }
                         Box {
                             IconButton(onClick = { menuOpen = true }) {
                                 Icon(Icons.Outlined.MoreVert, contentDescription = "More")
                             }
                             DropdownMenu(menuOpen, onDismissRequest = { menuOpen = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Refresh") },
-                                    leadingIcon = { Icon(Icons.Outlined.Refresh, null) },
-                                    onClick = { menuOpen = false; vm.refresh() },
-                                )
-                                if (showLiveTui) {
+                                // Only where it can work: a daemon that has
+                                // the route, and a session with a folder.
+                                if (profile?.caps?.changes == true &&
+                                    !session?.cwd.isNullOrBlank() && ref.sessionId.isNotEmpty()
+                                ) {
                                     DropdownMenuItem(
-                                        text = { Text("Live TUI") },
-                                        leadingIcon = { Icon(Icons.Outlined.Terminal, null) },
+                                        text = { Text("Changes") },
+                                        leadingIcon = { Icon(Icons.Outlined.Difference, null) },
                                         onClick = {
                                             menuOpen = false
-                                            onLiveTui()
+                                            vm.openChanges()
                                         },
                                     )
                                 }
-                                // Adds the agent's working steps (tool calls,
-                                // results, thinking) under each message. This
-                                // session only, off by default — web parity.
-                                DropdownMenuItem(
-                                    text = { Text(if (processView) "Process view ✓" else "Process view") },
-                                    leadingIcon = { Icon(Icons.Outlined.Timeline, null) },
-                                    enabled = ref.sessionId.isNotEmpty(),
-                                    onClick = {
-                                        menuOpen = false
-                                        vm.setProcessView(!processView)
-                                    },
-                                )
                                 if (profile?.share == true) {
                                     DropdownMenuItem(
                                         text = { Text("Share link") },
@@ -354,6 +390,23 @@ private fun TranscriptScreenBody(
                                     )
                                 }
                                 DropdownMenuItem(
+                                    text = { Text("Refresh") },
+                                    leadingIcon = { Icon(Icons.Outlined.Refresh, null) },
+                                    onClick = { menuOpen = false; vm.refresh() },
+                                )
+                                // Adds the agent's working steps (tool calls,
+                                // results, thinking) under each message. This
+                                // session only, off by default — web parity.
+                                DropdownMenuItem(
+                                    text = { Text(if (processView) "Process view ✓" else "Process view") },
+                                    leadingIcon = { Icon(Icons.Outlined.Timeline, null) },
+                                    enabled = ref.sessionId.isNotEmpty(),
+                                    onClick = {
+                                        menuOpen = false
+                                        vm.setProcessView(!processView)
+                                    },
+                                )
+                                DropdownMenuItem(
                                     text = { Text("Copy transcript") },
                                     leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
                                     onClick = {
@@ -362,7 +415,7 @@ private fun TranscriptScreenBody(
                                     },
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("Session id") },
+                                    text = { Text("Copy session id") },
                                     leadingIcon = { Icon(Icons.Outlined.Tag, null) },
                                     onClick = {
                                         menuOpen = false
@@ -456,11 +509,32 @@ private fun TranscriptScreenBody(
                                         accent.label,
                                     ),
                                     elapsed = if (waiting) 0 else live?.elapsedS ?: 0,
-                                    color = if (waiting) palette.warn else accent.tint,
+                                    color = if (waiting) pal.warn else accent.tint,
                                 )
                             }
                         }
                     } }
+                }
+                if ((awayFromLatest || unseen) && ui.items.isNotEmpty()) {
+                    JumpToLatest(
+                        unseen = unseen,
+                        accent = accent.tint,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 10.dp),
+                    ) {
+                        scope.launch {
+                            // Far away: go straight there. A smooth scroll
+                            // over a long transcript takes seconds.
+                            val last = bottomRow
+                            val visible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                            if (last - visible > 30) listState.scrollToItem(last)
+                            else listState.animateScrollToItem(last)
+                            // To the END of it, not its first line.
+                            listState.scrollBy(1_000_000f)
+                            unseen = false
+                        }
+                    }
                 }
             }
 
@@ -504,6 +578,22 @@ private fun TranscriptScreenBody(
                 }
             }
 
+            val h = harness.ifBlank { null }
+            val interactiveNow = profile?.effectiveExecMode(harness) == ExecMode.INTERACTIVE
+            SlashSuggestions(
+                matches = slashMatches(composerText, profile?.caps?.slashFor(h).orEmpty()),
+                headless = !interactiveNow,
+                onPick = { vm.updateComposer("$it ") },
+            )
+            profile?.let {
+                TurnChips(
+                    profile = it,
+                    harness = h,
+                    onExecMode = vm::setExecMode,
+                    onModel = vm::setModel,
+                    onEffort = vm::setEffort,
+                )
+            }
             AttachmentChips(
                 chips = attachments,
                 onRemove = vm::removeAttachment,
@@ -514,7 +604,7 @@ private fun TranscriptScreenBody(
                 canSend = composerText.isNotBlank() ||
                     attachments.any { !it.uploading },
                 running = jobState.running,
-                interactive = profile?.effectiveExecMode() == ExecMode.INTERACTIVE,
+                interactive = interactiveNow,
                 accent = accent.tint,
                 onAccent = accent.onTint,
                 onSend = vm::sendComposer,
@@ -537,9 +627,27 @@ private fun TranscriptScreenBody(
         }
     }
 
+    if (changes.open) {
+        ModalBottomSheet(
+            onDismissRequest = vm::closeChanges,
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
+            ChangesSheet(
+                ui = changes,
+                onRefresh = vm::loadChanges,
+                onCommit = vm::commitChanges,
+                onPush = vm::pushChanges,
+            )
+        }
+    }
+    // The turn is over: what it changed is worth a fresh look.
+    LaunchedEffect(jobState.running) {
+        if (!jobState.running && changes.open) vm.loadChanges()
+    }
+
     if (showOptions) {
         ModalBottomSheet(onDismissRequest = { showOptions = false }) {
-            profile?.let { TurnOptionsSheet(vm, it) }
+            profile?.let { SessionOptionsSheet(vm, it) }
         }
     }
 
@@ -719,902 +827,6 @@ private fun plainTranscript(items: List<TranscriptItem>): String =
         }
         "$who:\n${item.text}"
     }
-
-@Composable
-private fun LoadOlderRow(loading: Boolean, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        if (loading) {
-            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-        } else {
-            TextButton(onClick = onClick) {
-                Icon(Icons.Outlined.History, contentDescription = null)
-                Spacer(Modifier.width(6.dp))
-                Text("Load earlier messages")
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun MessageRow(
-    item: TranscriptItem,
-    accent: Color,
-    rich: Boolean,
-    onLongPress: () -> Unit,
-    openSteps: Map<String, String> = emptyMap(),
-    onToggleStep: (StepDto) -> Unit = {},
-) {
-    Column(Modifier.fillMaxWidth()) {
-        MessageBody(item, accent, rich, onLongPress)
-        if (item.steps.isNotEmpty()) {
-            StepsStrip(item.steps, accent, openSteps, onToggleStep)
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun MessageBody(
-    item: TranscriptItem,
-    accent: Color,
-    rich: Boolean,
-    onLongPress: () -> Unit,
-) {
-    val pal = palette
-    val clipboard = rememberClip()
-    when (item.role) {
-        "user" -> Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .background(pal.userWell)
-                .combinedClickable(
-                    onClick = {},
-                    onLongClick = onLongPress,
-                )
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            Text(
-                text = "›",
-                color = accent,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(
-                text = item.text,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-        }
-
-        "status" -> Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(start = 4.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            Box(
-                Modifier
-                    .padding(top = 4.dp)
-                    .width(2.dp)
-                    .height(14.dp)
-                    .background(pal.thought.copy(alpha = 0.5f)),
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(
-                text = item.text,
-                style = MaterialTheme.typography.bodySmall,
-                color = pal.thought,
-                fontFamily = if (item.metaKind == "worked") FontFamily.Monospace else null,
-            )
-        }
-
-        "notice" -> Text(
-            text = item.text,
-            style = MaterialTheme.typography.bodySmall,
-            color = if (item.severity == "error") pal.danger else pal.dim,
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .background(
-                    if (item.severity == "error") pal.danger.copy(alpha = 0.10f)
-                    else pal.liveWell,
-                )
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-        )
-
-        else -> Box(Modifier.fillMaxWidth()) {
-            SelectionContainer {
-                // "Rich text off" is the escape hatch for output this parser
-                // gets wrong: the raw text, exactly as the agent wrote it.
-                if (rich) {
-                    MarkdownText(source = item.text)
-                } else {
-                    Text(
-                        text = item.text,
-                        style = MonoStyle,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                }
-            }
-        }
-    }
-}
-
-/**
- * Process view: the working steps under one message — tool calls (▸), their
- * results (↳) and thinking (✻), in the order they happened. Tapping a row
- * expands the preview; a truncated body is fetched from the daemon on first
- * expand only (mirrors the web client).
- */
-@Composable
-private fun StepsStrip(
-    steps: List<StepDto>,
-    accent: Color,
-    openSteps: Map<String, String>,
-    onToggleStep: (StepDto) -> Unit,
-) {
-    val pal = palette
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(top = 4.dp, start = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        steps.forEach { step ->
-            val isError = step.kind == "tool_result" && !step.ok
-            val silent = step.kind == "thinking" && !step.recorded
-            val mark = when (step.kind) {
-                "tool_use" -> "▸"
-                "tool_result" -> "↳"
-                "thinking" -> "✻"
-                else -> "·"
-            }
-            val title = when (step.kind) {
-                "tool_use" -> step.name.ifBlank { "tool" }
-                "tool_result" -> if (isError) "error" else "result"
-                "thinking" -> "thinking"
-                else -> step.kind
-            }
-            val detail = step.detail.ifBlank {
-                step.preview.lineSequence().firstOrNull().orEmpty().take(120)
-            }
-            Column(Modifier.fillMaxWidth()) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(6.dp))
-                        .then(
-                            if (silent) Modifier
-                            else Modifier.clickable { onToggleStep(step) },
-                        )
-                        .padding(horizontal = 6.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.Top,
-                ) {
-                    Text(
-                        text = mark,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (isError) pal.danger else accent.copy(alpha = 0.8f),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (isError) pal.danger else pal.dim,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = if (silent) "not recorded by this CLI" else detail,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = pal.thought,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (step.bytes > 0) {
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = humanSize(step.bytes),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = pal.dim,
-                        )
-                    }
-                }
-                if (step.ref in openSteps) {
-                    val full = openSteps[step.ref].orEmpty()
-                    val body = full.ifEmpty { step.preview }
-                    val pending = full.isEmpty() && step.truncated
-                    SelectionContainer {
-                        Text(
-                            text = body + (if (pending) "\n…" else ""),
-                            style = MonoStyle.copy(fontSize = 12.sp),
-                            color = MaterialTheme.colorScheme.onSurface,
-                            softWrap = false,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(start = 18.dp, top = 2.dp, bottom = 4.dp)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(pal.codeBg)
-                                .horizontalScroll(rememberScrollState())
-                                .padding(8.dp),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-private fun humanSize(bytes: Long): String = when {
-    bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
-    bytes >= 1024 -> "%.1f KB".format(bytes / 1024.0)
-    else -> "$bytes B"
-}
-
-private fun liveHeadline(phase: String, phaseDetail: String, tool: String, agent: String) =
-    when {
-        phase.isNotEmpty() && phaseDetail.isNotEmpty() -> {
-            val verb = phase.replaceFirstChar { it.uppercase() }
-            "$verb · $phaseDetail"
-        }
-        phase.isNotEmpty() -> phase.replaceFirstChar { it.uppercase() }
-        tool.isNotEmpty() -> tool
-        else -> "$agent is working"
-    }
-
-/**
- * The transcript's last row while a turn runs. The banner sits above the
- * list, so a reader at the bottom of a long turn saw nothing moving where
- * they were looking. Same words as the banner; the warning colour when a
- * question or permission waits on the reader.
- */
-@Composable
-private fun WorkingTail(text: String, elapsed: Int, color: Color) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .height(IntrinsicSize.Min),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier
-                .width(2.dp)
-                .fillMaxHeight()
-                .background(color.copy(alpha = 0.7f)),
-        )
-        Spacer(Modifier.width(10.dp))
-        WorkingDots(color)
-        Spacer(Modifier.width(10.dp))
-        Text(
-            text = if (elapsed > 0) "$text · ${Time.elapsed(elapsed)}" else text,
-            style = MaterialTheme.typography.labelMedium,
-            color = palette.dim,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-/** The live strip: what the agent is doing right now, and for how long. */
-@Composable
-private fun StatusBanner(
-    running: Boolean,
-    phase: String,
-    phaseDetail: String,
-    tool: String,
-    toolDetail: String,
-    elapsed: Int,
-    accent: Color,
-    agent: String,
-) {
-    var ticks by remember { mutableStateOf(0) }
-    LaunchedEffect(running) {
-        while (running) {
-            delay(1000)
-            ticks++
-        }
-    }
-    AnimatedVisibility(visible = running) {
-        // Line 1: human description (daemon phase_detail). Line 2: raw
-        // command / path / [attached: …] (tool_detail), when distinct.
-        val headline = liveHeadline(phase, phaseDetail, tool, agent)
-        val second = when {
-            toolDetail.isNotBlank() && toolDetail != phaseDetail -> toolDetail
-            tool.isNotBlank() && tool != phaseDetail -> tool
-            else -> ""
-        }
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .background(accent.copy(alpha = 0.10f))
-                .padding(horizontal = 14.dp, vertical = 8.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                WorkingPulse(accent, size = 7)
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = headline,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = accent,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                if (elapsed > 0) {
-                    Text(
-                        text = Time.elapsed(elapsed),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = accent.copy(alpha = 0.8f),
-                    )
-                }
-            }
-            if (second.isNotEmpty() && second != headline) {
-                Text(
-                    text = second,
-                    style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelSmall.fontSize),
-                    color = palette.dim,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = 15.dp, top = 2.dp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun PermissionPrompt(
-    tool: String,
-    detail: String,
-    accent: Color,
-    onAllow: () -> Unit,
-    onDeny: () -> Unit,
-) {
-    val pal = palette
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .border(1.dp, accent.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-            .padding(14.dp),
-    ) {
-        Text(
-            "Allow $tool?",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        if (detail.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = detail,
-                style = MonoStyle,
-                color = pal.dim,
-                maxLines = 6,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-            TextButton(onClick = onDeny) { Text("Deny", color = pal.danger) }
-            Spacer(Modifier.width(8.dp))
-            TextButton(onClick = onAllow) { Text("Allow", color = accent) }
-        }
-    }
-}
-
-@Composable
-private fun QuestionBanner(accent: Color, onAnswer: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(accent.copy(alpha = 0.14f))
-            .clickable(onClick = onAnswer)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        WorkingPulse(accent, size = 7)
-        Spacer(Modifier.width(10.dp))
-        Text(
-            "A question is waiting for you",
-            style = MaterialTheme.typography.labelMedium,
-            color = accent,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            "Answer",
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-            color = accent,
-        )
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-/**
- * Uploaded files as removable chips above the composer. Kept out of the
- * TextField on purpose: the old design spliced `[attached: …]` into the
- * field text and the async update raced TextField state (markers vanished).
- */
-@Composable
-private fun AttachmentChips(
-    chips: List<TranscriptViewModel.ComposerAttachment>,
-    onRemove: (String) -> Unit,
-) {
-    if (chips.isEmpty()) return
-    val pal = palette
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 10.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        chips.forEach { chip ->
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .border(1.dp, pal.hairline, RoundedCornerShape(8.dp))
-                    .padding(start = 8.dp),
-            ) {
-                if (chip.uploading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(12.dp),
-                        strokeWidth = 1.5.dp,
-                        color = pal.dim,
-                    )
-                    Spacer(Modifier.width(6.dp))
-                }
-                Text(
-                    chip.name,
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 180.dp),
-                )
-                IconButton(
-                    onClick = { onRemove(chip.id) },
-                    modifier = Modifier.size(28.dp),
-                ) {
-                    Icon(
-                        Icons.Outlined.Close,
-                        contentDescription = "Remove attachment",
-                        tint = pal.dim,
-                        modifier = Modifier.size(14.dp),
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun Composer(
-    text: String,
-    onText: (String) -> Unit,
-    canSend: Boolean,
-    running: Boolean,
-    interactive: Boolean,
-    accent: Color,
-    onAccent: Color,
-    onSend: () -> Unit,
-    onStop: () -> Unit,
-    onAttach: () -> Unit,
-) {
-    val pal = palette
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .navigationBarsPadding(),
-    ) {
-        HorizontalDivider(color = pal.hairline)
-        Row(
-            Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            IconButton(onClick = onAttach) {
-                Icon(Icons.Outlined.Add, contentDescription = "Attach a file", tint = pal.dim)
-            }
-            TextField(
-                value = text,
-                onValueChange = onText,
-                placeholder = {
-                    Text(
-                        text = when {
-                            running && interactive -> "Type into the session…"
-                            running -> "Queue a follow-up…"
-                            else -> "Message, /command or !shell"
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                },
-                maxLines = 6,
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
-                ),
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(max = 160.dp),
-            )
-            // Always reserve the Stop slot so Send never slides when a turn
-            // starts — same mis-click class as web Live TUI vs Stop.
-            IconButton(
-                onClick = onStop,
-                enabled = running,
-            ) {
-                Icon(
-                    Icons.Outlined.Stop,
-                    contentDescription = "Stop",
-                    tint = if (running) pal.danger else Color.Transparent,
-                )
-            }
-            IconButton(
-                onClick = onSend,
-                enabled = canSend,
-                modifier = Modifier
-                    .padding(bottom = 4.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(if (canSend) accent else Color.Transparent),
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Outlined.Send,
-                    contentDescription = "Send",
-                    tint = if (canSend) onAccent else pal.dim,
-                )
-            }
-        }
-    }
-}
-
-/**
- * What a long press offers. Copy is always here; rewind only appears on your
- * own messages, and only when the session's harness advertises it — an
- * option that would fail is worse than no option.
- *
- * Historical user prompts also show when they were sent (from the journal
- * timestamp) under the text preview.
- */
-@Composable
-private fun MessageActionsSheet(
-    item: TranscriptItem,
-    accent: Color,
-    rewindSteps: Int,
-    rewindBlockedReason: String?,
-    onCopy: () -> Unit,
-    onRewind: () -> Unit,
-) {
-    val pal = palette
-    // Live echo has no journal ts yet; only historical rows carry one.
-    val whenSent = remember(item.ts, item.live, item.role) {
-        if (item.role == "user" && !item.live && item.ts.isNotBlank()) {
-            Time.fullStamp(Time.epochMs(item.ts))
-        } else {
-            ""
-        }
-    }
-    Column(Modifier.padding(bottom = 28.dp)) {
-        Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
-            Text(
-                text = item.text.lineSequence().first().take(120),
-                style = MaterialTheme.typography.bodyMedium,
-                color = pal.dim,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (whenSent.isNotEmpty()) {
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = whenSent,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = pal.dim,
-                )
-            }
-        }
-        Hairline(inset = 16)
-
-        ActionRow(Icons.Outlined.ContentCopy, "Copy message", accent, onCopy)
-
-        if (item.role == "user" && rewindSteps > 0) {
-            if (rewindBlockedReason == null) {
-                ActionRow(
-                    icon = Icons.Outlined.History,
-                    label = "Rewind to here",
-                    tint = pal.danger,
-                    onClick = onRewind,
-                    subtitle = if (rewindSteps == 1) {
-                        "Undo your last message"
-                    } else {
-                        "Undo the last $rewindSteps of your messages"
-                    },
-                )
-            } else {
-                Text(
-                    text = "Rewind unavailable — $rewindBlockedReason",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = pal.dim,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ActionRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    tint: Color,
-    onClick: () -> Unit,
-    subtitle: String = "",
-) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = tint)
-        Spacer(Modifier.width(16.dp))
-        Column {
-            Text(label, style = MaterialTheme.typography.bodyLarge)
-            if (subtitle.isNotEmpty()) {
-                Text(
-                    subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = palette.dim,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun QueueSheet(
-    queued: List<com.bb10d.remote.data.QueuedDto>,
-    onCancel: (String) -> Unit,
-    onClose: () -> Unit,
-) {
-    Column(Modifier.padding(bottom = 24.dp)) {
-        Text(
-            "Queued behind this turn",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(16.dp),
-        )
-        Text(
-            "The daemon owns this queue, so it survives losing the app or the network.",
-            style = MaterialTheme.typography.bodySmall,
-            color = palette.dim,
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
-        Spacer(Modifier.height(12.dp))
-        queued.forEach { entry ->
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = entry.prompt,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = { onCancel(entry.id) }) { Text("Cancel") }
-            }
-            Hairline(inset = 16)
-        }
-        if (queued.isEmpty()) {
-            Text(
-                "Nothing queued.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = palette.dim,
-                modifier = Modifier.padding(16.dp),
-            )
-            TextButton(onClick = onClose, modifier = Modifier.padding(start = 8.dp)) {
-                Text("Close")
-            }
-        }
-    }
-}
-
-
-@Composable
-private fun TurnOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.remote.data.Profile) {
-    val caps = profile.caps
-    val harness by vm.harnessProvider.collectAsStateWithLifecycle()
-    val h = harness.ifBlank { null }
-    val models = caps.modelsFor(h)
-    val efforts = caps.effortsFor(h)
-    val interactive = caps.interactiveFor(h)
-    val canSetModel = caps.canSetModelFor(h)
-    val canSetEffort = caps.canSetEffortFor(h)
-    // The sheet is about the session on screen, so show the model that
-    // session actually used when the profile has no explicit override —
-    // otherwise every CodeBuddy session read "default".
-    val session by vm.session.collectAsStateWithLifecycle()
-    val currentModel = profile.model.ifBlank { session?.model.orEmpty() }
-    val modelOptions = if (currentModel.isNotBlank() && currentModel !in models)
-        models + currentModel else models
-    val selectedModel = currentModel.takeIf { it in modelOptions }
-        ?: modelOptions.firstOrNull().orEmpty()
-    val selectedEffort = profile.effort.takeIf { it in efforts } ?: efforts.firstOrNull().orEmpty()
-    Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 28.dp)) {
-        Text("Turn options", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            buildString {
-                append("Applies to ${profile.displayName}")
-                if (harness.isNotBlank()) append(" · $harness")
-                append(" — later turns on this profile.")
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = palette.dim,
-        )
-        Spacer(Modifier.height(16.dp))
-        OptionRow(
-            label = "Execution",
-            options = ExecMode.options(interactive),
-            selected = profile.effectiveExecMode(),
-            display = { ExecMode.short(it) },
-            onSelect = { vm.setExecMode(it) },
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = "Both modes auto-run tools (no permission prompts).",
-            style = MaterialTheme.typography.bodySmall,
-            color = palette.dim,
-        )
-        if (canSetModel && models.isNotEmpty()) {
-            Spacer(Modifier.height(16.dp))
-            OptionRow(
-                label = "Model",
-                options = modelOptions,
-                selected = selectedModel,
-                display = { it },
-                onSelect = { vm.setModel(it) },
-            )
-        }
-        if (canSetEffort && efforts.isNotEmpty()) {
-            Spacer(Modifier.height(16.dp))
-            OptionRow(
-                label = "Reasoning effort",
-                options = efforts,
-                selected = selectedEffort,
-                display = { it },
-                onSelect = { vm.setEffort(it) },
-            )
-        }
-        if (caps.goalWatchFor(h)) {
-            GoalBlock(vm)
-        }
-        if (caps.rewindFor(h)) {
-            Spacer(Modifier.height(16.dp))
-            Text(
-                "Long-press one of your messages to rewind the session back to it.",
-                style = MaterialTheme.typography.bodySmall,
-                color = palette.dim,
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-        Row {
-            MetaPill("agentremoted ${caps.version}")
-            Spacer(Modifier.width(6.dp))
-            if (caps.host.isNotEmpty()) MetaPill(caps.host)
-        }
-    }
-}
-
-/**
- * The Codex goal on this thread, and the daemon's watchdog for it.
- *
- * A goal makes codex restart itself after every turn - until it doesn't,
- * and then the thread sits idle with work left. The switch asks the daemon
- * to type `/goal resume` when that happens. Nothing is drawn for a thread
- * without a goal.
- */
-@Composable
-private fun GoalBlock(vm: TranscriptViewModel) {
-    val goal by vm.goal.collectAsStateWithLifecycle()
-    LaunchedEffect(Unit) { vm.loadGoal() }
-    val row = goal ?: return
-    Spacer(Modifier.height(20.dp))
-    Text("Goal", style = MaterialTheme.typography.labelLarge, color = palette.dim)
-    Spacer(Modifier.height(6.dp))
-    Surface(
-        color = palette.codeBg,
-        shape = MaterialTheme.shapes.small,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Text(
-            row.objective.ifBlank { "(no objective)" },
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-        )
-    }
-    Spacer(Modifier.height(8.dp))
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            "Keep it moving",
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f),
-        )
-        Switch(
-            checked = row.watching,
-            enabled = row.status == "active",
-            onCheckedChange = { vm.setGoalWatch(it) },
-        )
-    }
-    Text(
-        goalStatusLine(row),
-        style = MaterialTheme.typography.bodySmall,
-        color = palette.dim,
-    )
-}
-
-/** "4m" / "2h 10m" - short enough for a status line. */
-private fun shortSpan(seconds: Double): String {
-    val s = seconds.toLong().coerceAtLeast(0L)
-    if (s < 60) return "${s}s"
-    val m = s / 60
-    if (m < 60) return "${m}m"
-    return "${m / 60}h ${m % 60}m"
-}
-
-/** One line of plain truth about a goal's state (same words as web). */
-private fun goalStatusLine(row: com.bb10d.remote.data.GoalDto): String {
-    if (row.status != "active") {
-        return "This goal is ${row.status.ifBlank { "gone" }}."
-    }
-    if (row.stoppedWhy.isNotBlank()) {
-        return "The daemon stopped: ${row.stoppedWhy}. Switch it back on to try again."
-    }
-    val bits = mutableListOf<String>()
-    when {
-        row.working -> bits += "Working now."
-        !row.liveTui -> bits += "No live TUI on the host \u2014 send this session a " +
-            "message first, so there is a prompt to type into."
-        else -> {
-            bits += "Idle for ${shortSpan(row.idleS)}."
-            if (row.watching) {
-                bits += "A resume follows ${shortSpan(row.idleThresholdS)} of quiet."
-            }
-        }
-    }
-    if (row.resumes > 0) {
-        val last = if (row.lastResumeAt > 0) {
-            val ago = System.currentTimeMillis() / 1000.0 - row.lastResumeAt
-            ", last ${shortSpan(ago)} ago."
-        } else "."
-        bits += "Resumed ${row.resumes} " + (if (row.resumes == 1) "time" else "times") + last
-    }
-    if (!row.watching && row.stoppedWhy.isBlank()) {
-        bits += "Codex restarts a goal itself; this is for when it does not."
-    }
-    return bits.joinToString(" ")
-}
 
 private fun queryFileName(context: android.content.Context, uri: android.net.Uri): String {
     val fallback = uri.lastPathSegment?.substringAfterLast('/') ?: "file"

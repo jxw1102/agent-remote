@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>Agent Remote</title>
 <link rel="stylesheet" href="app.css">
@@ -13,6 +13,7 @@
   <!-- Left: every daemon's sessions in one list. -->
   <aside class="pane-list">
     <header class="list-head">
+      <div class="head-row">
       <div class="brand">
         <svg class="logo" viewBox="0 0 108 108" aria-hidden="true">
           <path d="M34 40 L48 54 L34 68" stroke="#d97757" stroke-width="7"
@@ -20,34 +21,80 @@
           <path d="M56 68 L76 68" stroke="#00d4ff" stroke-width="7"
                 stroke-linecap="round"/>
         </svg>
-        <span>Agent Remote</span>
       </div>
-      <div class="head-actions">
-        <button id="btn-new" class="primary" type="button">New session</button>
-        <button id="btn-inbox" type="button" title="Files from host">Inbox</button>
-        <button id="btn-usage" type="button" title="Subscription usage">Usage</button>
-        <button id="btn-profiles" type="button" title="Daemons">Daemons</button>
-        <button id="btn-sound" type="button" title="Sound cues" aria-pressed="true">♪</button>
+      <!-- Row 1: which sessions (Focus | All, renderFilters), then the places
+           you visit now and then. The mark shows when there is room. -->
+        <div id="filters" class="filters"></div>
+        <div id="list-status" class="list-status" role="status"></div>
+        <div class="head-tools">
+          <button id="btn-inbox" class="icon-btn" type="button"
+                  title="Inbox — files from the host" aria-label="Inbox">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+                 stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+                 stroke-linejoin="round">
+              <path d="M4 13l2.5-7h11L20 13v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/>
+              <path d="M4 13h4.5a3.5 3.5 0 0 0 7 0H20"/>
+            </svg>
+          </button>
+          <button id="btn-usage" class="icon-btn" type="button"
+                  title="Subscription usage" aria-label="Usage">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                 stroke-linejoin="round">
+              <path d="M5 20V11M12 20V4M19 20v-6"/>
+            </svg>
+          </button>
+          <button id="btn-profiles" class="icon-btn" type="button"
+                  title="Daemons" aria-label="Daemons">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+                 stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+                 stroke-linejoin="round">
+              <rect x="4" y="4" width="16" height="7" rx="1.5"/>
+              <rect x="4" y="13" width="16" height="7" rx="1.5"/>
+              <path d="M8 7.5h.01M8 16.5h.01"/>
+            </svg>
+          </button>
+          <button id="btn-sound" class="icon-btn" type="button" title="Sound cues"
+                  aria-label="Sound cues" aria-pressed="true">♪</button>
+        </div>
       </div>
-      <input id="search" class="search" type="search"
-             placeholder="Search titles and messages…"
-             autocomplete="off" spellcheck="false">
-      <!-- Focus toggle + per-daemon chips, one row (renderFilters). -->
-      <div id="filters" class="filters"></div>
-      <div id="list-status" class="list-status"></div>
+      <!-- Row 2: find one, on which daemon, or start one. -->
+      <div class="head-row head-row-find">
+        <input id="search" class="search" type="search"
+               placeholder="Search…" aria-label="Search titles and messages"
+               autocomplete="off" spellcheck="false">
+        <div id="filter-daemon" class="filter-daemon"></div>
+        <button id="btn-new" class="primary" type="button" title="New session"
+                aria-label="New session"><span class="new-long">New session</span><span
+                class="new-short">New</span></button>
+      </div>
     </header>
     <div id="sessions" class="sessions" tabindex="0"></div>
+    <!-- Is what the list shows live? One line, per daemon when it is not. -->
+    <div id="conn" class="conn hidden" role="status" aria-live="polite"></div>
   </aside>
 
   <!-- Right: the open transcript. -->
   <main class="pane-chat">
     <header id="chat-head" class="chat-head hidden">
+      <!-- Narrow windows show one pane at a time; this returns to the list. -->
+      <button id="btn-back" class="icon-btn back-btn" type="button"
+              title="Back to sessions" aria-label="Back to sessions">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
       <div class="chat-title">
         <h1 id="chat-title">Session</h1>
         <div id="chat-sub" class="chat-sub"></div>
       </div>
       <div class="chat-actions">
-        <!-- Icon buttons (titles keep labels for hover + a11y). -->
+        <!-- Icon buttons (titles keep labels for hover + a11y).
+             Options stays in the row at every width: how the next turn
+             runs is what you reach for most. The group after it is what you
+             do now and then (changes, rename, share, reload, copy id); in a
+             narrow window it folds into a menu under "More" so the header
+             stays one row. -->
         <button id="btn-options" class="icon-btn" type="button"
                 title="Options — model, effort, execution mode" aria-label="Options">
           <!-- Cog / gear (not a sun — no radial rays). -->
@@ -64,6 +111,18 @@
                      a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83
                      l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09
                      a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+        <div id="chat-more" class="chat-more">
+        <button id="btn-changes" class="icon-btn hidden" type="button"
+                title="Changes — what differs from the last commit" aria-label="Changes"
+                aria-pressed="false">
+          <!-- Two documents, one with a plus/minus: a diff. -->
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+               stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+               stroke-linejoin="round">
+            <path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/>
+            <path d="M9 12h6M12 9v6M9 18h6"/>
           </svg>
         </button>
         <button id="btn-rename" class="icon-btn" type="button"
@@ -97,6 +156,16 @@
                   stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
+        <button id="btn-copy-id" class="icon-btn menu-only" type="button"
+                title="Copy session id" aria-label="Copy session id">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+               stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+               stroke-linejoin="round">
+            <rect x="9" y="9" width="11" height="11" rx="2"/>
+            <path d="M5 15V6a2 2 0 0 1 2-2h9"/>
+          </svg>
+        </button>
+        </div>
         <!-- Order: Options · Refresh · Live TUI · Stop.
              Stop always keeps its slot (icon-idle = invisible, not removed)
              so nothing slides into that space when a job is not running. -->
@@ -118,11 +187,22 @@
                   fill="currentColor"/>
           </svg>
         </button>
+        <button id="btn-more" class="icon-btn more-btn" type="button"
+                title="More" aria-label="More actions" aria-haspopup="true"
+                aria-expanded="false" aria-controls="chat-more">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+            <circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/>
+            <circle cx="19" cy="12" r="1.8"/>
+          </svg>
+        </button>
       </div>
     </header>
 
     <div id="banner" class="banner hidden"></div>
 
+    <!-- Shown when new output arrives while reading earlier messages. -->
+    <button id="jump-latest" class="jump-latest hidden" type="button"
+            aria-live="polite">Jump to latest</button>
     <div id="transcript" class="transcript">
       <!-- Filled by app.js showWelcomeIfNeeded() — one guide only (not also in the list). -->
       <div id="welcome" class="empty welcome" aria-busy="true"></div>
@@ -174,22 +254,51 @@
       </div>
     </div>
 
+    <!-- A permission or question the open session is waiting on. Docked here
+         rather than raised as a dialog, so it never replaces a dialog you are
+         in the middle of and is still there after you look away. -->
+    <section id="gate" class="gate hidden" aria-label="The agent is waiting on you"></section>
+
     <div id="composer" class="composer hidden">
       <div id="composer-note" class="composer-note hidden"></div>
+      <div id="composer-pop" class="composer-pop hidden"></div>
+      <div id="composer-chips" class="composer-chips" role="group"
+           aria-label="How the next message runs"></div>
       <div class="composer-row">
         <button id="btn-attach" type="button" title="Attach a file">+</button>
         <input id="file-attach" type="file" multiple hidden>
         <textarea id="prompt" rows="1" spellcheck="false"
-                  placeholder="Message, /command or !shell · Enter sends"></textarea>
+                  placeholder="Message, /command or !shell · Enter sends"
+                  aria-controls="composer-pop"></textarea>
         <button id="btn-send" class="primary" type="button">Send</button>
       </div>
     </div>
   </main>
+
+  <!-- Beside the transcript on a wide window, over it on a narrow one. -->
+  <aside id="side" class="pane-side hidden" aria-label="Changes">
+    <header class="side-head">
+      <button id="side-back" class="icon-btn back-btn" type="button"
+              title="Back to the session" aria-label="Back to the session">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
+      <div class="side-title">
+        <h2>Changes</h2>
+        <div id="side-sub" class="side-sub"></div>
+      </div>
+      <button id="side-refresh" type="button">Refresh</button>
+      <button id="side-close" class="ghost" type="button" aria-label="Close changes">✕</button>
+    </header>
+    <div id="side-body" class="side-body" tabindex="0"></div>
+    <footer id="side-foot" class="side-foot hidden"></footer>
+  </aside>
 </div>
 
 <!-- Modal host: profiles, new session, inbox, usage, options, questions. -->
 <div id="modal" class="modal hidden">
-  <div class="modal-card">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <header class="modal-head">
       <h2 id="modal-title">…</h2>
       <button id="modal-close" class="ghost" type="button" aria-label="Close">✕</button>

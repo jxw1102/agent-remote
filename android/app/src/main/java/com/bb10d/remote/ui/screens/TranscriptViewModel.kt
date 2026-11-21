@@ -164,6 +164,11 @@ class TranscriptViewModel(
         byProfile[ref.profileId]?.firstOrNull { it.sessionIds().contains(ref.sessionId) }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    /** This session's daemon: is the live connection up? */
+    val conn: StateFlow<com.bb10d.remote.data.ConnState?> = combine(repo.conn, _ref) { byProfile, ref ->
+        byProfile[ref.profileId]
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, repo.conn.value[initialRef.profileId])
+
     /** Process view for THIS session (persisted per session, like web). */
     val processView: StateFlow<Boolean> = combine(repo.settings, _ref) { s, ref ->
         ref.sessionId.isNotEmpty() && ref.sessionId in s.processViewSessions
@@ -674,7 +679,7 @@ class TranscriptViewModel(
                 return
             }
             viewModelScope.launch {
-                val interactive = profile.effectiveExecMode() == ExecMode.INTERACTIVE
+                val interactive = profile.effectiveExecMode(harnessProvider.value) == ExecMode.INTERACTIVE
                 runCatching {
                     if (interactive) c.input(jobId, text) else c.queue(jobId, text)
                 }.onFailure { e ->
@@ -702,7 +707,7 @@ class TranscriptViewModel(
                 c.continueSession(
                     sessionId = _ref.value.sessionId,
                     prompt = text,
-                    execMode = profile.effectiveExecMode(),
+                    execMode = profile.effectiveExecMode(harnessProvider.value),
                     model = model,
                     effort = effort,
                 )
@@ -738,7 +743,7 @@ class TranscriptViewModel(
         viewModelScope.launch {
             queued.forEach { text ->
                 runCatching {
-                    if (profile.effectiveExecMode() == ExecMode.INTERACTIVE) {
+                    if (profile.effectiveExecMode(harnessProvider.value) == ExecMode.INTERACTIVE) {
                         c.input(jobId, text)
                     } else {
                         c.queue(jobId, text)
@@ -779,7 +784,7 @@ class TranscriptViewModel(
         // /rewind never reaches the harness — the daemon (≥ 2.5) rewinds the
         // session journal itself — so it is exempt from the interactive-only
         // rule. The advertised-list check below still gates old daemons.
-        if (profile.effectiveExecMode() != ExecMode.INTERACTIVE && command != "/rewind") {
+        if (profile.effectiveExecMode(harnessProvider.value) != ExecMode.INTERACTIVE && command != "/rewind") {
             return "$command needs interactive execution — headless turns cannot run commands"
         }
         // Daemon advertises harness built-ins; always allow /rewind and /goal
@@ -853,7 +858,7 @@ class TranscriptViewModel(
                 c.continueSession(
                     sessionId = _ref.value.sessionId,
                     prompt = prompt,
-                    execMode = profile.effectiveExecMode(),
+                    execMode = profile.effectiveExecMode(harnessProvider.value),
                     model = model,
                     effort = effort,
                 )
@@ -987,6 +992,92 @@ class TranscriptViewModel(
 
     fun dismissShare() {
         _share.value = ShareUi()
+    }
+
+    // -- changes: the session folder against its last commit ---------------
+
+    /** [output] is what the last git action printed; [busy] while one runs. */
+    data class ChangesUi(
+        val open: Boolean = false,
+        val loading: Boolean = false,
+        val data: com.bb10d.remote.data.ChangesDto? = null,
+        val error: String? = null,
+        val output: String = "",
+        val busy: Boolean = false,
+        /** Counts commits that succeeded, so the sheet knows when to clear its message. */
+        val committed: Int = 0,
+    )
+
+    private val _changes = MutableStateFlow(ChangesUi())
+    val changes: StateFlow<ChangesUi> = _changes.asStateFlow()
+
+    fun openChanges() {
+        _changes.value = ChangesUi(open = true)
+        loadChanges()
+    }
+
+    fun closeChanges() {
+        _changes.value = ChangesUi()
+    }
+
+    fun loadChanges() {
+        val c = client ?: return
+        val sid = _ref.value.sessionId
+        if (sid.isEmpty() || !_changes.value.open) return
+        _changes.value = _changes.value.copy(loading = true, error = null)
+        viewModelScope.launch {
+            val result = runCatching { c.changes(sid) }
+            if (!_changes.value.open) return@launch
+            _changes.value = result.fold(
+                onSuccess = { _changes.value.copy(loading = false, data = it) },
+                onFailure = { _changes.value.copy(loading = false, error = repo.reason(it)) },
+            )
+        }
+    }
+
+    /** Stage everything listed and commit it with [message]. */
+    fun commitChanges(message: String) {
+        val text = message.trim()
+        if (text.isEmpty()) return
+        // Single-quoted for the shell: the message is data, never syntax.
+        runGit(
+            "git add -A && git commit -m '" + text.replace("'", "'\\''") + "'",
+            "git add -A && git commit",
+            isCommit = true,
+        )
+    }
+
+    /** Push; publishes the branch to origin when it has no upstream yet. */
+    fun pushChanges() {
+        val command = if (_changes.value.data?.upstream.isNullOrEmpty()) "git push -u origin HEAD" else "git push"
+        runGit(command, command)
+    }
+
+    private fun runGit(command: String, shown: String, isCommit: Boolean = false) {
+        val c = client ?: return
+        if (_changes.value.busy) return
+        val cwd = _changes.value.data?.root?.ifEmpty { null } ?: _session.value?.cwd.orEmpty()
+        _changes.value = _changes.value.copy(busy = true)
+        viewModelScope.launch {
+            var ok = false
+            val output = runCatching { c.shell(command, _ref.value.sessionId, cwd) }.fold(
+                onSuccess = {
+                    ok = it.exitCode == 0
+                    "$ $shown\n" + it.output.trim().ifEmpty { "(no output)" } +
+                        if (it.exitCode != 0) "\n(exit code ${it.exitCode})" else ""
+                },
+                onFailure = { "$ $shown\n" + repo.reason(it) },
+            )
+            if (!_changes.value.open) return@launch
+            _changes.value = _changes.value.copy(
+                busy = false,
+                output = output,
+                // The sheet clears its message when this moves, and only then:
+                // a failed commit keeps what was typed.
+                committed = _changes.value.committed + if (isCommit && ok) 1 else 0,
+            )
+            loadChanges()
+        }
     }
 
     private val _hostFile = MutableStateFlow(HostFileUi())

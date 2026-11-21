@@ -1389,6 +1389,9 @@ class GrokRunner:
             "stop": True,
             "projects": True,
             "ws_status": True,
+            # Status stream carries `sessions_rev`; it bumps when a new
+            # session appears so clients re-list without a manual refresh.
+            "session_events": True,
             "permissions": False,
             "permission_modes": False,
             "requires_cwd": False,

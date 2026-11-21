@@ -285,7 +285,8 @@ lv_obj_t *makeProviderBadge(lv_obj_t *parent, const String &p) {
     pts[4] = {6, 15};  pts[5] = {14, 15};
     lv_obj_add_event_cb(chip, freeLogoPoints, LV_EVENT_DELETE, pts);
     for (int i = 0; i < 3; i++) addLine(pts + i * 2, 2, 2);
-  } else if (p.startsWith("co")) {
+  } else if (p.startsWith("co") && !p.startsWith("cop")) {
+    // "cop" is Copilot, which has no glyph yet and takes the dot below.
     // OpenAI-style knot: six skewed petals in hexagonal symmetry.
     lv_point_precise_t *pts =
         (lv_point_precise_t *)lv_malloc(sizeof(lv_point_precise_t) * 12);
@@ -2367,6 +2368,12 @@ void tick() {
       if (cur == Screen::Beeper && cardsBox) rebuildCards();
     }
   }
+
+  // A new session appeared on some daemon (sessions_rev bumped, daemon >= 2.21)
+  // — re-list so it shows without a manual refresh. This catches brand-new
+  // sessions with no active job yet, which the "!jobs.empty()" trigger misses.
+  // Rate-limited (20 s floor) so it never thrashes the sockets.
+  if (statusfeed::takeSessionsChanged()) refreshSessionsRateLimited();
 
   // BLE buddy snapshot changes: same chime rules, desktop-side counters.
   static uint32_t lastBleGen = 0;

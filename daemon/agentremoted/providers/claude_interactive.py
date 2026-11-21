@@ -190,6 +190,21 @@ def _claude_splash(text: str) -> bool:
     return any(m in text for m in _SPLASH_MARKERS)
 
 
+def _trust_dialog_key(text: str) -> str:
+    """The key that accepts the folder-trust dialog, or "" when it is not up.
+
+    Claude 2.1.3xx lists "No, exit" first, so the blind Enter nudge picked it
+    and the TUI quit with status 1. Move the cursor onto the trust option
+    first, then confirm.
+    """
+    if not text or "trust this folder" not in text:
+        return ""
+    for line in text.splitlines():
+        if "❯" in line:
+            return "Enter" if "trust this folder" in line else "Down"
+    return "Down"
+
+
 def _claude_pane_ready(text: str) -> bool:
     """True when the input chrome is up and the first-run splash is gone.
 
@@ -386,6 +401,9 @@ class InteractiveManager:
 
     def _startup_key(self, text: str, nudge_i: int) -> str:
         """One tmux key to dismiss first-run chrome, or "" to leave the pane."""
+        trust = _trust_dialog_key(text)
+        if trust:
+            return trust
         if self._pane_is_splash(text):
             return _SPLASH_NUDGE_KEYS[nudge_i % len(_SPLASH_NUDGE_KEYS)]
         return ""

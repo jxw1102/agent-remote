@@ -4,6 +4,7 @@ import com.bb10d.remote.data.AttachmentDto
 import com.bb10d.remote.data.FocusActionDto
 import com.bb10d.remote.data.GoalWatchReplyDto
 import com.bb10d.remote.data.GoalsDto
+import com.bb10d.remote.data.ChangesDto
 import com.bb10d.remote.data.FocusDto
 import com.bb10d.remote.data.DropListDto
 import com.bb10d.remote.data.ErrorDto
@@ -357,6 +358,10 @@ class DaemonClient(
     // Focus mode asks the daemon for the rows rather than filtering
     // /api/sessions here: a project untouched for weeks falls outside the
     // recency window, and that is exactly the row that must not be lost.
+
+    /** What differs from the last commit in a session's folder (daemon ≥ 2.24). */
+    suspend fun changes(sessionId: String): ChangesDto =
+        call(request(url("api/sessions/$sessionId/changes")).get().build(), ChangesDto.serializer())
 
     suspend fun focus(): FocusDto =
         call(request(url("api/focus")).get().build(), FocusDto.serializer())
@@ -819,6 +824,12 @@ class DaemonClient(
 
     /** The URL the SSE status stream lives on, for [StatusStream]. */
     fun statusUrl(): HttpUrl = url("sse/status")
+
+    /** Live TUI frames, pushed when the pane changes (agentremoted ≥ 2.22). */
+    fun tuiStreamUrl(sessionId: String, ansi: Boolean = true): HttpUrl = url(
+        "sse/sessions/$sessionId/tui",
+        if (ansi) mapOf("ansi" to "1") else emptyMap(),
+    )
 
     fun authHeader(): Pair<String, String> = "X-Auth-Token" to token
 }

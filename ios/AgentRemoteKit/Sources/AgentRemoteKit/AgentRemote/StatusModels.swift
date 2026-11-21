@@ -65,12 +65,17 @@ public struct ActiveJobStatus: Codable, Sendable, Equatable, Identifiable {
 public struct StatusPush: Codable, Sendable, Equatable {
     public let type: String
     public let active: [ActiveJobStatus]
+    /// Daemon ≥ 2.21: bumps whenever a new session appears. A client watches it
+    /// and re-lists so a session started elsewhere shows without a manual
+    /// refresh. Absent (0) on older daemons.
+    public let sessionsRev: Int
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         type = try c.decodeIfPresent(String.self, forKey: .type) ?? ""
         active = try c.decodeIfPresent([ActiveJobStatus].self, forKey: .active) ?? []
+        sessionsRev = try c.decodeIfPresent(Int.self, forKey: .sessionsRev) ?? 0
     }
 
-    private enum CodingKeys: String, CodingKey { case type, active }
+    private enum CodingKeys: String, CodingKey { case type, active, sessionsRev }
 }

@@ -724,6 +724,10 @@ private:
     void fetchMessages(int offset, int limit, bool older);
     void handleMessages(QNetworkReply *reply, const QVariant &data);
     void setLoadingOlder(bool v);
+    // Re-list when a status frame's sessions_rev changes for this profile -
+    // a new session appeared. First frame per profile only baselines; older
+    // daemons omit the field and never trigger a refresh.
+    void maybeRefreshOnSessionsRev(int profileIndex, const QVariantMap &frame);
     void handleJobPoll(int httpStatus, const QVariant &data, bool parseOk,
                        const QString &networkError);
     void handleJobEnd(const QString &status, const QString &newSessionId,
@@ -874,6 +878,7 @@ private:
     QStringList m_unifiedErrors;
     QList<StatusSse *> m_extraStreams;         // one per non-active profile
     QHash<int, QVariantList> m_extraStatuses;  // profileIndex -> active jobs
+    QHash<int, int> m_lastSessionsRev;         // profileIndex -> last sessions_rev
 
     // Unified inbox merge (same generation-guarded shape as the sessions).
     int m_dropGen;
