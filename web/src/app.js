@@ -1156,6 +1156,14 @@ async function pingProfile(profile) {
     profile.linkedFiles = !!ping.linked_files;
     // Changes view (agentremoted ≥ 2.24): /api/sessions/<id>/changes.
     profile.changes = !!ping.changes;
+    // ?scope=turn (agentremoted ≥ 2.26): what this turn changed, measured
+    // from a snapshot the daemon takes beside the folder — so it answers in
+    // a folder that is not a repository at all.
+    profile.changesTurn = !!ping.changes_turn;
+    // Per-session model/effort (agentremoted >= 2.27): the model belongs to
+    // the session, pinned through POST /api/sessions/<id>/options. Without
+    // it the picker falls back to one pick per daemon, as it used to be.
+    profile.sessionOptions = !!ping.session_options;
     // Live TUI frames pushed over SSE + ordered key batches (agentremoted ≥ 2.22).
     profile.tuiStream = !!ping.tui_stream;
     profile.chunkedUpload = !!ping.chunked_upload
@@ -1274,6 +1282,53 @@ function setEffortFor(profile, harness, effort) {
   if (!profile.effortByHarness) profile.effortByHarness = {};
   if (h) profile.effortByHarness[h] = effort;
   profile.effort = effort;
+}
+
+/**
+ * The model an OPEN session runs on, which is not the same question as
+ * "what model did this daemon's picker last land on".
+ *
+ * Three answers, in order of how much they know:
+ *   1. `model_pinned` — a model chosen for this session, from any client.
+ *   2. `model` — what it actually last ran on, read from its transcript.
+ *   3. the profile default — all a session that has never run can offer.
+ *
+ * A session can report a model the harness no longer lists (an older id, a
+ * `[1m]` variant); it is still what the session runs on, so it is still what
+ * the chip shows. `turnChoices` adds it to the menu for the same reason.
+ */
+function sessionModelOf(profile, session, harness = null) {
+  const pinned = String((session && session.model_pinned) || "").trim();
+  if (pinned) return pinned;
+  const ran = String((session && session.model) || "").trim();
+  if (ran && ran !== "default" && ran !== "interactive") return ran;
+  return modelOf(profile, harness);
+}
+function sessionEffortOf(profile, session, harness = null) {
+  const pinned = String((session && session.effort_pinned) || "").trim();
+  if (pinned) return pinned;
+  return effortOf(profile, harness);
+}
+
+/**
+ * Pin a model/effort to one session on the daemon, so every client shows it
+ * and every later turn uses it. Optimistic: the open row is updated first,
+ * because the picker must not sit on the old value while the POST flies.
+ */
+async function pinSessionOption(profile, sessionId, patch) {
+  if (!profile || !sessionId) return;
+  if (state.open && state.open.sessionId === sessionId) {
+    const now = { ...state.open.session };
+    if ("model" in patch) now.model_pinned = patch.model;
+    if ("effort" in patch) now.effort_pinned = patch.effort;
+    state.open.session = now;
+  }
+  try {
+    await call(profile, `/api/sessions/${encodeURIComponent(sessionId)}/options`,
+               { method: "POST", body: patch });
+  } catch (e) {
+    composerNote(e.message, true);
+  }
 }
 
 // ----------------------------------------------------------- onboarding
@@ -1499,15 +1554,24 @@ async function refreshSessions() {
 }
 
 /**
- * Adopt the freshly fetched focus flag for the open session, so the row
- * button stops lying after the card changed on another device.
+ * Adopt freshly fetched per-session state for the open session, so the
+ * composer and the row button stop lying after something changed on another
+ * device: the focus card, and the model this session runs on (both the one
+ * it last ran on and a model pinned to it from another client).
  */
 function syncOpenFocusFlag() {
   const open = state.open;
   if (!open) return;
   const row = state.rows.find((r) => r.session && r.session.id === open.sessionId);
-  if (!row || typeof row.session.focus !== "boolean") return;
-  open.session = { ...open.session, focus: row.session.focus };
+  if (!row) return;
+  const next = { ...open.session };
+  if (typeof row.session.focus === "boolean") next.focus = row.session.focus;
+  for (const key of ["model", "model_pinned", "effort_pinned"]) {
+    if (key in row.session) next[key] = row.session[key];
+    else delete next[key];
+  }
+  open.session = next;
+  if (state.open === open) syncComposer();
 }
 
 /**
@@ -2388,8 +2452,6 @@ function syncJumpPill() {
 function scrollToLatest(smooth) {
   const view = $("transcript");
   unseenLive = 0;
-  state.stick = true;
-  state.gestureAt = 0;
   // Animate a short hop; a long transcript would take seconds to glide.
   const far = view.scrollHeight - view.scrollTop > view.clientHeight * 3;
   if (smooth && !far && view.scrollTo) {
@@ -2561,7 +2623,7 @@ function syncShareButton() {
 // tree against its last commit. Read-only on the daemon; commit and push are
 // explicit actions here, run through the same /api/shell as a "!command".
 
-const side = { open: false, loading: false, data: null, error: "", gen: 0, out: "", form: false, busy: false, msg: "" };
+const side = { open: false, loading: false, data: null, error: "", gen: 0, out: "", form: false, busy: false, msg: "", scope: "commit" };
 
 function syncChangesButton() {
   const btn = $("btn-changes");
@@ -2610,8 +2672,10 @@ async function loadChanges() {
   side.error = "";
   renderSide();
   try {
+    const turn = side.scope === "turn" && profile.changesTurn;
     const data = await call(profile,
-      `/api/sessions/${encodeURIComponent(sid)}/changes`, { timeout: 30000 });
+      `/api/sessions/${encodeURIComponent(sid)}/changes`
+      + (turn ? "?scope=turn" : ""), { timeout: 30000 });
     if (gen !== side.gen) return;
     side.data = data;
   } catch (e) {
@@ -2653,6 +2717,38 @@ function diffLineClass(line, inHunk) {
   return "meta";
 }
 
+/**
+ * Which question the pane is answering. Two scopes, because they are two
+ * different questions: "what did this turn do" is the one you ask before
+ * answering the agent, and the only one a folder without a repository can
+ * answer at all.
+ */
+function scopeBar() {
+  const profile = state.open && profileById(state.open.profileId);
+  if (!profile || !profile.changesTurn) return null;
+  const bar = el("div", "scopebar");
+  bar.setAttribute("role", "tablist");
+  bar.setAttribute("aria-label", "What to compare with");
+  [["turn", "This turn", "Since the last turn started"],
+   ["commit", "Since last commit", "The working tree against HEAD"]]
+    .forEach(([key, label, title]) => {
+      const b = el("button", "pill", label);
+      b.type = "button";
+      b.title = title;
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", String(side.scope === key));
+      b.addEventListener("click", () => {
+        if (side.scope === key) return;
+        side.scope = key;
+        side.data = null;
+        side.form = false;
+        loadChanges();
+      });
+      bar.appendChild(b);
+    });
+  return bar;
+}
+
 function renderSide() {
   const body = $("side-body");
   const sub = $("side-sub");
@@ -2662,12 +2758,16 @@ function renderSide() {
   foot.textContent = "";
   foot.classList.add("hidden");
   const d = side.data;
+  const bar = scopeBar();
+  if (bar) body.appendChild(bar);
   if (side.out) body.appendChild(el("pre", "side-out", side.out));
   if (side.loading && !d) {
     sub.textContent = "";
     const note = el("div", "side-note");
     note.appendChild(el("span", "spinner"));
-    note.appendChild(document.createTextNode(" Reading the working tree…"));
+    note.appendChild(document.createTextNode(
+      side.scope === "turn" ? " Comparing with the start of the turn…"
+                            : " Reading the working tree…"));
     body.appendChild(note);
     return;
   }
@@ -2677,15 +2777,41 @@ function renderSide() {
     return;
   }
   if (!d) return;
-  if (!d.repo) {
+  // scope=turn with no mark to measure from: the daemon says why.
+  if (d.available === false) {
     sub.textContent = d.cwd || "";
-    body.appendChild(el("div", "side-note",
-      "This session's folder is not a git repository, so there is nothing to compare with."));
+    body.appendChild(el("div", "side-note", d.reason
+      || "There is nothing to measure this turn against yet."));
     return;
   }
-  const bits = [d.branch || "detached"];
-  if (d.ahead) bits.push(`↑${d.ahead}`);
-  if (d.behind) bits.push(`↓${d.behind}`);
+  if (!d.repo) {
+    sub.textContent = d.cwd || "";
+    const note = el("div", "side-note",
+      "This session's folder is not a git repository, so there is nothing "
+      + "to compare with.");
+    body.appendChild(note);
+    const profile = state.open && profileById(state.open.profileId);
+    if (profile && profile.changesTurn) {
+      // The one scope that still works here, and the reason the shadow
+      // snapshots exist.
+      const hint = el("div", "side-note",
+        "“This turn” still works: the daemon snapshots the folder when a "
+        + "turn starts, outside the folder, so it can show what changed.");
+      body.appendChild(hint);
+    }
+    return;
+  }
+  const turnScope = d.scope === "turn";
+  const bits = [];
+  if (turnScope) {
+    bits.push(d.since
+      ? `this turn · started ${shortSpan(Date.now() / 1000 - d.since)} ago`
+      : "this turn");
+  } else {
+    bits.push(d.branch || "detached");
+    if (d.ahead) bits.push(`↑${d.ahead}`);
+    if (d.behind) bits.push(`↓${d.behind}`);
+  }
   const files = d.files || [];
   bits.push(files.length
     ? `${files.length} ${files.length === 1 ? "file" : "files"} · +${d.added} −${d.removed}`
@@ -2694,9 +2820,10 @@ function renderSide() {
   sub.title = d.root || "";
 
   if (!files.length) {
-    body.appendChild(el("div", "side-note",
-      "Nothing differs from the last commit."
-      + (d.ahead ? ` ${d.ahead} ${d.ahead === 1 ? "commit is" : "commits are"} not pushed yet.` : "")));
+    body.appendChild(el("div", "side-note", turnScope
+      ? "Nothing in this folder changed during the last turn."
+      : "Nothing differs from the last commit."
+        + (d.ahead ? ` ${d.ahead} ${d.ahead === 1 ? "commit is" : "commits are"} not pushed yet.` : "")));
   } else {
     const sections = splitDiff(d.diff);
     const anchors = new Map();
@@ -2750,7 +2877,10 @@ function renderSide() {
   }
   body.scrollTop = keepScroll;
 
-  // Git actions. Each one says exactly what it will run.
+  // Git actions. Each one says exactly what it will run — and they run on
+  // the project's repository, which is why they are not offered in the turn
+  // scope: `git add -A` would take in everything, not the diff shown above.
+  if (turnScope) return;
   if (!files.length && !d.ahead && !d.can_publish) return;
   foot.classList.remove("hidden");
   if (side.form) {
@@ -3697,10 +3827,13 @@ function watchTranscriptScroll() {
 
 const readerScrolling = () => Date.now() - state.gestureAt < 400;
 
-/** Follow the tail of a live turn — but only when the reader is still there. */
+/** Follow the tail of a live turn — but only when the reader is still there.
+ *  Returns false when it left them where they were, which is what the jump
+ *  pill counts as unseen. */
 function followBottom(view) {
-  if (!state.stick || readerScrolling()) return;
+  if (!state.stick || readerScrolling()) return false;
   view.scrollTop = view.scrollHeight;
+  return true;
 }
 
 /** Jump to the bottom because the reader acted (opened, sent, refreshed). */
@@ -3738,8 +3871,13 @@ function renderTranscript(toBottom) {
   view.appendChild(thread);
   syncWorkingTail();
   if (hold) {
+    // A reader who has scrolled back keeps their distance from the bottom
+    // across the rebuild, whether this was a follow or an explicit jump.
     view.scrollTop = Math.max(0, view.scrollHeight - hold);
     state.lastTop = view.scrollTop;
+  } else if (toBottom === "follow") {
+    // A reload of what is already on screen (end of turn, process steps).
+    followBottom(view);
   } else if (toBottom) {
     jumpBottom(view);
   }
@@ -4075,10 +4213,14 @@ function composerNote(text, isError) {
 
 // --------------------------------------- composer: per-turn chips, commands
 //
-// Execution, model and effort are choices about the NEXT message, so they
-// sit on the composer where the message is written. They used to be three
-// rows deep in the Options dialog, which is how a turn got sent headless by
-// someone who thought it was interactive.
+// Model and effort are choices about the NEXT message, so they sit on the
+// composer where the message is written.
+//
+// Execution is NOT a chip: it is a property of the session and lives in the
+// Turn options dialog, the same place the BlackBerry and Android clients
+// keep it. It was a chip for a while because the old dialog buried it three
+// rows deep, which is how a turn got sent headless by someone who thought it
+// was interactive; the dialog now opens on it, with the mode spelled out.
 
 /** Daemon + harness the open session's next turn goes to. */
 function turnContext() {
@@ -4093,37 +4235,49 @@ const EXEC_HINT = {
   headless: "Runs without a terminal. Messages queue while a turn runs.",
 };
 
-/** One entry per chip: what it is, what it can be, what it is now. */
+/** The menu for a chip: the harness's list, plus whatever is selected now. */
+function withCurrent(values, current) {
+  return current && !values.includes(current) ? values.concat([current]) : values;
+}
+
+/**
+ * One entry per chip: what it is, what it can be, what it is now.
+ *
+ * The chips belong to the open *session*. A pick is pinned to that session
+ * on the daemon, so it shows on every client and leaves every other session
+ * alone — which is the opposite of what these chips used to do. Against a
+ * daemon too old to pin (< 2.27) they fall back to the daemon-wide setting.
+ */
 function turnChoices() {
   const ctx = turnContext();
   if (!ctx) return [];
   const { profile, harness } = ctx;
+  const session = (state.open && state.open.session) || null;
+  const sid = (state.open && state.open.sessionId) || "";
+  const perSession = !!(profile.sessionOptions && sid && !isJobPlaceholder(sid));
   const out = [];
-  const canInteractive = capOf(profile, "interactive", true, harness);
-  out.push({
-    key: "exec", label: "Execution",
-    values: canInteractive ? ["interactive", "headless"] : ["headless"],
-    current: execModeOf(profile, harness),
-    display: execModeLabel,
-    hint: (v) => EXEC_HINT[v] || "",
-    set: (v) => { profile.execMode = normalizeExecMode(v, canInteractive); },
-  });
   const models = modelsOf(profile, harness);
   if (capOf(profile, "can_set_model", true, harness) && models.length) {
+    const current = perSession
+      ? sessionModelOf(profile, session, harness) : modelOf(profile, harness);
     out.push({
-      key: "model", label: "Model", values: models,
-      current: modelOf(profile, harness),
-      display: (v) => v, hint: () => "",
-      set: (v) => setModelFor(profile, harness, v),
+      key: "model", label: "Model", values: withCurrent(models, current),
+      current, display: (v) => v, hint: () => "", perSession,
+      set: (v) => (perSession
+        ? pinSessionOption(profile, sid, { model: v })
+        : setModelFor(profile, harness, v)),
     });
   }
   const efforts = effortsOf(profile, harness);
   if (capOf(profile, "can_set_effort", false, harness) && efforts.length) {
+    const current = perSession
+      ? sessionEffortOf(profile, session, harness) : effortOf(profile, harness);
     out.push({
-      key: "effort", label: "Effort", values: efforts,
-      current: effortOf(profile, harness),
-      display: (v) => v, hint: () => "",
-      set: (v) => setEffortFor(profile, harness, v),
+      key: "effort", label: "Effort", values: withCurrent(efforts, current),
+      current, display: (v) => v, hint: () => "", perSession,
+      set: (v) => (perSession
+        ? pinSessionOption(profile, sid, { effort: v })
+        : setEffortFor(profile, harness, v)),
     });
   }
   return out;
@@ -4229,8 +4383,11 @@ function openChipMenu(key, anchor) {
     box.appendChild(o);
   });
   box.appendChild(el("div", "pop-foot",
-    `Used for every session on ${ctx.profile.name}`
-    + (ctx.profile.multi && ctx.harness && key !== "exec" ? ` · ${ctx.harness}` : "")));
+    choice.perSession
+      ? "This session only"
+        + (ctx.profile.multi && ctx.harness ? ` · ${ctx.harness}` : "")
+      : `Used for every session on ${ctx.profile.name}`
+        + (ctx.profile.multi && ctx.harness ? ` · ${ctx.harness}` : "")));
   pop.kind = "chip";
   pop.key = key;
   pop.anchor = anchor;
@@ -4452,8 +4609,8 @@ async function send(text) {
         body: {
           prompt: raw,
           permission_mode: wireExecMode(execModeOf(profile, harness)),
-          model: modelOf(profile, harness),
-          effort: effortOf(profile, harness),
+          model: sessionModelOf(profile, state.open && state.open.session, harness),
+          effort: sessionEffortOf(profile, state.open && state.open.session, harness),
         },
       });
     if (res && res.job_id && isOpenStill(openGen, openProfileId, openSessionId)) {
@@ -4503,8 +4660,10 @@ async function runShell(command) {
     const started = await call(profile,
       `/api/sessions/${encodeURIComponent(openSessionId)}/continue`,
       { method: "POST", body: { prompt, permission_mode: wireExecMode(execModeOf(profile, harness)),
-                                model: modelOf(profile, harness),
-                                effort: effortOf(profile, harness) } });
+                                model: sessionModelOf(
+                                  profile, state.open && state.open.session, harness),
+                                effort: sessionEffortOf(
+                                  profile, state.open && state.open.session, harness) } });
     if (started && started.job_id && isOpenStill(openGen, openProfileId, openSessionId)) {
       attachJob(started.job_id, openSessionId);
     }
@@ -4532,17 +4691,14 @@ function appendLive(item, { gen = state.openGen, profileId = null, sessionId = n
   state.items.push(row);
   const thread = $("transcript").querySelector(".thread");
   if (thread) {
+    const view = $("transcript");
     thread.appendChild(renderMessage(state.items[state.items.length - 1]));
     syncWorkingTail();
-    const view = $("transcript");
     // The reader's own prompt pulls them back down; the agent's output does
     // not — reading back through a long turn has to survive new rows, and
-    // the pill counts what arrived below them.
+    // what they did not see is counted on the jump pill instead.
     if (row.role === "user") jumpBottom(view);
-    else {
-      followBottom(view);
-      if (!nearBottom(view)) unseenLive += 1;
-    }
+    else if (!followBottom(view)) unseenLive += 1;
     syncJumpPill();
   } else {
     renderTranscript(true);
@@ -7053,16 +7209,25 @@ function openOptions() {
       // Open session's harness (multi tags each row); else profile default.
       const harness = sessionProvider(state.open && state.open.session, profile)
         || (profileHarnesses(profile)[0] || profile.provider || "");
-      // Execution, model and effort are per message: they are chips on the
-      // composer now, not rows in here.
-      const sessionModel = String(
-        (state.open.session && state.open.session.model) || "").trim();
-      if (sessionModel && sessionModel !== "default" && sessionModel !== "interactive") {
+      // Execution: how the next message runs. Model and effort are chips on
+      // the composer, because they change far more often than this does.
+      const canInteractive = capOf(profile, "interactive", true, harness || null);
+      const execNow = execModeOf(profile, harness || null);
+      group("Execution",
+            canInteractive ? ["interactive", "headless"] : ["headless"],
+            execNow,
+            (v) => { profile.execMode = normalizeExecMode(v, canInteractive); },
+            execModeLabel);
+      body.appendChild(el("div", "help", EXEC_HINT[execNow] || ""));
+      const choices = turnChoices();
+      if (choices.length) {
         body.appendChild(el("div", "help",
-          `This session last ran on ${sessionModel}`));
+          choices.every((c) => c.perSession)
+            ? "Model and effort are set on the message box, under the"
+              + " transcript, and belong to this session alone."
+            : "Model and effort are set on the message box, under the"
+              + " transcript."));
       }
-      body.appendChild(el("div", "help",
-        "Execution, model and effort are set on the message box, under the transcript."));
       const toggle = (label, checked, onChange) => {
         const f = el("div", "field");
         const cb = el("label");

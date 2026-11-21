@@ -1586,8 +1586,17 @@ button.pop-opt[aria-selected="true"] .pop-main::after { content: " ✓"; color: 
 .qrart svg { width: min(220px, 60vw); height: auto; display: block; }
 .pillbar { display: flex; flex-wrap: wrap; gap: 6px; }
 .pill { font-size: 12px; padding: 4px 10px; border-radius: 8px; }
+/* Which question the Changes pane is answering (tabs, so aria-selected). */
+.scopebar {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
 /* --pc is per-button brand (harness chips); falls back to session --accent. */
-.pill[aria-pressed="true"] {
+.pill[aria-pressed="true"],
+.pill[aria-selected="true"] {
   background: var(--pc, var(--accent));
   border-color: var(--pc, var(--accent));
   color: #0b0b0d;
