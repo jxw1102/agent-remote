@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
@@ -154,17 +155,22 @@ internal fun Composer(
         if (text != field.text) field = TextFieldValue(text, TextRange(text.length))
     }
     val queues = running && !interactive
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .navigationBarsPadding(),
-    ) {
+    // Inside the floating card: one piece with it. No surface or system bar
+    // padding of its own (the card and the page give those); + and Send are
+    // round, like the bubbles and the bar's switch.
+    Column(Modifier.fillMaxWidth()) {
         Row(
-            Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+            Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
-            IconButton(onClick = onAttach) {
+            IconButton(
+                onClick = onAttach,
+                modifier = Modifier
+                    .padding(bottom = 4.dp)
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f)),
+            ) {
                 Icon(Icons.Outlined.Add, contentDescription = "Attach a file", tint = pal.dim)
             }
             TextField(
@@ -218,8 +224,9 @@ internal fun Composer(
                 enabled = canSend,
                 modifier = Modifier
                     .padding(bottom = 4.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(if (canSend) accent else Color.Transparent),
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(if (canSend) accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f)),
             ) {
                 // Says what it will do: while a headless turn runs, the
                 // message waits its turn on the daemon.

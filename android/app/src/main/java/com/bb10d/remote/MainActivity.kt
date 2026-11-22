@@ -2,11 +2,14 @@ package com.bb10d.remote
 
 import android.Manifest
 import android.content.Intent
-import android.view.WindowManager
-import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.DialogWindowProvider
-import androidx.navigation.compose.dialog
+import androidx.compose.ui.Modifier
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.key
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Box
 import com.bb10d.remote.ui.screens.SheetMotion
 import android.os.Build
 import android.os.Bundle
@@ -117,9 +120,6 @@ private object Routes {
     const val NONE = "-"
 }
 
-private const val TRANSCRIPT_ROUTE =
-    "${Routes.TRANSCRIPT}/{profileId}/{sessionId}?job={job}&provider={provider}"
-
 @Composable
 private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boolean) {
     val context = LocalContext.current
@@ -158,20 +158,27 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
         JobWatchService.sync(context, running && settings.backgroundWatch)
     }
 
+    var sheet by rememberSaveable(stateSaver = SheetRoute.Saver) { mutableStateOf<SheetRoute?>(null) }
+    val openSheet: (SheetRoute) -> Unit = { sheet = it }
+
     LaunchedEffect(openOnStart) {
         val ref = openOnStart?.let { SessionRef.parse(it) } ?: return@LaunchedEffect
         onOpenConsumed()
-        nav.navigate(Routes.transcript(ref.profileId, ref.sessionId))
+        openSheet(SheetRoute(ref.profileId, ref.sessionId))
     }
 
+    // The session page is drawn over the navigation host, in the activity's
+    // own window: the list stays drawn (and live) under the session sheet,
+    // and the page reaches the full height of the screen (a dialog window
+    // could not reach under the status bar on every phone).
+
+    Box(Modifier.fillMaxSize()) {
     NavHost(navController = nav, startDestination = Routes.SESSIONS) {
         composable(Routes.SESSIONS) {
             SessionsScreen(
                 vm = viewModel(factory = factory),
                 onOpen = { ref, provider ->
-                    nav.navigate(
-                        Routes.transcript(ref.profileId, ref.sessionId, provider = provider),
-                    )
+                    openSheet(SheetRoute(ref.profileId, ref.sessionId, provider = provider))
                 },
                 onNewSession = { nav.navigate(Routes.NEW_SESSION) },
                 onProfiles = { nav.navigate(Routes.PROFILES) },
@@ -226,61 +233,79 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
                 onBack = { nav.popBackStack() },
                 onStarted = { profileId, jobId, provider ->
                     nav.popBackStack()
-                    nav.navigate(
-                        Routes.transcript(profileId, "", jobId, provider = provider),
-                    )
+                    openSheet(SheetRoute(profileId, "", jobId, provider))
                 },
             )
         }
 
-        // A window over the list rather than a screen in its place: the
-        // list stays drawn (and live) under the session sheet, as the page a
-        // modal sheet covers. TranscriptScreen draws its own scrim and runs
-        // its own slide in and out.
-        dialog(
-            route = TRANSCRIPT_ROUTE,
-            arguments = listOf(
-                navArgument("profileId") { type = NavType.StringType },
-                navArgument("sessionId") { type = NavType.StringType },
-                navArgument("job") { defaultValue = "" },
-                navArgument("provider") { defaultValue = "" },
-            ),
-            dialogProperties = DialogProperties(
-                usePlatformDefaultWidth = false,
-                decorFitsSystemWindows = false,
-                // Back is handled inside, so the sheet can slide away first.
-                dismissOnBackPress = false,
-                dismissOnClickOutside = false,
-            ),
-        ) { entry ->
-            FullScreenDialogWindow()
-            val profileId = entry.arguments?.getString("profileId").orEmpty()
-            val rawSession = entry.arguments?.getString("sessionId").orEmpty()
-            val sessionId = if (rawSession == Routes.NONE) "" else rawSession
-            val jobId = entry.arguments?.getString("job").orEmpty()
-            val provider = entry.arguments?.getString("provider").orEmpty()
-            val ref = SessionRef(profileId, sessionId)
-            val transcriptFactory = remember(ref.key, jobId, provider) {
-                viewModelFactory {
-                    initializer { TranscriptViewModel(repo, ref, jobId, provider) }
-                }
-            }
-            // Theme is applied inside TranscriptScreen from the session harness
-            // (nav provider is the initial hint for multi hosts).
-            TranscriptScreen(
-                vm = viewModel(key = ref.key + jobId + provider, factory = transcriptFactory),
-                onBack = { nav.popBackStack() },
+    }
+    sheet?.let { route ->
+        key(route.key) {
+            SessionSheetHost(
+                repo = repo,
+                route = route,
+                onBack = { sheet = null },
                 onOpenTab = { tab ->
-                    // Another tab: this page is replaced, so Back still goes
-                    // to the list rather than through every tab visited. The
-                    // sheet is already up: the next one does not slide in.
+                    // The sheet is already up: the next one does not slide in.
                     SheetMotion.switching = true
-                    nav.navigate(Routes.transcript(tab.profileId, tab.sessionId, provider = tab.provider)) {
-                        popUpTo(entry.destination.id) { inclusive = true }
-                    }
+                    openSheet(SheetRoute(tab.profileId, tab.sessionId, provider = tab.provider))
                 },
             )
         }
+    }
+    }
+}
+
+/** Which session the sheet shows (saved across process death). */
+private data class SheetRoute(
+    val profileId: String,
+    val sessionId: String,
+    val jobId: String = "",
+    val provider: String = "",
+) {
+    val key: String get() = "$profileId/$sessionId/$jobId/$provider"
+
+    companion object {
+        val Saver = androidx.compose.runtime.saveable.listSaver<SheetRoute?, String>(
+            save = { r -> if (r == null) emptyList() else listOf(r.profileId, r.sessionId, r.jobId, r.provider) },
+            restore = { l -> if (l.size == 4) SheetRoute(l[0], l[1], l[2], l[3]) else null },
+        )
+    }
+}
+
+/**
+ * One session page, with view models of its own that are cleared when the
+ * page goes (it is not a navigation destination, so nothing else would).
+ */
+@Composable
+private fun SessionSheetHost(
+    repo: com.bb10d.remote.data.AgentRepository,
+    route: SheetRoute,
+    onBack: () -> Unit,
+    onOpenTab: (com.bb10d.remote.data.SessionTab) -> Unit,
+) {
+    val owner = remember {
+        object : androidx.lifecycle.ViewModelStoreOwner {
+            override val viewModelStore = androidx.lifecycle.ViewModelStore()
+        }
+    }
+    DisposableEffect(owner) { onDispose { owner.viewModelStore.clear() } }
+    val ref = SessionRef(route.profileId, route.sessionId)
+    val factory = remember {
+        viewModelFactory {
+            initializer { TranscriptViewModel(repo, ref, route.jobId, route.provider) }
+        }
+    }
+    androidx.compose.runtime.CompositionLocalProvider(
+        androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner provides owner,
+    ) {
+        // Theme is applied inside TranscriptScreen from the session harness
+        // (the route's provider is the initial hint for multi hosts).
+        TranscriptScreen(
+            vm = viewModel(factory = factory),
+            onBack = onBack,
+            onOpenTab = onOpenTab,
+        )
     }
 }
 
@@ -288,33 +313,6 @@ private fun openUrl(context: android.content.Context, url: String) {
     runCatching {
         context.startActivity(
             Intent(Intent.ACTION_VIEW, url.toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        )
-    }
-}
-
-/**
- * The session page's dialog window: full screen, no system dim (the page
- * draws a scrim that follows the sheet), no window animation (the sheet
- * slides itself), and resized for the keyboard like the activity is.
- */
-@Composable
-private fun FullScreenDialogWindow() {
-    val window = (LocalView.current.parent as? DialogWindowProvider)?.window ?: return
-    androidx.compose.runtime.SideEffect {
-        window.setDimAmount(0f)
-        // The page draws under the status bar itself (with its own
-        // translucent band); the bar is not filled in by the window.
-        @Suppress("DEPRECATION")
-        window.statusBarColor = android.graphics.Color.TRANSPARENT
-        @Suppress("DEPRECATION")
-        window.navigationBarColor = android.graphics.Color.TRANSPARENT
-        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        window.setWindowAnimations(0)
-        @Suppress("DEPRECATION")
-        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        window.setLayout(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
         )
     }
 }

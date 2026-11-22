@@ -13,7 +13,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +26,10 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsTopHeight
@@ -35,7 +38,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -52,6 +55,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -66,6 +70,7 @@ import androidx.compose.ui.unit.sp
 import com.bb10d.remote.data.SessionRef
 import com.bb10d.remote.data.SessionTab
 import com.bb10d.remote.ui.components.WorkingPulse
+import com.bb10d.remote.ui.components.stateTint
 import com.bb10d.remote.ui.theme.Accent
 import com.bb10d.remote.ui.theme.palette
 import kotlin.math.roundToInt
@@ -92,12 +97,13 @@ object SheetMotion {
 /**
  * The session page as a sheet over the list, which stays drawn underneath
  * (the page is a window over it), with the open conversations above it as
- * bubbles, like a browser's tabs: tap one to switch, + to go to the list for
- * another, the open one's × (or a long press on any) to close it.
+ * bubbles, like a browser's tabs: tap one to switch, the back button to go
+ * to the list, the open one's × (or a long press on any) to close it.
  *
- * The sheet slides up when it opens and down when it goes (Back, +, closing
- * the last tab, or dragging its grip), the bubbles riding with it, and the
- * dark overlay on the list follows its position.
+ * The sheet slides up when it opens and down when it goes (Back, the back
+ * button, or
+ * closing the last tab), the bubbles riding with it, and the dark overlay
+ * on the list follows its position.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -121,6 +127,9 @@ internal fun SessionSheetFrame(
         // How far down the sheet is: the screen's height when hidden, 0 up.
         val offset = remember { Animatable(if (SheetMotion.switching) 0f else height) }
         var leaving by remember { mutableStateOf(false) }
+        // The session page reports its floating bottom bar's height here, so
+        // the tab column stands just above it.
+        val bottomInset = remember { mutableStateOf(0.dp) }
         LaunchedEffect(Unit) {
             SheetMotion.switching = false
             offset.animateTo(0f, tween(320, easing = FastOutSlowInEasing))
@@ -138,7 +147,9 @@ internal fun SessionSheetFrame(
         Box(
             Modifier
                 .fillMaxSize()
-                // The list shows through, dimmed as much as the sheet is up.
+                // The list shows through, dimmed as much as the sheet is up,
+                // but takes no touch while the sheet is over it.
+                .pointerInput(Unit) { detectTapGestures { } }
                 .background(Color.Black.copy(alpha = 0.6f * open)),
         ) {
             // The sheet reaches the top of the screen; the bubbles float
@@ -151,47 +162,18 @@ internal fun SessionSheetFrame(
                         .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
                         .background(MaterialTheme.colorScheme.background),
                 ) {
-                    content()
-                    // The grip: drag down to close.
-                    Box(
-                        Modifier
-                            .align(Alignment.TopCenter)
-                            // Under the floating bubbles, over the session bar.
-                            .statusBarsPadding()
-                            .padding(top = TAB_STRIP_HEIGHT - 6.dp)
-                            .width(120.dp)
-                            .height(18.dp)
-                            .pointerInput(Unit) {
-                                detectVerticalDragGestures(
-                                    onDragEnd = {
-                                        if (offset.value > with(density) { 110.dp.toPx() }) dismiss()
-                                        else scope.launch { offset.animateTo(0f) }
-                                    },
-                                    onDragCancel = { scope.launch { offset.animateTo(0f) } },
-                                ) { _, dy ->
-                                    if (!leaving) scope.launch {
-                                        offset.snapTo((offset.value + dy).coerceAtLeast(0f))
-                                    }
-                                }
-                            }
-                            .semantics { contentDescription = "Drag down to close" },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Box(
-                            Modifier
-                                .width(36.dp)
-                                .height(4.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f)),
-                        )
+                    CompositionLocalProvider(LocalSheetBottomInset provides bottomInset) {
+                        content()
                     }
                 }
                 // The system status bar over the sheet's top: translucent, so
                 // the conversation shows through it as it scrolls under.
                 StatusBarScrim()
-                TabStrip(tabs, current, working, blocked, conn, ::dismiss, onOpen) { tab ->
-                    if (onClose(tab)) dismiss()
-                }
+                TabStrip(
+                    tabs, current, working, blocked, conn, ::dismiss, onOpen,
+                    onClose = { tab -> if (onClose(tab)) dismiss() },
+                    modifier = Modifier.align(Alignment.BottomEnd),
+                )
             }
         }
     }
@@ -208,123 +190,171 @@ private fun TabStrip(
     onHome: () -> Unit,
     onOpen: (SessionTab) -> Unit,
     onClose: (SessionTab) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val pal = palette
     val scroll = rememberScrollState()
-    val activeIndex = tabs.indexOfFirst { it.ref.key == current.key }
-    // Keep the open bubble in view.
-    LaunchedEffect(activeIndex, tabs.size) {
-        if (activeIndex >= 0) scroll.animateScrollTo((activeIndex * 140).coerceAtMost(scroll.maxValue))
-    }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .statusBarsPadding()
-            .height(TAB_STRIP_HEIGHT)
-            .horizontalScroll(scroll)
-            .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    // A column at the end of the screen, just above the floating bottom bar:
+    // the newest tab on top, the back bubble at the foot, nearest the thumb.
+    Column(
+        modifier
+            .navigationBarsPadding()
+            .imePadding()
+            .padding(end = 12.dp, bottom = LocalSheetBottomInset.current.value + 8.dp)
+            .verticalScroll(scroll, reverseScrolling = true),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        // One bubble stands for all the tabs, the open conversation's, with a
+        // count of how many are open. A tap fans the others out above it;
+        // picking one or a few seconds put them away again, so they are not
+        // standing over the text being read.
+        var fan by remember { mutableStateOf(false) }
+        LaunchedEffect(fan) {
+            if (fan) {
+                kotlinx.coroutines.delay(6000)
+                fan = false
+            }
+        }
+        tabs.reversed().forEach { tab ->
+            val active = tab.ref.key == current.key
+            if (active || fan) TabBubble(
+                tab, current, working, blocked, conn,
+                count = if (!fan && tabs.size > 1) tabs.size else 0,
+                showClose = fan,
+                onOpen = { t -> fan = false; onOpen(t) },
+                onClose = onClose,
+                onFan = { if (tabs.size > 1) fan = !fan },
+            )
+        }
         Surface(
             onClick = onHome,
             shape = CircleShape,
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             shadowElevation = 4.dp,
-            // +, like a browser's new tab: it goes to the list, where the
-            // next conversation is picked or begun.
-            modifier = Modifier.size(44.dp).semantics { contentDescription = "Open another session" },
+            // Back to the list: the sheet goes down, the tabs stay.
+            modifier = Modifier.size(44.dp).semantics { contentDescription = "Back to sessions" },
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Add, contentDescription = null)
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
             }
         }
-        tabs.forEach { tab ->
-            val active = tab.ref.key == current.key
-            val tint = Accent.forProvider(tab.provider).tint
-            Box {
-                val size = if (active) 50.dp else 44.dp
-                Box(
+
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun TabBubble(
+    tab: SessionTab,
+    current: SessionRef,
+    working: Set<String>,
+    blocked: Set<String>,
+    conn: Map<String, com.bb10d.remote.data.ConnState>,
+    /** How many tabs this bubble stands for (0 = no count shown). */
+    count: Int,
+    showClose: Boolean,
+    onOpen: (SessionTab) -> Unit,
+    onClose: (SessionTab) -> Unit,
+    /** The open bubble was tapped: fan the others out, or put them away. */
+    onFan: () -> Unit,
+) {
+    val pal = palette
+        val active = tab.ref.key == current.key
+        val tint = Accent.forProvider(tab.provider).tint
+        Box {
+            val size = if (active) 50.dp else 44.dp
+            Box(
+                Modifier
+                    .size(size)
+                    .shadow(if (active) 8.dp else 4.dp, CircleShape)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    .background(tint.copy(alpha = if (active) 0.32f else 0.16f))
+                    .border(2.dp, tint.copy(alpha = if (active) 1f else 0.55f), CircleShape)
+                    .combinedClickable(
+                        onClick = { if (!active) onOpen(tab) else onFan() },
+                        onLongClick = { onClose(tab) },
+                        onLongClickLabel = "close tab",
+                    )
+                    .semantics {
+                        contentDescription = tab.title
+                        role = Role.Tab
+                        selected = active
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    tabInitials(tab.title),
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            // The live status, as a dot on the bubble: green while its
+            // daemon is live, breathing while the agent works, "?" when it
+            // waits on you, grey while the daemon is out of reach. It
+            // replaces the live strip under the session bar.
+            val live = conn[tab.profileId] == com.bb10d.remote.data.ConnState.LIVE
+            when {
+                tab.ref.key in blocked -> Box(
                     Modifier
-                        .size(size)
-                        .shadow(if (active) 8.dp else 4.dp, CircleShape)
+                        .align(Alignment.TopEnd)
+                        .size(17.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                        .background(tint.copy(alpha = if (active) 0.32f else 0.16f))
-                        .border(2.dp, tint.copy(alpha = if (active) 1f else 0.55f), CircleShape)
-                        .combinedClickable(
-                            onClick = { if (!active) onOpen(tab) },
-                            onLongClick = { onClose(tab) },
-                            onLongClickLabel = "close tab",
-                        )
-                        .semantics {
-                            contentDescription = tab.title
-                            role = Role.Tab
-                            selected = active
-                        },
+                        .background(stateTint("needs_answer")),
                     contentAlignment = Alignment.Center,
+                ) { Text("?", fontSize = 11.sp, fontWeight = FontWeight.Black, color = Color.Black) }
+                !live -> Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .background(pal.dim),
+                )
+                tab.ref.key in working -> WorkingPulse(
+                    stateTint("working"),
+                    Modifier.align(Alignment.TopEnd),
+                    size = 12,
+                )
+                else -> Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .background(stateTint("working")),
+                )
+            }
+            if (count > 0) Box(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .offset(x = (-6).dp, y = (-4).dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                    .padding(horizontal = 6.dp, vertical = 1.dp),
+            ) {
+                Text(count.toString(), fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface)
+            }
+            if (active && showClose) {
+                Surface(
+                    onClick = { onClose(tab) },
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    modifier = Modifier
+                        // On the side away from the next bubble's dot.
+                        .align(Alignment.BottomStart)
+                        .offset(x = (-6).dp, y = 4.dp)
+                        .size(22.dp)
+                        .semantics { contentDescription = "Close tab ${tab.title}" },
                 ) {
-                    Text(
-                        tabInitials(tab.title),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                }
-                // The live status, as a dot on the bubble: green while its
-                // daemon is live, breathing while the agent works, "?" when it
-                // waits on you, grey while the daemon is out of reach. It
-                // replaces the live strip under the session bar.
-                val live = conn[tab.profileId] == com.bb10d.remote.data.ConnState.LIVE
-                when {
-                    tab.ref.key in blocked -> Box(
-                        Modifier
-                            .align(Alignment.TopEnd)
-                            .size(17.dp)
-                            .clip(CircleShape)
-                            .background(pal.warn),
-                        contentAlignment = Alignment.Center,
-                    ) { Text("?", fontSize = 11.sp, fontWeight = FontWeight.Black, color = Color.Black) }
-                    !live -> Box(
-                        Modifier
-                            .align(Alignment.TopEnd)
-                            .size(12.dp)
-                            .clip(CircleShape)
-                            .background(pal.dim),
-                    )
-                    tab.ref.key in working -> WorkingPulse(
-                        pal.ok,
-                        Modifier.align(Alignment.TopEnd),
-                        size = 12,
-                    )
-                    else -> Box(
-                        Modifier
-                            .align(Alignment.TopEnd)
-                            .size(12.dp)
-                            .clip(CircleShape)
-                            .background(pal.ok),
-                    )
-                }
-                if (active) {
-                    Surface(
-                        onClick = { onClose(tab) },
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .offset(x = 6.dp, y = 4.dp)
-                            .size(22.dp)
-                            .semantics { contentDescription = "Close tab ${tab.title}" },
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(Icons.Outlined.Close, contentDescription = null, modifier = Modifier.size(14.dp))
-                        }
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.Close, contentDescription = null, modifier = Modifier.size(14.dp))
                     }
                 }
             }
         }
     }
-}
 
 /** Two letters for a bubble: the first letters of the title's first words. */
 internal fun tabInitials(title: String): String {
@@ -336,8 +366,9 @@ internal fun tabInitials(title: String): String {
     return (first.toString() + (second?.toString() ?: "")).uppercase()
 }
 
-/** Height of the floating bubbles over the sheet's top (below the status bar). */
-internal val TAB_STRIP_HEIGHT = 62.dp
+/** The session page's floating bottom bar height, for the tab column. */
+internal val LocalSheetBottomInset =
+    androidx.compose.runtime.staticCompositionLocalOf { mutableStateOf(0.dp) }
 
 /**
  * A translucent band the height of the system status bar, so the page can

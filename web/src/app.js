@@ -2416,22 +2416,9 @@ function renderSessions() {
       btn.appendChild(done);
     }
 
-    // Three lines: how and where it is (state, folder, branch, when, daemon),
-    // then what it is (the title), then what was last said.
+    // Four lines: how it is and when (state, time), what it is (the title),
+    // what was last said, and where it runs (folder, branch, daemon).
     const meta = el("div", "row-meta");
-    // Working = breathing dot; permission/question = blinking "?" in that spot.
-    if (blocked.has(key)) {
-      const mark = el("span", "pulse-ask", "?");
-      mark.title = "Waiting for your answer";
-      mark.setAttribute("aria-label", "Waiting for your answer");
-      meta.appendChild(mark);
-    } else if (working.has(key)) {
-      const dot = el("span", "pulse");
-      dot.style.background = pal.accent;
-      dot.title = "Working";
-      dot.setAttribute("aria-label", "Working");
-      meta.appendChild(dot);
-    }
     // Host chip in this session's harness colour (Mbp+Grok → cyan, not multi purple).
     // No separate Grok/Claude/Codex tag — host colour already implies harness.
     const hostTag = el("span", "tag host", row.profileName);
@@ -2439,14 +2426,20 @@ function renderSessions() {
     hostTag.title = (pal.label || row.provider)
       ? `${row.profileName} · ${pal.label || row.provider}`
       : "Daemon profile";
-    // The daemon's word for it, so the list, Focus and every other client agree.
-    if (blocked.has(key)) meta.appendChild(el("span", "tag waiting", FOCUS_LABELS.needs_answer));
-    // Focus state tag. Same row layout as any other session — one more chip.
-    // Focus mode only: in All mode it is noise on rows the human never
-    // enrolled, and it duplicates the working dot. Suppressed when the row
-    // already says "waiting for you", the same fact in stronger words.
+    // One label says the state, dot and word together, in the state's own
+    // colour (the daemon's: amber waits on you, green is working, red
+    // failed). The dot breathes while the agent works and blinks while it
+    // waits on you. "Working" and "needs answer" show in either view; the
+    // rest only in Focus, where the row was enrolled.
     const bstate = liveFocusState(row.session, key, working, blocked);
-    if (focusMode() && bstate && FOCUS_LABELS[bstate] && !blocked.has(key)) {
+    const live = blocked.has(key) ? "needs_answer" : working.has(key) ? "working" : "";
+    if (live) {
+      const tag = el("span", `tag focus state-tag focus-${live.replace(/_/g, "-")}`);
+      tag.appendChild(el("span", "state-dot"));
+      tag.appendChild(document.createTextNode(FOCUS_LABELS[live] || live.replace(/_/g, " ")));
+      tag.title = FOCUS_HINTS[live] || "";
+      meta.appendChild(tag);
+    } else if (focusMode() && bstate && FOCUS_LABELS[bstate]) {
       const cls = `tag focus focus-${bstate.replace(/_/g, "-")}`;
       const unread = bstate === "turn_finished"
         && !row.session.focus_seen_local
@@ -2458,20 +2451,7 @@ function renderSessions() {
         + (unread ? " — you have not opened it since" : "");
       meta.appendChild(tag);
     }
-    const folder = String(row.session.cwd || "").replace(/\/+$/, "").split("/").pop();
-    if (folder) {
-      const f = el("span", "row-folder", folder);
-      f.title = row.session.cwd;
-      meta.appendChild(f);
-    }
-    if (row.session.git_branch) {
-      const br = el("span", "row-branch", "⑂ " + row.session.git_branch);
-      br.title = "Branch " + row.session.git_branch;
-      meta.appendChild(br);
-    }
     meta.appendChild(el("span", "row-when", stamp(row.sortKey)));
-    // The daemon last: the line starts with how the session is.
-    meta.appendChild(hostTag);
     btn.appendChild(meta);
     btn.appendChild(el("div", "row-title", listTitle(row.session)));
 
@@ -2489,6 +2469,23 @@ function renderSessions() {
         .replace(/\s+/g, " ").trim(), state.query);
       btn.appendChild(box);
     }
+
+    // The last line: where it runs. Folder and branch, with the daemon's
+    // label at the end.
+    const place = el("div", "row-place");
+    const folder = String(row.session.cwd || "").replace(/\/+$/, "").split("/").pop();
+    if (folder) {
+      const f = el("span", "row-folder", folder);
+      f.title = row.session.cwd;
+      place.appendChild(f);
+    }
+    if (row.session.git_branch) {
+      const br = el("span", "row-branch", "⑂ " + row.session.git_branch);
+      br.title = "Branch " + row.session.git_branch;
+      place.appendChild(br);
+    }
+    place.appendChild(hostTag);
+    btn.appendChild(place);
 
     btn.addEventListener("click", () => openSession(btn._row));
     let nodeKey = "row:" + key;
@@ -2647,15 +2644,14 @@ function renderTabs() {
   if (strip._sig === sig) return;
   strip._sig = sig;
   strip.textContent = "";
-  // First: +, like a browser's new tab. It goes down to the list (the sheet
-  // closes, the tabs stay), where the next conversation is picked or begun.
+  // First: back to the list (the sheet goes down, the tabs stay).
   const home = el("button", "tab-home");
   home.type = "button";
-  home.title = "Open another session";
-  home.setAttribute("aria-label", "Open another session");
+  home.title = "Back to sessions";
+  home.setAttribute("aria-label", "Back to sessions");
   home.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"'
     + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-    + '<path d="M12 5v14M5 12h14"/></svg>';
+    + '<path d="M15 5l-7 7 7 7"/></svg>';
   home.addEventListener("click", backToList);
   strip.appendChild(home);
   tabs.forEach((t) => {
@@ -2688,12 +2684,20 @@ function renderTabs() {
     ["pointerup", "pointerleave", "pointercancel"].forEach((ev) =>
       b.addEventListener(ev, () => clearTimeout(pressTimer)));
     b.addEventListener("contextmenu", (e) => e.preventDefault());
-    b.addEventListener("click", () => {
+    b.addEventListener("click", (e) => {
       if (longPressed) return;
-      if (!active) openTab(t);
+      e.stopPropagation();
+      if (!active) { fanTabs(false); openTab(t); }
+      // The open one stands for all of them: a tap fans the others out.
+      else if (tabs.length > 1) fanTabs(!strip.classList.contains("fan"));
     });
-    const wrap = el("div", "tab-wrap");
+    const wrap = el("div", active ? "tab-wrap active" : "tab-wrap");
     wrap.appendChild(b);
+    if (active && tabs.length > 1) {
+      const n = el("span", "tab-count", String(tabs.length));
+      n.title = `${tabs.length} conversations open`;
+      wrap.appendChild(n);
+    }
     if (active) {
       const x = el("button", "tab-close", "×");
       x.type = "button";
@@ -2703,17 +2707,144 @@ function renderTabs() {
       wrap.appendChild(x);
     }
     strip.appendChild(wrap);
-    if (active) requestAnimationFrame(() => wrap.scrollIntoView({ inline: "nearest", block: "nearest" }));
+    if (active) requestAnimationFrame(() => wrap.scrollIntoView({ block: "nearest" }));
   });
 }
 
-/** Drag the sheet's grip down to close it. */
+/**
+ * The tabs take one bubble's room: the open conversation's, with a count of
+ * how many are open. A tap fans the others out above it; picking one, a tap
+ * elsewhere or a few seconds put them away again, so they are not standing
+ * over the text being read.
+ */
+let fanTimer = null;
+function fanTabs(on) {
+  const strip = $("tabstrip");
+  if (!strip) return;
+  strip.classList.toggle("fan", !!on);
+  clearTimeout(fanTimer);
+  if (on) fanTimer = setTimeout(() => fanTabs(false), 6000);
+}
+document.addEventListener("click", (e) => {
+  if (!e.target.closest || !e.target.closest("#tabstrip")) fanTabs(false);
+});
+
+// ---------------------------------------------------------- collapsing bar
+//
+// The session bar opens expanded when a session opens and folds down to a
+// slim strip (the title) a few seconds later, or as soon as the reader
+// scrolls the conversation or the terminal. A tap on it opens it again.
+// It stays open while its More menu is open or a pointer rests on it.
+
+const BAR_COLLAPSE_MS = 5000;
+let barTimer = null;
+
+function expandBar() {
+  const float = $("chat-float");
+  if (!float) return;
+  float.classList.remove("collapsed");
+  scheduleBarCollapse();
+}
+
+function collapseBar() {
+  const float = $("chat-float");
+  if (!float || !state.open) return;
+  // Phones only: a wide window has the room, and folding there would only
+  // take the title and the buttons away.
+  if (!isCompact()) return;
+  if ($("chat-more")?.classList.contains("open") || float.matches(":hover")) {
+    scheduleBarCollapse();
+    return;
+  }
+  float.classList.add("collapsed");
+  sizeBarPill();
+  flashTitle();
+}
+
+/** The pill is as wide as what it holds: Stop (while a turn runs), the
+ *  Chat | TUI switch, the chevron. Asked again whenever one comes or goes. */
+function sizeBarPill() {
+  const float = $("chat-float");
+  if (!float || !float.classList.contains("collapsed")) return;
+  const actions = float.querySelector(".chat-actions");
+  if (actions) float.style.setProperty("--pill-w", Math.ceil(actions.scrollWidth + 14) + "px");
+}
+
+/** Which session this is, said for a moment as its bar folds away. */
+let titleFlashTimer = null;
+function flashTitle() {
+  const box = $("title-flash");
+  if (!box || !state.open) return;
+  box.textContent = $("chat-title").textContent || "";
+  box.classList.add("show");
+  clearTimeout(titleFlashTimer);
+  titleFlashTimer = setTimeout(() => box.classList.remove("show"), 1800);
+}
+
+function scheduleBarCollapse() {
+  clearTimeout(barTimer);
+  barTimer = setTimeout(collapseBar, BAR_COLLAPSE_MS);
+}
+
+function wireBarCollapse() {
+  const float = $("chat-float");
+  if (!float) return;
+  // A tap on the folded bar opens it (and does nothing else).
+  float.addEventListener("click", (e) => {
+    if (!float.classList.contains("collapsed")) { scheduleBarCollapse(); return; }
+    // The Chat | TUI switch and Stop work folded too; they do not open the
+    // bar. The chevron, and anywhere else on the pill, does.
+    if (e.target.closest("#btn-live-tui") || e.target.closest("#btn-stop")) {
+      requestAnimationFrame(sizeBarPill);
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    expandBar();
+  }, true);
+  const onScroll = () => {
+    if (!float.classList.contains("collapsed") && readerScrolling()) {
+      clearTimeout(barTimer);
+      collapseBar();
+    }
+  };
+  $("transcript")?.addEventListener("scroll", onScroll, { passive: true });
+  $("live-tui-pane")?.addEventListener("scroll", onScroll, { passive: true });
+  // A window made wide again has its bar back; Stop coming or going resizes
+  // the pill.
+  compactQuery.addEventListener("change", () => { if (!isCompact()) expandBar(); });
+  const stop = $("btn-stop");
+  if (stop && typeof MutationObserver !== "undefined") {
+    new MutationObserver(sizeBarPill).observe(stop, { attributes: true, attributeFilter: ["class"] });
+  }
+  ["wheel", "touchmove"].forEach((ev) => $("live-tui-pane")?.addEventListener(ev,
+    () => { state.gestureAt = Date.now(); }, { passive: true }));
+}
+
+/**
+ * The tab bubbles stand just above whatever is at the bottom of the page:
+ * the floating message box (with a gate card) on the chat face, the keys
+ * and the text line on the TUI face.
+ */
+function placeTabs() {
+  const pane = document.querySelector(".pane-chat");
+  if (!pane) return;
+  const paneRect = pane.getBoundingClientRect();
+  let top = paneRect.bottom;
+  const consider = state.liveTui
+    ? ["live-tui-keys", "live-tui-line", "gate"] : ["chat-bottom"];
+  consider.forEach((id) => {
+    const n = id === "live-tui-line" ? document.querySelector(".live-tui-line") : $(id);
+    if (n && n.offsetHeight && !n.classList.contains("hidden")) {
+      top = Math.min(top, n.getBoundingClientRect().top);
+    }
+  });
+  $("app").style.setProperty("--bottom-h", Math.max(0, paneRect.bottom - top) + "px");
+}
+
+/** A tap on the dimmed list behind the sheet closes it. */
 function wireSheetGrip() {
-  const grip = $("sheet-grip");
-  const sheet = document.querySelector(".pane-chat");
-  if (!grip || !sheet) return;
-  // A tap on the dimmed list behind the sheet closes it (the scrim is the
-  // app's ::after, so the click lands on the app itself or the list).
+  // The scrim is the app's ::after, so the click lands on the app itself.
   $("app").addEventListener("click", (e) => {
     // Only a click on the scrim itself: a click on a list row bubbles here
     // too, after it has just opened the sheet.
@@ -2721,38 +2852,6 @@ function wireSheetGrip() {
     if (!sheetQuery.matches || !$("app").classList.contains("show-chat")) return;
     backToList();
   });
-  let startY = 0, dy = 0, dragging = false;
-  grip.addEventListener("pointerdown", (e) => {
-    if (!sheetQuery.matches) return;
-    dragging = true; startY = e.clientY; dy = 0;
-    grip.setPointerCapture(e.pointerId);
-    sheet.classList.add("dragging");
-    $("tabstrip").classList.add("dragging");
-    $("app").classList.add("sheet-dragging");
-  });
-  grip.addEventListener("pointermove", (e) => {
-    if (!dragging) return;
-    dy = Math.max(0, e.clientY - startY);
-    // The bubbles move with the sheet.
-    sheet.style.transform = `translateY(${dy}px)`;
-    $("tabstrip").style.transform = `translateY(${dy}px)`;
-    // The overlay lightens as the sheet goes down.
-    const h = sheet.offsetHeight || window.innerHeight;
-    $("app").style.setProperty("--sheet-open", String(Math.max(0, 1 - dy / h)));
-  });
-  const end = () => {
-    if (!dragging) return;
-    dragging = false;
-    sheet.classList.remove("dragging");
-    $("tabstrip").classList.remove("dragging");
-    $("app").classList.remove("sheet-dragging");
-    $("app").style.removeProperty("--sheet-open");
-    sheet.style.transform = "";
-    $("tabstrip").style.transform = "";
-    if (dy > 90) backToList();
-  };
-  grip.addEventListener("pointerup", end);
-  grip.addEventListener("pointercancel", end);
 }
 
 // ---------------------------------------------------------- follow scroll
@@ -2780,13 +2879,11 @@ function syncJumpPill() {
   pill.textContent = unseenLive > 0
     ? `↓ ${unseenLive} new`
     : "↓ Jump to latest";
-  // Keep it just above the composer, whatever height that currently is.
-  // Keep it just above whatever is docked under the transcript.
-  const h = ["composer", "gate"].reduce((sum, id) => {
-    const n = $(id);
-    return sum + (n && !n.classList.contains("hidden") ? n.offsetHeight : 0);
-  }, 0);
-  pill.style.setProperty("--jump-bottom", `${h + 14}px`);
+  // Keep it just above the floating bottom bar, whatever its height.
+  const bottom = $("chat-bottom");
+  const h = bottom && bottom.offsetHeight
+    ? bottom.parentElement.clientHeight - bottom.offsetTop : 0;
+  pill.style.setProperty("--jump-bottom", `${h + 10}px`);
 }
 
 function scrollToLatest(smooth) {
@@ -2844,6 +2941,7 @@ async function openSession(row) {
   applyAccent(row.provider);
 
   $("chat-head").classList.remove("hidden");
+  expandBar();      // a session opens with its bar open; it folds by itself
   syncShareButton();
   addTab(row);
   restoreDraft();
@@ -3685,6 +3783,8 @@ function openLiveTui() {
   focusLiveTuiPane();
   updateLiveTuiCapture();
   syncJumpPill();
+  syncTailInView();
+  requestAnimationFrame(placeTabs);
   startLiveTuiFeed();
 }
 
@@ -3822,6 +3922,8 @@ function closeLiveTui() {
     if (tr && state.stick) jumpBottom(tr);
   }
   syncJumpPill();
+  syncTailInView();
+  requestAnimationFrame(placeTabs);
   updateLiveTuiCapture();
   updateLiveTuiButton();
 }
@@ -4395,6 +4497,7 @@ function watchTranscriptScroll() {
     if (top < state.lastTop - 1) gesture();
     state.lastTop = top;
     state.stick = view.scrollHeight - top - view.clientHeight < 24;
+    syncTailInView();
   }, { passive: true });
 }
 
@@ -5670,6 +5773,7 @@ function syncWorkingTail() {
   const on = thread && box && !box.classList.contains("hidden");
   if (!on) {
     if (old) old.remove();
+    syncTailInView();
     return;
   }
   const ask = box.classList.contains("needs-answer");
@@ -5690,6 +5794,17 @@ function syncWorkingTail() {
   tail.lastChild.textContent = text;
   if (tail.parentNode !== thread || thread.lastChild !== tail) thread.appendChild(tail);
   followBottom(view);
+  syncTailInView();
+}
+
+/** Is the working row on screen? Then the bar's live strip is not needed. */
+function syncTailInView() {
+  const pane = document.querySelector(".pane-chat");
+  const view = $("transcript");
+  if (!pane || !view) return;
+  const tail = document.getElementById("working-tail");
+  const on = !!tail && !state.liveTui && nearBottom(view);
+  pane.classList.toggle("tail-in-view", on);
 }
 
 function renderBannerStrip() {
@@ -8000,6 +8115,7 @@ function wire() {
   const syncTuiKeys = () => {
     const on = state.settings.tuiKeys !== false;
     $("live-tui")?.classList.toggle("keys-hidden", !on);
+    requestAnimationFrame(placeTabs);
     $("btn-tui-keys")?.setAttribute("aria-pressed", on ? "true" : "false");
   };
   $("btn-tui-keys")?.addEventListener("mousedown", (e) => e.preventDefault());
@@ -8072,9 +8188,29 @@ function wire() {
   // they are told how tall it is (with its live strip) as that changes.
   const float = $("chat-float");
   const measureFloat = () => {
+    // Collapsed, the bar is shorter, but the page keeps the room it had
+    // when open: padding that changed with it would shift the whole page.
+    if (float.classList.contains("collapsed")) return;
     const h = float.offsetHeight ? float.offsetTop + float.offsetHeight : 0;
     float.parentElement.style.setProperty("--float-h", h + "px");
   };
+  wireBarCollapse();
+  // The floating bottom bar: the conversation ends above it, so it is told
+  // how tall the bar is (gate, chips, the message box) as that changes, and
+  // a reader at the bottom stays there.
+  const bottomBar = $("chat-bottom");
+  const measureBottom = () => {
+    const h = bottomBar.offsetHeight
+      ? bottomBar.parentElement.clientHeight - bottomBar.offsetTop : 0;
+    const was = bottomBar.parentElement.style.getPropertyValue("--bottom-h");
+    bottomBar.parentElement.style.setProperty("--bottom-h", h + "px");
+    placeTabs();
+    if (was !== h + "px" && state.open && state.stick && !state.liveTui) jumpBottom($("transcript"));
+    syncJumpPill();
+  };
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(measureBottom).observe(bottomBar);
+  window.addEventListener("resize", measureBottom);
+  measureBottom();
   if (typeof ResizeObserver !== "undefined") new ResizeObserver(measureFloat).observe(float);
   window.addEventListener("resize", measureFloat);
   measureFloat();

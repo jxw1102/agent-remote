@@ -250,6 +250,16 @@ a { color: var(--accent); }
   overflow: hidden;
 }
 .row-meta > .tag { flex: none; }
+/* The last line: folder and branch, the daemon's label at its end. */
+.row-place {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  margin-top: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.row-place > .tag.host { flex: 0 0 auto; max-width: 40%; margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
 /* A long daemon name is cut at a share of the row; a short one is never
    squeezed by the folder and branch beside it. */
 .row-meta > .tag.host { flex: 0 0 auto; max-width: 34%; overflow: hidden; text-overflow: ellipsis; }
@@ -293,26 +303,38 @@ a { color: var(--accent); }
   font-weight: 500;
   opacity: 0.95;
 }
-.tag.waiting { color: var(--warn); background: rgba(224, 180, 84, 0.14); }
+/* One colour per session state, everywhere it is shown (rows, the tab
+   bubbles, the live strip, the working row): the daemon's roles. */
+:root {
+  --st-working: var(--ok);
+  --st-needs: var(--attention);
+  --st-failed: var(--danger);
+}
+/* The state label carries its own dot: breathing while the agent works,
+   blinking while it waits on you. */
+.tag.state-tag { display: inline-flex; align-items: center; gap: 5px; }
+.state-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.focus-working .state-dot { animation: breathe 1.6s ease-in-out infinite; }
+.focus-needs-answer .state-dot { animation: ask-blink 1s step-end infinite; }
 
 /* Focus state tags. Focus is a filter over the same list, so these are
    ordinary row chips — the row layout must not change between modes. Colour
    carries the urgency: amber wants you now, green is busy, neutral can wait. */
 .tag.focus { font-weight: 600; }
 .tag.focus-needs-answer {
-  color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--warn) 38%, transparent);
+  color: var(--st-needs);
+  background: color-mix(in srgb, var(--st-needs) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--st-needs) 38%, transparent);
 }
 .tag.focus-failed {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  color: var(--st-failed);
+  background: color-mix(in srgb, var(--st-failed) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--st-failed) 40%, transparent);
 }
 .tag.focus-working {
-  color: var(--ok);
-  background: color-mix(in srgb, var(--ok) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--ok) 32%, transparent);
+  color: var(--st-working);
+  background: color-mix(in srgb, var(--st-working) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--st-working) 32%, transparent);
 }
 /* Finished turn. Dim once you have opened it — read, waiting on you, no
    longer competing for attention. */
@@ -456,15 +478,17 @@ a { color: var(--accent); }
 .row { position: relative; }
 .row-done {
   position: absolute;
+  /* Beside the title and the last message: the first line ends with the
+     time and the last with the daemon's label, and neither is covered. */
   top: 50%;
-  right: 10px;
   transform: translateY(-50%);
+  right: 10px;
   z-index: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   padding: 0;
   border-radius: 9px;
   color: var(--ok);
@@ -488,7 +512,8 @@ a { color: var(--accent); }
 @media (hover: none) {
   .row-done { opacity: 0.72; pointer-events: auto; }
   /* Always there, so it gets a place instead of sitting on the time and id. */
-  .row:has(.row-done) { padding-right: 50px; }
+  .row:has(.row-done) .row-preview,
+  .row:has(.row-done) .row-title { padding-right: 40px; }
 }
 
 .pulse {
@@ -679,8 +704,8 @@ button.icon-btn.icon-idle {
 }
 /* Human gate (ask / permission): stand out from the normal working strip. */
 .banner.needs-answer {
-  background: rgba(95, 201, 139, 0.14);
-  color: var(--ok);
+  background: color-mix(in srgb, var(--st-needs) 14%, transparent);
+  color: var(--st-needs);
 }
 /*
  * Line 1: human description + elapsed/queued.
@@ -718,8 +743,8 @@ button.icon-btn.icon-idle {
   line-height: 1.2;
 }
 .banner.needs-answer .banner-action.primary {
-  background: var(--ok);
-  border-color: var(--ok);
+  background: var(--st-needs);
+  border-color: var(--st-needs);
   color: #0b0b0d;
 }
 
@@ -728,8 +753,9 @@ button.icon-btn.icon-idle {
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  /* Starts below the floating bar; scrolls on underneath it. */
-  padding: calc(var(--float-h, 0px) + 18px) 0 8px;
+  /* Starts below the floating bar and ends above the floating bottom bar;
+     scrolls on underneath both. */
+  padding: calc(var(--float-h, 0px) + 18px) 0 calc(var(--bottom-h, 0px) + 12px);
   scroll-padding-top: calc(var(--float-h, 0px) + 8px);
   -webkit-overflow-scrolling: touch;
 }
@@ -755,7 +781,7 @@ button.icon-btn.icon-idle {
 /* Bottom-of-transcript "still working" row (mirrors the banner). */
 .msg.status.working-tail {
   display: flex; align-items: center; gap: 10px;
-  border-left-color: var(--accent);
+  border-left-color: var(--st-working);
   color: var(--dim);
 }
 .working-tail .working-text {
@@ -764,13 +790,13 @@ button.icon-btn.icon-idle {
 .working-dots { display: inline-flex; gap: 4px; flex: none; }
 .working-dots > span {
   width: 6px; height: 6px; border-radius: 50%;
-  background: var(--accent);
+  background: var(--st-working);
   animation: working-bounce 1.2s ease-in-out infinite;
 }
 .working-dots > span:nth-child(2) { animation-delay: 0.15s; }
 .working-dots > span:nth-child(3) { animation-delay: 0.3s; }
-.working-tail.ask { border-left-color: var(--warn); color: var(--warn); }
-.working-tail.ask .working-dots > span { background: var(--warn); }
+.working-tail.ask { border-left-color: var(--st-needs); color: var(--st-needs); }
+.working-tail.ask .working-dots > span { background: var(--st-needs); }
 @keyframes working-bounce {
   0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
   30% { transform: translateY(-4px); opacity: 1; }
@@ -1120,6 +1146,8 @@ button.icon-btn.icon-idle {
      under its own key card); its text starts below them (--tui-top). */
   position: relative;
   --tui-top: calc(var(--float-h, 0px) + var(--tui-bar-h, 0px) + 10px);
+  /* Room for a gate card floating over the bottom. */
+  padding-bottom: var(--bottom-h, 0px);
 }
 .live-tui.hidden { display: none !important; }
 .live-tui-bar {
@@ -1283,12 +1311,16 @@ button.icon-btn.icon-idle {
   white-space: pre-wrap;
   width: auto;
 }
+/* The terminal's text line: a floating card like the message box. */
 .live-tui-line {
   display: flex;
   gap: 8px;
-  padding: 8px 12px 12px;
-  border-top: 1px solid var(--line);
-  background: var(--surface);
+  margin: 0 10px calc(10px + env(safe-area-inset-bottom, 0px));
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
   flex: none;
 }
 .live-tui-line input {
@@ -1432,10 +1464,29 @@ button.icon-btn.icon-idle {
 
 /* -------------------------------------------------------------- composer */
 
+/* The bottom bar floats, like the session bar: the gate and the message
+   box are cards over the bottom of the conversation, which scrolls on
+   underneath; app.js measures them into --bottom-h. */
+.chat-bottom {
+  position: absolute;
+  left: calc(10px + env(safe-area-inset-left, 0px));
+  right: calc(10px + env(safe-area-inset-right, 0px));
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+.chat-bottom > * { pointer-events: auto; }
 .composer {
-  border-top: 1px solid var(--line);
-  background: var(--surface);
-  padding: 10px 20px 14px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  backdrop-filter: blur(16px) saturate(1.3);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  padding: 8px 10px;
   flex: none;
 }
 .composer-row {
@@ -1926,9 +1977,11 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
 
 .gate {
   flex: none;
-  border-top: 1px solid var(--attention);
-  background: color-mix(in srgb, var(--attention) 7%, var(--surface));
-  padding: 10px 20px 12px;
+  border: 1px solid var(--attention);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--attention) 9%, var(--surface));
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  padding: 10px 14px 12px;
 }
 .gate.hidden { display: none; }
 .gate-inner { max-width: 900px; margin: 0 auto; }
@@ -2052,8 +2105,7 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   .thread { padding: 0 14px; }
   .chat-head { padding: 6px 8px; }
   .chat-float { left: 8px; right: 8px; top: calc(6px + env(safe-area-inset-top, 0px)); }
-  .composer { padding-left: 12px; padding-right: 12px; }
-  .gate { padding-left: 12px; padding-right: 12px; }
+  .chat-bottom { left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
   .gate-foot .help { flex: 1 0 100%; }
 }
 
@@ -2128,8 +2180,8 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   .live-tui-keys button[data-tui-key="Enter"] { flex-grow: 1.5; }
   .live-tui-line {
     grid-area: 4 / 1 / 5 / -1;
-    padding: 0 8px calc(8px + env(safe-area-inset-bottom, 0px));
-    border-top: 0;
+    margin: 0 8px calc(8px + env(safe-area-inset-bottom, 0px));
+    padding: 6px 8px;
   }
   .live-tui-line button { padding-left: 12px; padding-right: 12px; }
 }
@@ -2144,7 +2196,6 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   html, body { height: 100dvh; }
 }
 .list-head { padding-top: calc(12px + env(safe-area-inset-top, 0px)); }
-.composer { padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px)); }
 .pane-list, .pane-chat {
   padding-left: env(safe-area-inset-left, 0px);
   padding-right: env(safe-area-inset-right, 0px);
@@ -2198,9 +2249,8 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
    bottom over the dimmed list, and the conversations opened from the list
    sit above it as bubbles, like a browser's tabs. Elsewhere none of this
    shows. */
-.tabstrip, .sheet-grip { display: none; }
+.tabstrip { display: none; }
 @media (max-width: 720px) and (orientation: portrait) {
-  .app { --tabs-h: 62px; }
   /* The list stays behind the sheet. */
   .app.show-chat > .pane-list { display: flex; }
   .app > .pane-chat,
@@ -2227,7 +2277,6 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     visibility: visible;
     transition: transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0s;
   }
-  .app > .pane-chat.dragging { transition: none; }
   /* The dimmed list behind; a tap on it closes the sheet (app.js). */
   .app::after {
     content: "";
@@ -2239,54 +2288,32 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     pointer-events: none;
     transition: opacity 300ms ease;
   }
-  /* --sheet-open: 1 with the sheet up, falling toward 0 as its grip is
-     dragged down, so the dark overlay follows the sheet (app.js). */
-  .app.show-chat::after { opacity: var(--sheet-open, 1); pointer-events: auto; }
-  .app.sheet-dragging::after { transition: none; }
-  .sheet-grip {
-    display: block;
-    position: absolute;
-    /* Under the floating bubbles, above the session bar. */
-    top: calc(env(safe-area-inset-top, 0px) + var(--tabs-h) - 6px);
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 8;
-    width: 96px;
-    height: 16px;
-    cursor: grab;
-    touch-action: none;
-  }
-  .sheet-grip::before {
-    content: "";
-    position: absolute;
-    left: 30px;
-    right: 30px;
-    top: 6px;
-    height: 4px;
-    border-radius: 2px;
-    background: color-mix(in srgb, var(--text) 30%, transparent);
-  }
+  /* The overlay fades in and out with the sheet's slide. */
+  .app.show-chat::after { opacity: 1; pointer-events: auto; }
   /* Over the sheet: the Changes pane, dialogs, toasts. */
   .pane-side { z-index: 35; }
   .modal { z-index: 40; }
   .toast { z-index: 45; }
-  /* No back arrow on the sheet: +, Back and the grip take it down. */
+  /* No back arrow in the bar on the sheet: the back bubble before the tabs takes it down. */
   .chat-head .back-btn { display: none !important; }
-  /* Inside the sheet the floating bar sits under the bubbles and the grip. */
-  .chat-float { top: calc(env(safe-area-inset-top, 0px) + var(--tabs-h) + 10px); }
+  /* Inside the sheet the floating bar sits under the bubbles. */
+  .chat-float { top: calc(env(safe-area-inset-top, 0px) + 8px); }
   .chat-head { padding-top: 6px; }
 
+  /* A column at the end of the screen, just above the floating bottom bar;
+     the back bubble at its foot, nearest the thumb. */
   .tabstrip {
     position: fixed;
-    top: env(safe-area-inset-top, 0px);
-    left: 0;
-    right: 0;
-    height: var(--tabs-h);
+    right: calc(10px + env(safe-area-inset-right, 0px));
+    bottom: calc(var(--bottom-h, 90px) + 8px);
+    max-height: calc(100% - var(--bottom-h, 90px) - env(safe-area-inset-top, 0px) - 90px);
     z-index: 31;
+    flex-direction: column-reverse;
     align-items: center;
     gap: 10px;
-    padding: 0 12px;
-    overflow-x: auto;
+    padding: 6px 2px;
+    overflow-y: auto;
+    overflow-x: visible;
     scrollbar-width: none;
     /* The bubbles ride with the sheet: down off the screen with it, up with
        it, and along with a drag of its grip (app.js). */
@@ -2305,7 +2332,6 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     visibility: visible;
     transition: transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0s;
   }
-  .app > .tabstrip.dragging { transition: none; }
   .tab-home, .tab-bubble {
     flex: none;
     position: relative;
@@ -2347,7 +2373,7 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     border-radius: 50%;
     border: 2px solid var(--bg);
   }
-  .tab-live { background: var(--ok); }
+  .tab-live { background: var(--st-working); }
   .tab-working { animation: breathe 1.6s ease-in-out infinite; }
   .tab-down { background: var(--dim); }
   /* The live strip under the session bar is the bubbles' dot here. */
@@ -2358,15 +2384,16 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     justify-content: center;
     width: 17px;
     height: 17px;
-    background: var(--warn);
+    background: var(--st-needs);
     color: #000;
     font-size: 11px;
     font-weight: 800;
   }
+  /* On the side away from the next bubble's status dot. */
   .tab-close {
     position: absolute;
     bottom: -4px;
-    right: -6px;
+    left: -8px;
     width: 22px;
     height: 22px;
     min-width: 0;
@@ -2379,6 +2406,27 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     font-size: 14px;
     line-height: 1;
   }
+  /* One bubble stands for all the tabs until it is tapped. */
+  .tabstrip:not(.fan) .tab-wrap:not(.active),
+  .tabstrip:not(.fan) .tab-close { display: none; }
+  .tab-count {
+    position: absolute;
+    top: -4px;
+    left: -6px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    border: 2px solid var(--bg);
+    background: var(--surface-3);
+    color: var(--text);
+    font-size: 10.5px;
+    font-weight: 700;
+    line-height: 14px;
+    text-align: center;
+    pointer-events: none;
+  }
+  .tabstrip.fan .tab-count { display: none; }
 }
 
 /* Send (and the terminal's Send line): an icon, not a word. */
@@ -2394,11 +2442,26 @@ button.send-btn svg { width: 20px; height: 20px; display: block; }
 
 /* The text line's toggle for the terminal keys row. */
 .live-tui.keys-hidden .live-tui-keys { display: none !important; }
-.live-tui-line button.tui-keys-toggle { flex: none; padding: 0; width: 40px; min-width: 40px; }
+/* The keys toggle sits inside the text line, at its end. */
+.tui-input-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
+.tui-input-wrap input { flex: 1; min-width: 0; padding-right: 44px; }
+.live-tui-line .tui-input-wrap button.tui-keys-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 34px;
+  min-width: 34px;
+  height: 30px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+}
 button.tui-keys-toggle svg { width: 20px; height: 20px; }
-button.tui-keys-toggle[aria-pressed="true"] {
+.live-tui-line .tui-input-wrap button.tui-keys-toggle[aria-pressed="true"] {
   color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   background: var(--accent-soft);
 }
 
@@ -2424,3 +2487,155 @@ button.tui-keys-toggle[aria-pressed="true"] {
   backdrop-filter: blur(12px);
   pointer-events: none;
 }
+
+/* Folding (phones only; a wide window keeps its bar) is one motion: the
+   bar narrows toward its end, the title fading as it goes, until a pill is
+   left at the top end of the page with Stop while a turn runs, the
+   Chat | TUI switch, and a chevron that opens the bar again. --pill-w is
+   the pill's width, worked out by app.js from those controls. */
+.chat-float {
+  left: auto !important;
+  right: calc(10px + env(safe-area-inset-right, 0px));
+  width: calc(100% - 20px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+  transition: width 280ms cubic-bezier(0.2, 0.8, 0.2, 1), border-radius 280ms ease;
+}
+.chat-float .chat-title { transition: opacity 160ms ease; }
+.bar-expand { display: none !important; }
+.chat-float.collapsed {
+  width: var(--pill-w, 120px);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.chat-float.collapsed .chat-head { padding: 4px 6px; gap: 4px; justify-content: flex-end; }
+/* The title gives up its room entirely, so the pill is as tall as its
+   buttons and they are not pushed out of it. */
+.chat-float.collapsed .chat-title {
+  opacity: 0;
+  flex: 0 0 0;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.chat-float.collapsed .back-btn,
+.chat-float.collapsed .banner,
+.chat-float.collapsed .chat-more,
+.chat-float.collapsed .chat-more > *,
+.chat-float.collapsed .more-btn,
+.chat-float.collapsed .icon-btn.icon-idle { display: none !important; }
+.chat-float.collapsed .chat-actions { flex: none; gap: 4px; }
+.chat-float.collapsed .bar-expand {
+  display: inline-flex !important;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
+  color: var(--dim);
+}
+
+/* The bar's buttons: quiet, rounded, borderless inside the card. */
+.chat-head .icon-btn {
+  border-color: transparent;
+  background: transparent;
+  border-radius: 10px;
+}
+.chat-head .icon-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  border-color: transparent;
+}
+.chat-head .chat-title h1 { letter-spacing: 0.1px; }
+@media (max-width: 720px) {
+  .chat-float { right: 8px; width: calc(100% - 16px); }
+}
+
+/* The message box inside the floating card: one piece with it. The field
+   has no frame of its own (the card is the frame); + and Send are round,
+   like the bubbles and the bar's switch. The terminal's text line matches. */
+.composer #prompt,
+.live-tui-line input {
+  border: 0;
+  background: transparent;
+  border-radius: 12px;
+  padding: 9px 6px;
+}
+.composer #prompt:focus,
+.live-tui-line input:focus { background: color-mix(in srgb, var(--text) 5%, transparent); }
+.composer:focus-within,
+.live-tui-line:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.composer #btn-attach {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 0;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+.composer #btn-send,
+.live-tui-line #btn-live-tui-send {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  border-radius: 50%;
+  padding: 0;
+}
+.composer .composer-row { align-items: flex-end; gap: 6px; }
+.composer .composer-chips { margin-bottom: 4px; }
+
+.chat-float.collapsed .face-switch.icon-idle { display: none !important; }
+
+/* Which session this is, for a moment as its bar folds: under the pill's
+   line, centred, then gone. */
+.title-flash {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  left: 12px;
+  right: 150px;
+  z-index: 6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  text-shadow: 0 1px 6px var(--bg), 0 0 12px var(--bg);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 260ms ease, transform 260ms ease;
+  pointer-events: none;
+}
+.title-flash.show { opacity: 1; transform: none; }
+
+/* Soft fades where the page runs under the floating pieces, so the text
+   does not collide with them: the top of the page under the bar (shorter
+   once it has folded to a pill), and the bottom under the message box. */
+.pane-chat { --fade-top: calc(var(--float-h, 0px) + 14px); }
+.pane-chat:has(.chat-float.collapsed) { --fade-top: 58px; }
+.transcript, .live-tui-pane {
+  -webkit-mask-image: linear-gradient(to bottom,
+    transparent 0, transparent calc(var(--fade-top) * 0.6), #000 var(--fade-top),
+    #000 calc(100% - var(--fade-bottom, 0px) - 18px),
+    transparent calc(100% - var(--fade-bottom, 0px) + 10px), transparent 100%);
+  mask-image: linear-gradient(to bottom,
+    transparent 0, transparent calc(var(--fade-top) * 0.6), #000 var(--fade-top),
+    #000 calc(100% - var(--fade-bottom, 0px) - 18px),
+    transparent calc(100% - var(--fade-bottom, 0px) + 10px), transparent 100%);
+}
+/* Gone by the top of the floating bottom bar: nothing shows through or
+   between its cards. */
+.transcript { --fade-bottom: var(--bottom-h, 0px); }
+/* The terminal fades out under its key card as well as the bar. */
+.live-tui-pane { --fade-bottom: 0px; --fade-top: var(--tui-top); }
+
+/* The live strip in the bar repeats the working row at the end of the
+   conversation; while that row is in view (the reader is at the bottom of
+   the chat) only one of them shows. */
+.pane-chat.tail-in-view .banner:not(.needs-answer) { display: none !important; }
+
+/* The live strip while the agent works: the working colour, like the row's
+   label and the bubble's dot (not the harness accent). */
+.banner:not(.needs-answer) {
+  background: color-mix(in srgb, var(--st-working) 10%, transparent);
+  color: var(--st-working);
+}
+.banner:not(.needs-answer) .pulse { background: var(--st-working) !important; }

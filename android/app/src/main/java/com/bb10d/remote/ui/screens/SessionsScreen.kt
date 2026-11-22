@@ -925,15 +925,11 @@ private fun SessionCard(
             }
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
-        // Three lines, as on the web: how and where it is (state, folder,
-        // branch, when, daemon), then what it is (the title), then what was
-        // last said. Folder and branch are words, not pills, and give way
-        // (they share what is left) so the state and time are never cut. The
-        // session id is not shown; long-press the row to copy it.
+        // Four lines, as on the web: how it is and when (state, time), what it
+        // is (the title), what was last said, and where it runs (folder,
+        // branch, daemon). The session id is not shown; long-press the row
+        // to copy it.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (working) {
-                WorkingPulse(accent.tint, Modifier.padding(end = 8.dp))
-            }
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                 // The state starts the line, in the daemon's words. "Needs
                 // answer" shows in either view; the rest only in Focus, where
@@ -941,10 +937,12 @@ private fun SessionCard(
                 // live status stream, so a turn ending is visible without a
                 // refresh.
                 val focusState = liveFocusState(row.session.focusState, working, blocked)
-                var lead = working
+                // "Needs answer" and "working" carry their dot inside the
+                // label and show in either view.
                 if (blocked) {
                     FocusPill("needs_answer")
-                    lead = true
+                } else if (working) {
+                    FocusPill("working")
                 } else if (showFocusState && focusState.isNotEmpty()) {
                     // A turn that ended while we watched the stream is unread
                     // by definition: you were looking at the list.
@@ -952,31 +950,6 @@ private fun SessionCard(
                         focusState,
                         unread = row.session.focusUnread ||
                             row.session.focusState == "working",
-                    )
-                    lead = true
-                }
-                val project = row.session.cwd.trimEnd('/').substringAfterLast('/')
-                if (project.isNotEmpty()) {
-                    if (lead) Spacer(Modifier.width(7.dp))
-                    Text(
-                        project,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        // The folder keeps more of its name than the branch.
-                        modifier = Modifier.weight(2f, fill = false),
-                    )
-                }
-                if (row.session.gitBranch.isNotEmpty()) {
-                    Spacer(Modifier.width(7.dp))
-                    Text(
-                        "⑂ ${row.session.gitBranch}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = pal.dim,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
                     )
                 }
             }
@@ -987,9 +960,6 @@ private fun SessionCard(
                 color = pal.dim,
                 maxLines = 1,
             )
-            // The daemon last: the line starts with how the session is.
-            Spacer(Modifier.width(7.dp))
-            ProviderChip(row.provider, row.profileName, Modifier.widthIn(max = 112.dp))
         }
 
         Spacer(Modifier.height(4.dp))
@@ -1015,6 +985,40 @@ private fun SessionCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+
+        // The last line: where it runs. Folder and branch, with the daemon's
+        // label at the end.
+        Spacer(Modifier.height(5.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            val project = row.session.cwd.trimEnd('/').substringAfterLast('/')
+            if (project.isNotEmpty()) {
+                Text(
+                    project,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    // The folder keeps more of its name than the branch.
+                    modifier = Modifier.weight(2f, fill = false),
+                )
+            }
+            if (row.session.gitBranch.isNotEmpty()) {
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    "⑂ ${row.session.gitBranch}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = pal.dim,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
+            }
+            Spacer(Modifier.width(8.dp))
+            // No dot in it: the state has the row's only dot.
+            ProviderChip(row.provider, row.profileName, Modifier.widthIn(max = 132.dp), dot = false)
         }
     }
 }

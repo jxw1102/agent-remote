@@ -92,6 +92,8 @@ fun LiveTuiPane(
     modifier: Modifier = Modifier,
     /** The floating bar over the top: the terminal runs under it, its text starts below. */
     topInset: androidx.compose.ui.unit.Dp = 0.dp,
+    /** The keys and the text line's height, for what floats above them. */
+    onControlsHeight: (Int) -> Unit = {},
 ) {
     val pal = palette
     // The stream and what it last showed are held by the app (TuiFeeds), so
@@ -282,6 +284,7 @@ fun LiveTuiPane(
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             )
         }
+        Column(Modifier.onSizeChanged { onControlsHeight(it.height) }) {
         // Soft keys, under the terminal and above the text line, within
         // reach of the thumbs. Real chrome buttons (surface + border) so
         // they stay readable beside the near-black pane. All eight share
@@ -292,7 +295,6 @@ fun LiveTuiPane(
         if (keysShown) Row(
             Modifier
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface)
                 .padding(start = 8.dp, end = 8.dp, top = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -321,23 +323,20 @@ fun LiveTuiPane(
             sendKeys(listOf("Enter"), t)
             onLine("")
         }
+        // The text line floats, a card like the chat's message box.
+        androidx.compose.material3.Surface(
+            shape = RoundedCornerShape(18.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+            border = androidx.compose.foundation.BorderStroke(1.dp, pal.hairline),
+            shadowElevation = 8.dp,
+            modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 8.dp),
+        ) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface)
-                .padding(horizontal = 8.dp, vertical = 8.dp),
+                .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            androidx.compose.material3.IconToggleButton(
-                checked = keysShown,
-                onCheckedChange = { on -> scope.launch { repo.settingsStore.setTuiKeys(on) } },
-            ) {
-                androidx.compose.material3.Icon(
-                    androidx.compose.material.icons.Icons.Outlined.Keyboard,
-                    contentDescription = if (keysShown) "Hide terminal keys" else "Show terminal keys",
-                    tint = if (keysShown) MaterialTheme.colorScheme.primary else pal.dim,
-                )
-            }
             OutlinedTextField(
                 value = line,
                 onValueChange = onLine,
@@ -346,6 +345,19 @@ fun LiveTuiPane(
                     .heightIn(min = 52.dp),
                 singleLine = true,
                 placeholder = { Text("Type a line into the TUI") },
+                // The terminal keys toggle, inside the line at its end.
+                trailingIcon = {
+                androidx.compose.material3.IconToggleButton(
+                    checked = keysShown,
+                    onCheckedChange = { on -> scope.launch { repo.settingsStore.setTuiKeys(on) } },
+                ) {
+                    androidx.compose.material3.Icon(
+                        androidx.compose.material.icons.Icons.Outlined.Keyboard,
+                        contentDescription = if (keysShown) "Hide terminal keys" else "Show terminal keys",
+                        tint = if (keysShown) MaterialTheme.colorScheme.primary else pal.dim,
+                    )
+                }
+                },
                 textStyle = MaterialTheme.typography.bodyMedium.copy(
                     fontFamily = FontFamily.Monospace,
                 ),
@@ -373,6 +385,8 @@ fun LiveTuiPane(
                     contentDescription = "Send the line",
                 )
             }
+        }
+        }
         }
     }
 }

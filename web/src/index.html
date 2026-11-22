@@ -84,10 +84,10 @@
 
   <!-- Right: the open transcript. -->
   <main class="pane-chat">
-    <!-- Portrait phone: the sheet's grip; drag it down to close the sheet. -->
-    <div id="sheet-grip" class="sheet-grip" aria-hidden="true"></div>
     <!-- The session's bar and its live strip float over the top of the
          conversation, which scrolls on underneath them. -->
+    <!-- Shown for a moment when the bar folds: which session this is. -->
+    <div id="title-flash" class="title-flash" aria-hidden="true"></div>
     <div id="chat-float" class="chat-float">
     <header id="chat-head" class="chat-head hidden">
       <!-- Narrow windows show one pane at a time; this returns to the list. -->
@@ -108,8 +108,10 @@
              do now and then (changes, rename, share, reload, copy id); in a
              narrow window it folds into a menu under "More" so the header
              stays one row. -->
+        <div id="chat-more" class="chat-more">
+        <!-- How the next turn runs: first in the More menu. -->
         <button id="btn-options" class="icon-btn" type="button"
-                title="Options — model, effort, execution mode" aria-label="Options">
+                title="Options — model, effort, execution mode" aria-label="Session options">
           <!-- Cog / gear (not a sun — no radial rays). -->
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
                stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
@@ -126,7 +128,6 @@
                      a1.65 1.65 0 0 0-1.51 1z"/>
           </svg>
         </button>
-        <div id="chat-more" class="chat-more">
         <button id="btn-changes" class="icon-btn hidden" type="button"
                 title="Changes — what differs from the last commit" aria-label="Changes"
                 aria-pressed="false">
@@ -179,7 +180,7 @@
           </svg>
         </button>
         </div>
-        <!-- Order: Options · Chat|TUI · Stop.
+        <!-- Order: Chat|TUI · Stop · More (Session options first inside).
              Stop always keeps its slot (icon-idle = invisible, not removed)
              so nothing slides into that space when a job is not running. -->
         <!-- The session window's two faces: the chat, or the host terminal.
@@ -218,6 +219,14 @@
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
             <circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/>
             <circle cx="19" cy="12" r="1.8"/>
+          </svg>
+        </button>
+        <!-- Only on the folded bar: opens it again. -->
+        <button id="btn-bar-expand" class="icon-btn bar-expand" type="button"
+                title="Show the session bar" aria-label="Show the session bar">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 9l6 6 6-6"/>
           </svg>
         </button>
       </div>
@@ -273,12 +282,15 @@
       <pre id="live-tui-pane" class="live-tui-pane" tabindex="0"
            role="group" aria-label="Host terminal"><span id="live-tui-more" class="live-tui-more"></span><code id="live-tui-history"></code><code id="live-tui-screen"></code></pre>
       <div class="live-tui-line">
-        <!-- Shows or hides the row of terminal keys (Esc, Enter, arrows…). -->
-        <button id="btn-tui-keys" class="icon-btn tui-keys-toggle" type="button"
-                aria-pressed="true" aria-controls="live-tui-keys"
-                title="Terminal keys" aria-label="Terminal keys"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M7 14h10"/></svg></button>
-        <input id="live-tui-input" type="text" autocomplete="off" spellcheck="false"
+        <!-- The text line, with the terminal keys toggle inside it at its end. -->
+        <div class="tui-input-wrap">
+          <input id="live-tui-input" type="text" autocomplete="off" spellcheck="false"
                placeholder="Type here (IME welcome) · Enter sends the line">
+          <!-- Shows or hides the row of terminal keys (Esc, Enter, arrows…). -->
+          <button id="btn-tui-keys" class="icon-btn tui-keys-toggle" type="button"
+                    aria-pressed="true" aria-controls="live-tui-keys"
+                    title="Terminal keys" aria-label="Terminal keys"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M7 14h10"/></svg></button>
+        </div>
         <button id="btn-live-tui-send" class="primary send-btn" type="button" title="Send the line" aria-label="Send the line"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l16-8-6 16-2.5-6.5z"/><path d="M11.5 13.5L20 4"/></svg></button>
       </div>
     </div>
@@ -286,6 +298,9 @@
     <!-- A permission or question the open session is waiting on. Docked here
          rather than raised as a dialog, so it never replaces a dialog you are
          in the middle of and is still there after you look away. -->
+    <!-- The bottom bar floats: the gate and the message box are cards over
+         the bottom of the conversation, which scrolls on underneath them. -->
+    <div id="chat-bottom" class="chat-bottom">
     <section id="gate" class="gate hidden" aria-label="The agent is waiting on you"></section>
 
     <div id="composer" class="composer hidden">
@@ -301,6 +316,7 @@
                   aria-controls="composer-pop"></textarea>
         <button id="btn-send" class="primary send-btn" type="button" title="Send" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l16-8-6 16-2.5-6.5z"/><path d="M11.5 13.5L20 4"/></svg></button>
       </div>
+    </div>
     </div>
   </main>
 
