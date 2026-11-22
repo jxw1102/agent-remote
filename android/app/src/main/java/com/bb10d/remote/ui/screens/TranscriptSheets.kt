@@ -218,7 +218,18 @@ internal fun SessionOptionsSheet(vm: TranscriptViewModel, profile: com.bb10d.rem
             style = MaterialTheme.typography.bodySmall,
             color = palette.dim,
         )
-        ExecModeBlock(profile = profile, harness = h, onExecMode = vm::setExecMode)
+        if (profile.caps.autoExec) {
+            // Nothing to choose: the daemon picks per message.
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Messages go into this session's terminal when it has one, and run " +
+                    "headless when it does not. Send a line from TUI to start a terminal.",
+                style = MaterialTheme.typography.bodySmall,
+                color = palette.dim,
+            )
+        } else {
+            ExecModeBlock(profile = profile, harness = h, onExecMode = vm::setExecMode)
+        }
         if (hasTurnChips(profile, h)) {
             Spacer(Modifier.height(10.dp))
             Text(

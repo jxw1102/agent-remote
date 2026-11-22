@@ -1308,6 +1308,9 @@ async function pingProfile(profile) {
     profile.tuiStream = !!ping.tui_stream;
     // GET …/tui/history: the terminal's scrollback (agentremoted ≥ 2.29).
     profile.tuiHistory = !!ping.tui_history || !!(ping.caps && ping.caps.tui_history);
+    // The daemon picks how each message runs (agentremoted ≥ 2.30): into the
+    // session's terminal when it has a live one, headless when it does not.
+    profile.autoExec = !!ping.auto_exec || !!(ping.caps && ping.caps.auto_exec);
     profile.chunkedUpload = !!ping.chunked_upload
       || !!(ping.caps && ping.caps.chunked_upload);
     if (typeof ping.max_upload_mb === "number" && ping.max_upload_mb > 0) {
@@ -1353,6 +1356,47 @@ const execModeOf = (profile, harness = null) => {
     return normalizeExecMode(profile.execMode, canInteractive);
   return canInteractive ? "interactive" : "headless";
 };
+// ---- how a message runs ----------------------------------------------------
+// A daemon ≥ 2.30 decides per message ("auto"): typed into the session's
+// terminal when it has a live one, a headless turn when it does not, so
+// there is nothing to choose. Older daemons use the per-daemon Execution
+// setting, as before.
+
+/** The mode sent with a message for the open session. */
+const sendMode = (profile, harness = null) =>
+  (profile && profile.autoExec ? "auto" : wireExecMode(execModeOf(profile, harness)));
+
+/** Will a message for the open session be typed into a terminal? */
+const sendsToTerminal = (profile, harness = null) => {
+  if (!profile || !profile.autoExec) return execModeOf(profile, harness) === "interactive";
+  // The running turn's own mode when there is one; else whether the session
+  // has a terminal, as last heard from the daemon.
+  if (state.job && jobBelongsToOpen(state.job) && state.job.mode) {
+    return state.job.mode === "interactive";
+  }
+  return !!(state.open && state.open.hasTui);
+};
+
+/** Ask the daemon whether the open session has a live terminal. */
+async function probeTui() {
+  const open = state.open;
+  const profile = open && profileById(open.profileId);
+  if (!profile || !profile.autoExec || !open.sessionId) return;
+  const gen = state.openGen;
+  try {
+    const res = await call(profile,
+      `/api/sessions/${encodeURIComponent(open.sessionId)}/tui?state=1`, { timeout: 8000 });
+    if (!isOpenStill(gen, open.profileId, open.sessionId)) return;
+    setOpenHasTui(!!(res && res.attached));
+  } catch { /* unknown: leave it as it was */ }
+}
+
+function setOpenHasTui(on) {
+  if (!state.open || state.open.hasTui === on) return;
+  state.open.hasTui = on;
+  syncComposer();
+}
+
 const requiresCwd = (profile, harness = null) => {
   const h = harness || profile.provider;
   return capOf(profile, "requires_cwd", h !== "grok", harness);
@@ -2962,6 +3006,7 @@ async function openSession(row) {
   $("chat-title").textContent = row.session.title || "Session";
   renderChatSub();
   updateLiveTuiButton({ restore: true });   // back on the face it was left on
+  probeTui();
   renderSessions();
   // Opening it is the only honest signal the output was read — dims the tag.
   markSeen(profileById(row.profileId), sessionId);
@@ -4059,13 +4104,17 @@ function paintLiveTuiFrame(frame, force) {
     const status = $("live-tui-status");
     const pane = $("live-tui-pane");
     const screen = $("live-tui-screen");
+    if (frame) setOpenHasTui(frame.attached !== false);
     if (!frame || frame.attached === false) {
       status.textContent = frame?.error || "No host TUI attached";
       status.classList.remove("live");
       state.liveTuiSeq = 0;
       if (force || !pane.dataset.hadFrame) {
-        screen.textContent = frame?.error
-          || "No interactive TUI for this session. Start a turn in Interactive mode.";
+        const prof = state.open && profileById(state.open.profileId);
+        screen.textContent = prof && prof.autoExec
+          ? "No terminal for this session yet.\nType a line below and send it to start one."
+          : (frame?.error
+            || "No interactive TUI for this session. Start a turn in Interactive mode.");
         pane.classList.add("empty-tui");
         pane.style.fontSize = "";
         delete pane.dataset.hadFrame;
@@ -5120,7 +5169,7 @@ function syncSlashMenu() {
   }
   pop.dismissed = null;
   const ctx = turnContext();
-  const headless = execModeOf(ctx.profile, ctx.harness) !== "interactive";
+  const headless = !sendsToTerminal(ctx.profile, ctx.harness);
   const keep = pop.kind === "slash" ? pop.items[pop.index] : null;
   pop.kind = "slash";
   pop.anchor = prompt;
@@ -5201,8 +5250,7 @@ const SEND_ICON_QUEUE = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
 function syncSendButton() {
   const ctx = turnContext();
   const running = !!(state.job && jobBelongsToOpen(state.job));
-  const queues = running && ctx
-    && execModeOf(ctx.profile, ctx.harness) !== "interactive";
+  const queues = running && ctx && !sendsToTerminal(ctx.profile, ctx.harness);
   const b = $("btn-send");
   // An icon only: a paper plane, or a queue arrow while a turn runs.
   const icon = queues ? "queue" : "send";
@@ -5228,7 +5276,22 @@ function syncComposer() {
  *  - while a turn runs, interactive types into the TUI and headless queues on
  *    the daemon — never on this page, which can be closed at any moment.
  */
-async function send(text) {
+/**
+ * What the daemon made of an "auto" message. Says so once when a session
+ * that had a terminal no longer has one, since a headless turn behaves
+ * differently (messages queue, terminal-only commands do not run).
+ */
+function noteSendMode(mode) {
+  if (!mode || !state.open) return;
+  const had = state.open.hasTui;
+  setOpenHasTui(mode === "interactive");
+  if (had && mode === "headless") {
+    composerNote("This session's terminal is gone, so this ran headless. "
+      + "Send a line from TUI to start it again.", true);
+  }
+}
+
+async function send(text, { mode = "" } = {}) {
   const raw = String(text || "").trim();
   if (!raw || !state.open) return;
   // Snapshot the open session BEFORE any await — a mid-send row switch must
@@ -5246,14 +5309,16 @@ async function send(text) {
 
   if (/^\/[A-Za-z][A-Za-z0-9_-]*$/.test(raw.split(" ")[0])) {
     const cmd = raw.split(" ")[0];
-    const interactive = execModeOf(profile,
-      sessionProvider(state.open && state.open.session, profile)) === "interactive";
+    const interactive = sendsToTerminal(profile,
+      sessionProvider(state.open && state.open.session, profile));
     // /rewind never reaches the harness — the daemon rewinds the session
     // journal itself (≥ 2.5) — so it is exempt from the interactive-only
     // rule. The advertised-list check below still gates it (old daemons
     // don't list it).
     if (!interactive && cmd !== "/rewind") {
-      composerNote(`${cmd} needs interactive execution — headless turns cannot run commands`, true);
+      composerNote(profile.autoExec
+        ? `${cmd} needs the session's terminal: send a line from TUI to start one`
+        : `${cmd} needs interactive execution — headless turns cannot run commands`, true);
       return;
     }
     // No hardcoded whitelist: the daemon advertises each harness's real
@@ -5275,8 +5340,8 @@ async function send(text) {
   appendLive({ role: "user", text: raw }, paint);
 
   if (job) {
-    const interactive = execModeOf(profile,
-      sessionProvider(state.open && state.open.session, profile)) === "interactive";
+    const interactive = sendsToTerminal(profile,
+      sessionProvider(state.open && state.open.session, profile));
     const jobId = job.id;
     try {
       await call(profile, `/api/jobs/${jobId}/${interactive ? "input" : "queue"}`,
@@ -5302,12 +5367,13 @@ async function send(text) {
         method: "POST",
         body: {
           prompt: raw,
-          permission_mode: wireExecMode(execModeOf(profile, harness)),
+          permission_mode: mode || sendMode(profile, harness),
           model: sessionModelOf(profile, state.open && state.open.session, harness),
           effort: sessionEffortOf(profile, state.open && state.open.session, harness),
         },
       });
     if (res && res.job_id && isOpenStill(openGen, openProfileId, openSessionId)) {
+      noteSendMode(res.mode);
       attachJob(res.job_id, openSessionId);
     }
   } catch (e) {
@@ -5353,7 +5419,7 @@ async function runShell(command) {
     const harness = sessionProvider(state.open && state.open.session, profile);
     const started = await call(profile,
       `/api/sessions/${encodeURIComponent(openSessionId)}/continue`,
-      { method: "POST", body: { prompt, permission_mode: wireExecMode(execModeOf(profile, harness)),
+      { method: "POST", body: { prompt, permission_mode: sendMode(profile, harness),
                                 model: sessionModelOf(
                                   profile, state.open && state.open.session, harness),
                                 effort: sessionEffortOf(
@@ -5591,6 +5657,12 @@ async function pollJob() {
   let snap;
   try {
     snap = await call(profile, `/api/jobs/${job.id}?since=${state.jobSince}`);
+    // How this turn runs (a daemon ≥ 2.30 says): into the terminal or headless.
+    if (snap && snap.mode && state.job === job && job.mode !== snap.mode) {
+      job.mode = snap.mode;
+      if (snap.mode === "interactive") setOpenHasTui(true);
+      syncComposer();
+    }
     state.jobFails = 0;
   } catch {
     if (++state.jobFails >= 5) {
@@ -5741,6 +5813,7 @@ async function pollJob() {
     // already chimed after its own paint, this is a no-op; if we got here
     // first, chimeJobEnded only plays the sound (alreadyPainted).
     if (snap.status === "done" || snap.status === "error") {
+      probeTui();     // a turn can start or end a terminal
       await chimeJobEnded(profile.id, job.id, {
         nextSeq: state.jobSince,
         sessionId: endSid,
@@ -6530,6 +6603,7 @@ function normalizeProfile(p) {
     linkedFiles: !!p.linkedFiles,
     tuiStream: !!p.tuiStream,
     tuiHistory: !!p.tuiHistory,
+    autoExec: !!p.autoExec,
     chunkedUpload: !!p.chunkedUpload,
     ...(typeof p.maxUploadMb === "number" && p.maxUploadMb > 0
       ? { maxUploadMb: p.maxUploadMb } : {}),
@@ -7925,12 +7999,19 @@ function openOptions() {
       // the composer, because they change far more often than this does.
       const canInteractive = capOf(profile, "interactive", true, harness || null);
       const execNow = execModeOf(profile, harness || null);
-      group("Execution",
-            canInteractive ? ["interactive", "headless"] : ["headless"],
-            execNow,
-            (v) => { profile.execMode = normalizeExecMode(v, canInteractive); },
-            execModeLabel);
-      body.appendChild(el("div", "help", EXEC_HINT[execNow] || ""));
+      if (profile.autoExec) {
+        // Nothing to choose: the daemon picks per message.
+        body.appendChild(el("div", "help",
+          "Messages go into this session's terminal when it has one, and run "
+          + "headless when it does not. Send a line from TUI to start a terminal."));
+      } else {
+        group("Execution",
+              canInteractive ? ["interactive", "headless"] : ["headless"],
+              execNow,
+              (v) => { profile.execMode = normalizeExecMode(v, canInteractive); },
+              execModeLabel);
+        body.appendChild(el("div", "help", EXEC_HINT[execNow] || ""));
+      }
       const choices = turnChoices();
       if (choices.length) {
         body.appendChild(el("div", "help",
@@ -8114,8 +8195,15 @@ function wire() {
     const input = $("live-tui-input");
     const text = (input?.value || "").trim();
     if (!text) return;
-    // Full line into TUI (Enter included) via key path: text + Enter.
-    sendLiveTuiKeys(["Enter"], text);
+    const prof = state.open && profileById(state.open.profileId);
+    if (prof && prof.autoExec && !$("live-tui-status").classList.contains("live")) {
+      // No terminal for this session yet: the first line sent from here
+      // starts one (an interactive turn), and Chat shares it from then on.
+      send(text, { mode: "interactive" });
+    } else {
+      // Full line into TUI (Enter included) via key path: text + Enter.
+      sendLiveTuiKeys(["Enter"], text);
+    }
     if (input) input.value = "";
     // Sent from the terminal: the shared draft goes too.
     $("prompt").value = "";

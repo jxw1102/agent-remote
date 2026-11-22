@@ -725,6 +725,9 @@ private fun TranscriptScreenBody(
                             onControlsHeight = { tuiControlsPx = it },
                             running = jobState.running,
                             onStop = vm::stop,
+                            // No terminal yet: the first line sent starts one.
+                            onStartTerminal = if (profile?.caps?.autoExec == true) vm::startTerminal else null,
+                            onTerminal = vm::terminalSeen,
                             topInset = topPad,
                         )
                     }
@@ -897,7 +900,9 @@ private fun TranscriptScreenBody(
             }
 
             val h = harness.ifBlank { null }
-            val interactiveNow = profile?.effectiveExecMode(harness) == ExecMode.INTERACTIVE
+            // Typed into the session's terminal, or a headless turn: the
+            // daemon's pick on a new daemon, the Execution setting on an old.
+            val interactiveNow by vm.sendsToTerminal.collectAsStateWithLifecycle()
             SlashSuggestions(
                 matches = slashMatches(composerText, profile?.caps?.slashFor(h).orEmpty()),
                 headless = !interactiveNow,
@@ -932,7 +937,7 @@ private fun TranscriptScreenBody(
                     .align(Alignment.BottomStart)
                     // Stops short of the tab bubble at the end of the bar
                     // (and scrolls sideways if it needs more).
-                    .padding(start = 10.dp, end = 76.dp, bottom = bottomPad + 2.dp),
+                    .padding(end = 76.dp, bottom = (bottomPad - 8.dp).coerceAtLeast(0.dp)),
             ) {
                 // Opening a chip's menu takes the focus, which puts the
                 // keyboard away: the chips stay for as long as a menu is
@@ -943,10 +948,12 @@ private fun TranscriptScreenBody(
                     exit = fadeOut(tween(120)),
                 ) {
                     Row(
-                        // Room inside the scroll for the pills' shadows.
+                        // Room inside the scroll for the pill's shadow on
+                        // every side (a scroller clips at its edge), most
+                        // at the foot where a shadow reaches furthest.
                         Modifier
                             .horizontalScroll(rememberScrollState())
-                            .padding(start = 2.dp, end = 8.dp, top = 6.dp, bottom = 8.dp),
+                            .padding(start = 10.dp, end = 16.dp, top = 12.dp, bottom = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {

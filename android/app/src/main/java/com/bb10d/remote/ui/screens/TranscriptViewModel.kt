@@ -203,6 +203,90 @@ class TranscriptViewModel(
     // front the same daemon see the same session ids.
     private fun tuiFaceKey(ref: SessionRef) = "${ref.profileId}:${ref.sessionId}"
 
+    // ---- how a message runs ------------------------------------------------
+    // A daemon >= 2.30 decides per message ("auto"): typed into the session's
+    // terminal when it has a live one, a headless turn when it does not, so
+    // there is nothing to choose. Older daemons use the per-daemon Execution
+    // setting, as before.
+
+    /** The session has a live terminal, as last heard from the daemon. */
+    private val _hasTui = MutableStateFlow(false)
+
+    /** Will a message for this session be typed into a terminal? */
+    val sendsToTerminal: StateFlow<Boolean> =
+        combine(profile, _hasTui, harnessProvider) { p, has, harness ->
+            when {
+                p == null -> false
+                p.caps.autoExec -> has
+                else -> p.effectiveExecMode(harness) == ExecMode.INTERACTIVE
+            }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    private fun wireMode(profile: Profile): String? = if (profile.caps.autoExec) "auto" else null
+
+    /** Ask the daemon whether this session has a live terminal. */
+    fun probeTui() {
+        val p = profile.value ?: return
+        val id = _ref.value.sessionId
+        if (!p.caps.autoExec || id.isEmpty()) return
+        val c = client ?: return
+        viewModelScope.launch {
+            runCatching { c.tuiState(id) }.onSuccess { _hasTui.value = it.attached }
+        }
+    }
+
+    /** The TUI face saw the terminal (or its absence). */
+    fun terminalSeen(live: Boolean) {
+        if (live) _hasTui.value = true
+    }
+
+    /**
+     * What the daemon made of an "auto" message. Says so once when a session
+     * that had a terminal no longer has one, since a headless turn behaves
+     * differently (messages queue, terminal-only commands do not run).
+     */
+    private fun noteMode(mode: String) {
+        if (mode.isEmpty()) return
+        val had = _hasTui.value
+        _hasTui.value = mode == ExecMode.INTERACTIVE
+        if (had && mode != ExecMode.INTERACTIVE) {
+            setStatus("This session's terminal is gone, so this ran headless. " +
+                "Send a line from TUI to start it again.")
+        }
+    }
+
+    /** The first line sent from the TUI face when the session has no terminal: start one. */
+    fun startTerminal(text: String) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        val c = client ?: return
+        if (_ref.value.sessionId.isEmpty()) return
+        echoUser(t)
+        watcher.markStarting()
+        viewModelScope.launch {
+            val model = sessionModel()
+            val effort = sessionEffort()
+            runCatching {
+                c.continueSession(
+                    sessionId = _ref.value.sessionId,
+                    prompt = t,
+                    execMode = ExecMode.INTERACTIVE,
+                    model = model,
+                    effort = effort,
+                    wireMode = ExecMode.INTERACTIVE,
+                )
+            }
+                .onSuccess { started ->
+                    _hasTui.value = true
+                    watcher.attach(started.jobId, _ref.value.sessionId)
+                }
+                .onFailure { e ->
+                    watcher.clearStarting()
+                    setStatus(repo.reason(e))
+                }
+        }
+    }
+
     /** For the TUI face, which talks to the daemon on its own. */
     val repository: AgentRepository get() = repo
 
@@ -231,6 +315,13 @@ class TranscriptViewModel(
         get() = repo.client(_ref.value.profileId)
 
     init {
+        // Whether the session has a terminal: asked when it opens and each
+        // time a turn starts or ends (a turn can start or end one).
+        viewModelScope.launch {
+            combine(profile, _ref, job) { p, ref, j ->
+                Triple(p?.caps?.autoExec == true, ref.sessionId, j.running)
+            }.distinctUntilChanged().collect { probeTui() }
+        }
         // This conversation is one of the open tabs over the session sheet,
         // under its current title.
         viewModelScope.launch {
@@ -731,7 +822,7 @@ class TranscriptViewModel(
                 return
             }
             viewModelScope.launch {
-                val interactive = profile.effectiveExecMode(harnessProvider.value) == ExecMode.INTERACTIVE
+                val interactive = sendsToTerminal.value
                 runCatching {
                     if (interactive) c.input(jobId, text) else c.queue(jobId, text)
                 }.onFailure { e ->
@@ -757,10 +848,12 @@ class TranscriptViewModel(
                     execMode = profile.effectiveExecMode(harnessProvider.value),
                     model = model,
                     effort = effort,
+                    wireMode = wireMode(profile),
                 )
             }
-                .onSuccess { jobId ->
-                    watcher.attach(jobId, _ref.value.sessionId)
+                .onSuccess { started ->
+                    noteMode(started.mode)
+                    watcher.attach(started.jobId, _ref.value.sessionId)
                     flushPending()
                 }
                 .onFailure { e ->
@@ -790,7 +883,7 @@ class TranscriptViewModel(
         viewModelScope.launch {
             queued.forEach { text ->
                 runCatching {
-                    if (profile.effectiveExecMode(harnessProvider.value) == ExecMode.INTERACTIVE) {
+                    if (sendsToTerminal.value) {
                         c.input(jobId, text)
                     } else {
                         c.queue(jobId, text)
@@ -831,8 +924,10 @@ class TranscriptViewModel(
         // /rewind never reaches the harness — the daemon (≥ 2.5) rewinds the
         // session journal itself — so it is exempt from the interactive-only
         // rule. The advertised-list check below still gates old daemons.
-        if (profile.effectiveExecMode(harnessProvider.value) != ExecMode.INTERACTIVE && command != "/rewind") {
-            return "$command needs interactive execution — headless turns cannot run commands"
+        if (!sendsToTerminal.value && command != "/rewind") {
+            return if (profile.caps.autoExec)
+                "$command needs the session's terminal: send a line from TUI to start one"
+            else "$command needs interactive execution — headless turns cannot run commands"
         }
         // Daemon advertises harness built-ins; always allow /rewind and /goal
         // so older daemons / all clients stay consistent.
@@ -903,9 +998,10 @@ class TranscriptViewModel(
                     execMode = profile.effectiveExecMode(harnessProvider.value),
                     model = model,
                     effort = effort,
+                    wireMode = wireMode(profile),
                 )
             }
-                .onSuccess { watcher.attach(it, _ref.value.sessionId) }
+                .onSuccess { watcher.attach(it.jobId, _ref.value.sessionId) }
                 .onFailure {
                     watcher.clearStarting()
                     setStatus(repo.reason(it))

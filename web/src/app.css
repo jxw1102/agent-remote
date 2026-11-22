@@ -2832,3 +2832,8 @@ button.stop-btn.icon-idle { display: none !important; }
     mask-image: linear-gradient(to bottom, transparent 0, #000 34px);
   }
 }
+
+/* The chips inside the floating pill have no outline or fill of their own:
+   the pill is the frame. */
+.chips-pill .cchip { background: none; border-color: transparent; }
+.chips-pill .cchip:hover:not(:disabled) { border-color: transparent; background: color-mix(in srgb, var(--text) 7%, transparent); }

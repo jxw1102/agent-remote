@@ -19,6 +19,24 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.30.0** The daemon picks how a message runs. `permission_mode: "auto"`
+on `POST /api/sessions/<id>/continue` types the message into the session's
+terminal when it has a live one (a tmux TUI on this harness), and runs a
+headless turn when it does not. Clients used to choose Interactive or
+Headless per daemon, which let a headless turn start on a session whose
+terminal was open: two processes on one conversation, and the terminal
+never saw the headless turn. Now only one ever drives a session, so its
+history cannot fork, and there is nothing to choose. The reply carries
+`mode` ("interactive" | "headless") and so does every job snapshot;
+`GET /api/sessions/<id>/tui?state=1` says whether a terminal is alive
+without capturing it; `/api/ping` advertises `auto_exec: 1`. An explicit
+`interactive` still starts a terminal for a session that has none, which
+is how Web and Android 1.9.53 start one: the first line sent from the TUI
+face. Their Execution setting is gone on such a daemon, and Chat says so
+once if a session's terminal has gone and a message ran headless.
+BlackBerry 10, iOS and the pager keep their Execution setting and the
+explicit modes (deferred: not built on this machine).
+
 **2.29.0** The terminal's scrollback. A Live TUI frame is the visible
 screen only; what scrolled off its top was out of reach from a client.
 `GET /api/sessions/<id>/tui/history?lines=N[&ansi=1]` returns the newest N

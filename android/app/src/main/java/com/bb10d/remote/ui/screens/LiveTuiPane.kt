@@ -98,6 +98,13 @@ fun LiveTuiPane(
     /** A turn is running: the text line shows Stop, as the chat's box does. */
     running: Boolean = false,
     onStop: () -> Unit = {},
+    /**
+     * Set on a daemon that picks the mode itself: with no terminal for the
+     * session yet, the first line sent starts one through this.
+     */
+    onStartTerminal: ((String) -> Unit)? = null,
+    /** The terminal is there (true once a live frame has come). */
+    onTerminal: (Boolean) -> Unit = {},
 ) {
     val pal = palette
     // The stream and what it last showed are held by the app (TuiFeeds), so
@@ -115,6 +122,7 @@ fun LiveTuiPane(
     val cols = view.cols
     var keyError by remember { mutableStateOf<String?>(null) }
     val error = keyError ?: view.error
+    LaunchedEffect(view.live) { onTerminal(view.live) }
     val scroll = rememberScrollState()
     // The bottom of a terminal is where it is used (the prompt, the cursor),
     // so the pane keeps to its bottom: on the first frame, on every frame
@@ -298,7 +306,9 @@ fun LiveTuiPane(
         fun submitLine() {
             val t = line.trim()
             if (t.isEmpty()) return
-            sendKeys(listOf("Enter"), t)
+            // No terminal for the session yet: start one with this line.
+            if (onStartTerminal != null && !live && seq == 0L) onStartTerminal(t)
+            else sendKeys(listOf("Enter"), t)
             onLine("")
         }
         androidx.compose.material3.Surface(

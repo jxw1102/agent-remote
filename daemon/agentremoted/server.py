@@ -1900,6 +1900,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         payload["tui_stream"] = 1
         # 1: GET …/tui/history?lines=N returns the pane's scrollback.
         payload["tui_history"] = 1
+        # 1: permission_mode "auto" on /continue (the session's terminal
+        # when it has a live one, headless otherwise), `mode` on the reply
+        # and on job snapshots, and GET …/tui?state=1.
+        payload["auto_exec"] = 1
         payload["tui_cols"] = TUI_COLS
         payload["tui_rows"] = TUI_ROWS
         caps = payload.get("caps")
@@ -1908,6 +1912,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             caps["tui_keys"] = 2
             caps["tui_stream"] = 1
             caps["tui_history"] = 1
+            caps["auto_exec"] = 1
             payload["caps"] = caps
 
     def _stamp_upload_caps(self, payload: dict) -> None:
@@ -3301,7 +3306,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._error(409, reason)
                     return
                 self._focus_enroll(running)
-                self._send_json({"job_id": running.id}, status=200)
+                self._send_json({"job_id": running.id,
+                                 "mode": self._job_mode(running)}, status=200)
                 return
             # This session's own model wins over whatever the client
             # happens to have selected daemon-wide: a pin was set against
@@ -3323,8 +3329,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(503, str(e))
             return
         # 200 (not 202): some mobile HTTP stacks / proxies mishandle 202
-        # bodies; clients only need the job_id JSON either way.
-        self._send_json({"job_id": job.id}, status=200)
+        # bodies; clients only need the job_id JSON either way. `mode` says
+        # how the turn runs (what "auto" came to).
+        self._send_json({"job_id": job.id, "mode": self._job_mode(job)}, status=200)
 
     # A second POST /api/sessions/new with the same account, harness, folder
     # and prompt inside this window is a repeat, not a second task: a tap that
@@ -3692,8 +3699,31 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not self._tui_in_scope(session_id):
             self._error(404, "session not found")
             return
+        if self._flag(query or {}, "state"):
+            # Only whether a terminal is alive for the session: no capture.
+            self._send_json({"session_id": session_id,
+                             "attached": self._session_has_tui(session_id)})
+            return
         self._send_json(self._tui_frame(
             session_id, self._flag(query or {}, "ansi")))
+
+    @staticmethod
+    def _job_mode(job) -> str:
+        return "interactive" if (getattr(job, "permission_mode", "") or "") \
+            == "interactive" else "headless"
+
+    def _session_has_tui(self, session_id: str) -> bool:
+        """A terminal is alive for this session, on whichever harness owns it."""
+        managers = [self.jobs] + [b.jobs for b in (self.bundles or {}).values()]
+        seen = []
+        for jm in managers:
+            if jm is None or jm in seen:
+                continue
+            seen.append(jm)
+            fn = getattr(jm, "session_has_tui", None)
+            if fn is not None and fn(session_id):
+                return True
+        return False
 
     def _handle_tui_history(self, session_id: str, query=None):
         """GET /api/sessions/<id>/tui/history?lines=N[&ansi=1] — scrollback.

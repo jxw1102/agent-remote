@@ -488,20 +488,34 @@ class DaemonClient(
         execMode: String,
         model: String,
         effort: String,
-    ): String = parseJobId(
-        raw(
+        /** Sent as is when set ("auto", "interactive"); else from [execMode]. */
+        wireMode: String? = null,
+    ): com.bb10d.remote.data.StartedTurn {
+        val body = raw(
             request(url("api/sessions/$sessionId/continue")).post(
                 jsonBody(
                     buildJsonObject {
                         put("prompt", prompt)
                         // Interactive | Headless UI → daemon permission_mode.
-                        put("permission_mode", com.bb10d.remote.data.ExecMode.wire(execMode))
+                        put("permission_mode",
+                            wireMode ?: com.bb10d.remote.data.ExecMode.wire(execMode))
                         put("model", model)
                         put("effort", effort)
                     },
                 ),
             ).build(),
-        ),
+        )
+        val mode = runCatching {
+            primitiveString((Json.parseToJsonElement(body.decodeToString()) as? JsonObject)?.get("mode"))
+        }.getOrNull().orEmpty()
+        return com.bb10d.remote.data.StartedTurn(parseJobId(body), mode)
+    }
+
+    /** Whether a terminal is alive for the session (agentremoted ≥ 2.30). */
+    suspend fun tuiState(sessionId: String): com.bb10d.remote.data.TuiStateDto = call(
+        request(url("api/sessions/$sessionId/tui", mapOf("state" to "1"))).get().build(),
+        com.bb10d.remote.data.TuiStateDto.serializer(),
+        timeoutSeconds = 8,
     )
 
     suspend fun newSession(

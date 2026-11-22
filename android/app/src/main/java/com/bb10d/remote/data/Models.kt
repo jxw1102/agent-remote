@@ -181,6 +181,8 @@ data class PingDto(
     @SerialName("tui_stream") val tuiStream: Int = 0,
     /** 1: GET …/tui/history returns the pane's scrollback (agentremoted ≥ 2.29). */
     @SerialName("tui_history") val tuiHistory: Int = 0,
+    /** 1: permission_mode "auto" on /continue (agentremoted ≥ 2.30). */
+    @SerialName("auto_exec") val autoExec: Int = 0,
     /** Chunked POST /api/attachments (agentremoted ≥ 2.8.6). */
     @SerialName("chunked_upload") val chunkedUpload: Boolean = false,
     @SerialName("max_upload_mb") val maxUploadMb: Int = 16,
@@ -530,6 +532,13 @@ data class DropListDto(
 @Serializable
 data class JobStartedDto(@SerialName("job_id") val jobId: String = "")
 
+/** A turn that was started: its job, and how it runs (≥ 2.30: "interactive" | "headless"). */
+data class StartedTurn(val jobId: String, val mode: String = "")
+
+/** GET …/tui?state=1 — whether a terminal is alive for the session. */
+@Serializable
+data class TuiStateDto(val attached: Boolean = false)
+
 /** GET /api/sessions/<id>/tui — host tmux pane frame. */
 /** GET …/tui/history: the newest [lines] of scrollback, oldest first. */
 @Serializable
@@ -710,6 +719,11 @@ data class Caps(
     val tuiStream: Boolean = false,
     /** The terminal's scrollback can be fetched (agentremoted >= 2.29). */
     val tuiHistory: Boolean = false,
+    /**
+     * The daemon picks how each message runs (agentremoted >= 2.30): into
+     * the session's terminal when it has a live one, headless otherwise.
+     */
+    val autoExec: Boolean = false,
     /** Chunked attachments (agentremoted >= 2.8.6). */
     val chunkedUpload: Boolean = false,
     /** Largest attachment the daemon accepts (ping max_upload_mb). */
@@ -858,6 +872,7 @@ data class Caps(
             sessionOptions = ping.sessionOptions,
             tuiStream = ping.tuiStream > 0 || ping.caps["tui_stream"] == true,
             tuiHistory = ping.tuiHistory > 0 || ping.caps["tui_history"] == true,
+            autoExec = ping.autoExec > 0 || ping.caps["auto_exec"] == true,
             chunkedUpload = ping.chunkedUpload || ping.caps["chunked_upload"] == true,
             maxUploadMb = ping.maxUploadMb.takeIf { it > 0 } ?: 16,
             providers = ping.providers,

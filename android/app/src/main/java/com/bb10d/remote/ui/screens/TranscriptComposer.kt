@@ -310,6 +310,7 @@ internal fun TurnChips(
                     footer = scope,
                     onSelect = onModel,
                     onMenu = onMenu,
+                    outlined = false,
                 )
             }
             if (caps.canSetEffortFor(harness) && efforts.isNotEmpty()) {
@@ -320,6 +321,7 @@ internal fun TurnChips(
                     footer = scope,
                     onSelect = onEffort,
                     onMenu = onMenu,
+                    outlined = false,
                 )
             }
         }
@@ -339,6 +341,8 @@ internal fun TurnChip(
     onMenu: (Boolean) -> Unit = {},
     /** Show the word before the value ("Model"). */
     showLabel: Boolean = true,
+    /** Draw the chip's own outline; off inside a pill that already has one. */
+    outlined: Boolean = true,
 ) {
     val pal = palette
     var open by remember { mutableStateOf(false) }
@@ -363,7 +367,7 @@ internal fun TurnChip(
                 }
                 .padding(vertical = 6.dp)
                 .clip(RoundedCornerShape(14.dp))
-                .border(1.dp, pal.hairline, RoundedCornerShape(14.dp))
+                .border(1.dp, if (outlined) pal.hairline else Color.Transparent, RoundedCornerShape(14.dp))
                 .padding(start = 10.dp, end = if (canChange) 2.dp else 10.dp, top = 4.dp, bottom = 4.dp),
         ) {
             if (showLabel) Text(label, style = MaterialTheme.typography.labelSmall, color = pal.dim)
