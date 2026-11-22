@@ -755,7 +755,8 @@ button.icon-btn.icon-idle {
   overflow-y: auto;
   /* Starts below the floating bar and ends above the floating bottom bar;
      scrolls on underneath both. */
-  padding: calc(var(--float-h, 0px) + 18px) 0 calc(var(--bottom-h, 0px) + 12px);
+  /* (48 px of air between the last message and the bar.) */
+  padding: calc(var(--float-h, 0px) + 18px) 0 calc(var(--bottom-h, 0px) + 48px);
   scroll-padding-top: calc(var(--float-h, 0px) + 8px);
   -webkit-overflow-scrolling: touch;
 }
@@ -2448,28 +2449,29 @@ button.send-btn svg { width: 20px; height: 20px; display: block; }
 
 /* The text line's toggle for the terminal keys row. */
 .live-tui.keys-hidden .live-tui-keys { display: none !important; }
-/* The keys toggle sits inside the text line, at its end. */
+/* The keys toggle: at the start of the bar, the same round button in the
+   same place as the chat's +. */
 .tui-input-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
-.tui-input-wrap input { flex: 1; min-width: 0; padding-right: 44px; }
-.live-tui-line .tui-input-wrap button.tui-keys-toggle {
-  position: absolute;
-  right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 34px;
-  min-width: 34px;
-  height: 30px;
+.tui-input-wrap input { flex: 1; min-width: 0; }
+.live-tui-line button.tui-keys-toggle {
+  flex: none;
+  align-self: flex-end;
+  width: 38px;
+  min-width: 38px;
+  height: 38px;
   min-height: 0;
   padding: 0;
   border: 0;
-  border-radius: 8px;
-  background: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  color: var(--dim);
 }
-button.tui-keys-toggle svg { width: 20px; height: 20px; }
-.live-tui-line .tui-input-wrap button.tui-keys-toggle[aria-pressed="true"] {
+.live-tui-line button.tui-keys-toggle[aria-pressed="true"] {
   color: var(--accent);
   background: var(--accent-soft);
 }
+button.tui-keys-toggle svg { width: 20px; height: 20px; }
+
 
 /* The terminal's scrollback, fetched when it is scrolled to its top: the
    same grid as the screen, just above it. */
@@ -2747,4 +2749,86 @@ button.stop-btn.icon-idle { display: none !important; }
 @media (max-height: 520px) {
   .tabstrip { max-height: calc(50px + 44px + 10px + 20px + 32px); }
   .thread { max-width: none; }
+}
+
+/* Model and effort float above the start of the bottom bar, in a pill of
+   their own, and only while the message box is in use (on a phone: while
+   the keyboard is up). Out of the bar's flow, so nothing else moves. */
+.chat-bottom { position: absolute; }
+.chat-bottom > .composer-chips {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  margin: 0;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: visible;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(4px);
+  transition: opacity 160ms ease, transform 160ms ease, visibility 0s linear 160ms;
+}
+.chat-bottom > .composer-chips:empty { display: none; }
+.chat-bottom:focus-within > .composer-chips,
+.chat-bottom:has(.composer-pop:not(.hidden)) > .composer-chips {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition: opacity 160ms ease, transform 160ms ease, visibility 0s;
+}
+.chat-bottom:has(#composer.hidden) > .composer-chips { display: none; }
+
+/* The pill above the bar: the model chips. */
+.chips-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 4px 6px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  backdrop-filter: blur(16px) saturate(1.3);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+/* The pills stop short of the tab bubble at the end of the bar (and scroll
+   sideways if a long model name needs more), and the bubbles' column takes
+   touches only on the bubbles, not on the room around them. */
+.chat-bottom > .composer-chips {
+  max-width: calc(100% - 76px);
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 10px 4px 6px;
+  margin: -10px -4px -6px;
+}
+.chat-bottom > .composer-chips::-webkit-scrollbar { display: none; }
+@media (max-width: 720px), (max-height: 520px) {
+  .app.show-chat > .tabstrip { pointer-events: none; }
+  .app.show-chat > .tabstrip > * { pointer-events: auto; }
+}
+}
+
+/* The tab bubble is translucent while it is not in use, so the text under
+   it shows through; fanned out, touched, hovered or focused it is solid.
+   It also stays solid while a conversation is waiting on you. */
+@media (max-width: 720px), (max-height: 520px) {
+  .tabstrip > .tab-wrap { opacity: 0.45; transition: opacity 180ms ease; }
+  .tabstrip.fan > .tab-wrap,
+  .tabstrip > .tab-wrap:hover,
+  .tabstrip > .tab-wrap:active,
+  .tabstrip > .tab-wrap:focus-within,
+  .tabstrip:has(.tab-ask) > .tab-wrap { opacity: 1; }
+}
+
+/* Fanned out, the column fades away upward, so a bubble scrolled past its
+   top goes out softly and the fade says there is more above. */
+@media (max-width: 720px), (max-height: 520px) {
+  .tabstrip.fan {
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 34px);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 34px);
+  }
 }

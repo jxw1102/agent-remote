@@ -279,6 +279,8 @@ internal fun TurnChips(
     perSession: Boolean,
     onModel: (String) -> Unit,
     onEffort: (String) -> Unit,
+    /** One of the chips' menus is open (true) or all are closed (false). */
+    onMenu: (Boolean) -> Unit = {},
 ) {
     // Nothing to offer: no divider and no empty strip above the message box.
     if (!hasTurnChips(profile, harness)) return
@@ -289,13 +291,14 @@ internal fun TurnChips(
     val efforts = caps.effortsFor(harness).withCurrent(effort)
     val scope = if (perSession) "This session only"
                 else "Used for every session on ${profile.displayName}"
-    // No surface or rule of its own: it sits inside the floating card.
-    Column(Modifier.fillMaxWidth()) {
+    // As wide as its chips: the caller floats it above the start of the
+    // bottom bar, in a card of its own.
+    Column {
+        // Not scrollable itself: the row it floats in scrolls, and one
+        // sideways scroller inside another is measured with no width limit,
+        // which Compose refuses (it crashed the app as the chips appeared).
         Row(
-            Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(start = 10.dp, end = 10.dp, top = 4.dp),
+            Modifier.padding(horizontal = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -306,6 +309,7 @@ internal fun TurnChips(
                     selected = model.ifBlank { models.first() },
                     footer = scope,
                     onSelect = onModel,
+                    onMenu = onMenu,
                 )
             }
             if (caps.canSetEffortFor(harness) && efforts.isNotEmpty()) {
@@ -315,6 +319,7 @@ internal fun TurnChips(
                     selected = effort.ifBlank { efforts.first() },
                     footer = scope,
                     onSelect = onEffort,
+                    onMenu = onMenu,
                 )
             }
         }
@@ -330,9 +335,14 @@ internal fun TurnChip(
     onSelect: (String) -> Unit,
     display: (String) -> String = { it },
     hint: (String) -> String = { "" },
+    /** The chip's menu opened or closed. */
+    onMenu: (Boolean) -> Unit = {},
+    /** Show the word before the value ("Model"). */
+    showLabel: Boolean = true,
 ) {
     val pal = palette
     var open by remember { mutableStateOf(false) }
+    LaunchedEffect(open) { onMenu(open) }
     val canChange = options.size > 1
     val shown = display(selected).ifBlank { "default" }
     Box {
@@ -356,7 +366,7 @@ internal fun TurnChip(
                 .border(1.dp, pal.hairline, RoundedCornerShape(14.dp))
                 .padding(start = 10.dp, end = if (canChange) 2.dp else 10.dp, top = 4.dp, bottom = 4.dp),
         ) {
-            Text(label, style = MaterialTheme.typography.labelSmall, color = pal.dim)
+            if (showLabel) Text(label, style = MaterialTheme.typography.labelSmall, color = pal.dim)
             Spacer(Modifier.width(6.dp))
             Text(
                 shown,

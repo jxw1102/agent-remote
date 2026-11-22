@@ -344,6 +344,26 @@ fun LiveTuiPane(
                 Modifier.padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
+                // The terminal keys toggle, at the start of the bar where the
+                // chat has its + (the same round button in the same place).
+                androidx.compose.material3.IconToggleButton(
+                    checked = keysShown,
+                    onCheckedChange = { on -> scope.launch { repo.settingsStore.setTuiKeys(on) } },
+                    modifier = Modifier
+                        .padding(bottom = 8.dp)
+                        .size(40.dp)
+                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .background(
+                            if (keysShown) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f),
+                        ),
+                ) {
+                    androidx.compose.material3.Icon(
+                        androidx.compose.material.icons.Icons.Outlined.Keyboard,
+                        contentDescription = if (keysShown) "Hide terminal keys" else "Show terminal keys",
+                        tint = if (keysShown) MaterialTheme.colorScheme.primary else pal.dim,
+                    )
+                }
                 // The chat's own field: no frame (the card is the frame),
                 // the same type, the same height.
                 androidx.compose.material3.TextField(
@@ -354,19 +374,6 @@ fun LiveTuiPane(
                     placeholder = {
                         Text("Type into the terminal", maxLines = 1,
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    },
-                    // The terminal keys toggle, inside the field at its end.
-                    trailingIcon = {
-                        androidx.compose.material3.IconToggleButton(
-                            checked = keysShown,
-                            onCheckedChange = { on -> scope.launch { repo.settingsStore.setTuiKeys(on) } },
-                        ) {
-                            androidx.compose.material3.Icon(
-                                androidx.compose.material.icons.Icons.Outlined.Keyboard,
-                                contentDescription = if (keysShown) "Hide terminal keys" else "Show terminal keys",
-                                tint = if (keysShown) MaterialTheme.colorScheme.primary else pal.dim,
-                            )
-                        }
                     },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { submitLine() }),

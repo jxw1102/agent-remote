@@ -267,14 +267,14 @@
       <pre id="live-tui-pane" class="live-tui-pane" tabindex="0"
            role="group" aria-label="Host terminal"><span id="live-tui-more" class="live-tui-more"></span><code id="live-tui-history"></code><code id="live-tui-screen"></code></pre>
       <div class="live-tui-line">
-        <!-- The text line, with the terminal keys toggle inside it at its end. -->
+        <!-- Shows or hides the row of terminal keys (Esc, Enter, arrows…): at the
+             start of the bar, where the chat has its +. -->
+        <button id="btn-tui-keys" class="icon-btn tui-keys-toggle" type="button"
+                  aria-pressed="true" aria-controls="live-tui-keys"
+                  title="Terminal keys" aria-label="Terminal keys"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M7 14h10"/></svg></button>
         <div class="tui-input-wrap">
           <input id="live-tui-input" type="text" autocomplete="off" spellcheck="false"
                placeholder="Type into the terminal">
-          <!-- Shows or hides the row of terminal keys (Esc, Enter, arrows…). -->
-          <button id="btn-tui-keys" class="icon-btn tui-keys-toggle" type="button"
-                    aria-pressed="true" aria-controls="live-tui-keys"
-                    title="Terminal keys" aria-label="Terminal keys"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M7 14h10"/></svg></button>
         </div>
         <button id="btn-tui-stop" class="icon-btn danger icon-idle stop-btn" type="button"
                 title="Stop" aria-label="Stop" aria-hidden="true" tabindex="-1">
@@ -295,11 +295,13 @@
     <div id="chat-bottom" class="chat-bottom">
     <section id="gate" class="gate hidden" aria-label="The agent is waiting on you"></section>
 
+    <!-- Model and effort: floating above the start of the bottom bar, and
+         only while the message box has the keyboard. -->
+    <div id="composer-chips" class="composer-chips" role="group"
+         aria-label="How the next message runs"></div>
     <div id="composer" class="composer hidden">
       <div id="composer-note" class="composer-note hidden"></div>
       <div id="composer-pop" class="composer-pop hidden"></div>
-      <div id="composer-chips" class="composer-chips" role="group"
-           aria-label="How the next message runs"></div>
       <div class="composer-row">
         <button id="btn-attach" type="button" title="Attach a file">+</button>
         <input id="file-attach" type="file" multiple hidden>

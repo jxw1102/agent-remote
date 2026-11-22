@@ -5011,6 +5011,8 @@ function renderChips({ force = false } = {}) {
   if (pop.kind === "chip") closePop();
   bar.innerHTML = "";
   bar.classList.toggle("hidden", !choices.length);
+  const pill = el("div", "chips-pill");
+  if (choices.length) bar.appendChild(pill);
   choices.forEach((c) => {
     const b = el("button", "cchip");
     b.type = "button";
@@ -5032,7 +5034,7 @@ function renderChips({ force = false } = {}) {
         else openChipMenu(c.key, b);
       });
     }
-    bar.appendChild(b);
+    pill.appendChild(b);
   });
 }
 

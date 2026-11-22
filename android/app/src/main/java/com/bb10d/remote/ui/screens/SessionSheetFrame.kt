@@ -1,6 +1,8 @@
 package com.bb10d.remote.ui.screens
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.ui.draw.alpha
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.animation.core.FastOutLinearInEasing
@@ -60,6 +62,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.platform.LocalConfiguration
@@ -210,10 +217,31 @@ private fun TabStrip(
 ) {
     val pal = palette
     val scroll = rememberScrollState()
+    // One bubble stands for all the tabs, the open conversation's, with a
+    // count of how many are open. A tap fans the others out above it;
+    // picking one or a few seconds put them away again, so they are not
+    // standing over the text being read.
+    var fan by remember { mutableStateOf(false) }
+    LaunchedEffect(fan) {
+        scroll.scrollTo(0)      // start at the foot, by the open bubble
+        if (fan) {
+            kotlinx.coroutines.delay(6000)
+            fan = false
+        }
+    }
+    // Translucent while not in use, so the text under the bubble shows
+    // through; solid when fanned out, and while any open conversation
+    // is waiting on you.
+    val solid = fan || tabs.any { it.ref.key in blocked }
+    val bubbleAlpha by animateFloatAsState(if (solid) 1f else 0.45f, tween(180), label = "tab-alpha")
     // A column at the end of the screen, a little above the floating bottom
     // bar, the newest tab on top. (Back to the list is in the session bar.)
     Column(
         modifier
+            // The fade is on the whole column, whose own padding holds the
+            // bubbles' shadows: on a bubble alone it cut its shadow off at
+            // the bubble's edge.
+            .alpha(bubbleAlpha)
             .navigationBarsPadding()
             .imePadding()
             // A scrolling column clips at its edge, which cut the bubbles'
@@ -230,6 +258,24 @@ private fun TabStrip(
                     50.dp + 44.dp + 12.dp + 20.dp + 32.dp
                 else 50.dp + 44.dp + 44.dp + 12.dp * 2 + 20.dp + 32.dp,
             )
+            // Fanned out, the column fades away upward, so a bubble scrolled
+            // past its top goes out softly and the fade says there is more
+            // above.
+            .then(
+                if (fan) Modifier
+                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                    .drawWithContent {
+                        drawContent()
+                        drawRect(
+                            brush = Brush.verticalGradient(
+                                0f to Color.Transparent,
+                                34.dp.toPx() to Color.Black,
+                            ),
+                            blendMode = BlendMode.DstIn,
+                        )
+                    }
+                else Modifier,
+            )
             .verticalScroll(scroll, reverseScrolling = true)
             // End padding: the bubbles' centres sit over Send's (the bar's
             // 10 dp inset, its row's 8 dp, half of Send's 42 dp).
@@ -237,18 +283,6 @@ private fun TabStrip(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // One bubble stands for all the tabs, the open conversation's, with a
-        // count of how many are open. A tap fans the others out above it;
-        // picking one or a few seconds put them away again, so they are not
-        // standing over the text being read.
-        var fan by remember { mutableStateOf(false) }
-        LaunchedEffect(fan) {
-            scroll.scrollTo(0)      // start at the foot, by the open bubble
-            if (fan) {
-                kotlinx.coroutines.delay(6000)
-                fan = false
-            }
-        }
         // The open conversation's bubble stays where it is, at the foot of
         // the column; the others fan out above it, the most recently opened
         // nearest.

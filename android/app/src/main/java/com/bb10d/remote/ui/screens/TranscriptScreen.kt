@@ -16,6 +16,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -676,6 +679,7 @@ private fun TranscriptScreenBody(
         },
         containerColor = MaterialTheme.colorScheme.background,
     ) { padding ->
+        var chipMenuOpen by remember { mutableStateOf(false) }
         // The floating bottom bar's height, so the list ends above it.
         var bottomPx by remember { mutableIntStateOf(0) }
         val bottomPad = with(LocalDensity.current) { bottomPx.toDp() }
@@ -751,7 +755,8 @@ private fun TranscriptScreenBody(
                             start = 14.dp,
                             end = 14.dp,
                             top = topPad + 10.dp,
-                            bottom = bottomPad + 12.dp,
+                            // 48 dp of air between the last row and the bar.
+                            bottom = bottomPad + 48.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
@@ -898,19 +903,6 @@ private fun TranscriptScreenBody(
                 headless = !interactiveNow,
                 onPick = { vm.updateComposer("$it ") },
             )
-            profile?.let {
-                TurnChips(
-                    profile = it,
-                    harness = h,
-                    // Read from the collected session state, not the view
-                    // model, so the chips repaint when the pin changes.
-                    model = sessionModelOf(session, profile, harness),
-                    effort = sessionEffortOf(session, profile, harness),
-                    perSession = it.caps.sessionOptions && ref.sessionId.isNotEmpty(),
-                    onModel = vm::setModel,
-                    onEffort = vm::setEffort,
-                )
-            }
             AttachmentChips(
                 chips = attachments,
                 onRemove = vm::removeAttachment,
@@ -930,6 +922,60 @@ private fun TranscriptScreenBody(
             )
             }
             }
+            }
+            // Model and effort float above the start of the bottom bar, in a
+            // card of their own, and only while the keyboard is up (that is
+            // when the next message is being written). They sit over the
+            // page, not in the bar's column, so nothing else moves.
+            if (!tuiOn) Box(
+                Modifier
+                    .align(Alignment.BottomStart)
+                    // Stops short of the tab bubble at the end of the bar
+                    // (and scrolls sideways if it needs more).
+                    .padding(start = 10.dp, end = 76.dp, bottom = bottomPad + 2.dp),
+            ) {
+                // Opening a chip's menu takes the focus, which puts the
+                // keyboard away: the chips stay for as long as a menu is
+                // open, or they would vanish and take the menu with them.
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = imeBottom > 0 || chipMenuOpen,
+                    enter = fadeIn(tween(160)),
+                    exit = fadeOut(tween(120)),
+                ) {
+                    Row(
+                        // Room inside the scroll for the pills' shadows.
+                        Modifier
+                            .horizontalScroll(rememberScrollState())
+                            .padding(start = 2.dp, end = 8.dp, top = 6.dp, bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                    val chipHarness = harness.ifBlank { null }
+                    if (profile?.let { hasTurnChips(it, chipHarness) } == true) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, pal.hairline),
+                        shadowElevation = 6.dp,
+                    ) {
+                    profile?.let {
+                        TurnChips(
+                            profile = it,
+                            harness = harness.ifBlank { null },
+                            // Read from the collected session state, not the view
+                            // model, so the chips repaint when the pin changes.
+                            model = sessionModelOf(session, profile, harness),
+                            effort = sessionEffortOf(session, profile, harness),
+                            perSession = it.caps.sessionOptions && ref.sessionId.isNotEmpty(),
+                            onModel = vm::setModel,
+                            onEffort = vm::setEffort,
+                            onMenu = { chipMenuOpen = it },
+                        )
+                    }
+                    }
+                    }
+                    }
+                }
             }
             }
         }
