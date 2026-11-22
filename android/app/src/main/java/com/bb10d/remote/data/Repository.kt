@@ -90,6 +90,9 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
     val profileStore = ProfileStore(context)
     val settingsStore = SettingsStore(context)
     val draftStore = DraftStore(context)
+    val tabStore = TabStore(context)
+    /** Live TUI streams, held across session pages (see TuiFeeds). */
+    val tuiFeeds by lazy { TuiFeeds(this, scope) }
     private val chime = Chime(context)
 
     /** Play a progress cue, honouring the two switches. */

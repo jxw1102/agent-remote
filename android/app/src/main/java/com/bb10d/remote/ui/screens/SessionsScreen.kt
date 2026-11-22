@@ -925,8 +925,8 @@ private fun SessionCard(
             }
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
-        // Three lines, as on the web: where and how it is (state, daemon,
-        // folder, branch, when), then what it is (the title), then what was
+        // Three lines, as on the web: how and where it is (state, folder,
+        // branch, when, daemon), then what it is (the title), then what was
         // last said. Folder and branch are words, not pills, and give way
         // (they share what is left) so the state and time are never cut. The
         // session id is not shown; long-press the row to copy it.
@@ -935,10 +935,29 @@ private fun SessionCard(
                 WorkingPulse(accent.tint, Modifier.padding(end = 8.dp))
             }
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                ProviderChip(row.provider, row.profileName, Modifier.widthIn(max = 132.dp))
+                // The state starts the line, in the daemon's words. "Needs
+                // answer" shows in either view; the rest only in Focus, where
+                // the row was enrolled (in All it is noise). Derived from the
+                // live status stream, so a turn ending is visible without a
+                // refresh.
+                val focusState = liveFocusState(row.session.focusState, working, blocked)
+                var lead = working
+                if (blocked) {
+                    FocusPill("needs_answer")
+                    lead = true
+                } else if (showFocusState && focusState.isNotEmpty()) {
+                    // A turn that ended while we watched the stream is unread
+                    // by definition: you were looking at the list.
+                    FocusPill(
+                        focusState,
+                        unread = row.session.focusUnread ||
+                            row.session.focusState == "working",
+                    )
+                    lead = true
+                }
                 val project = row.session.cwd.trimEnd('/').substringAfterLast('/')
                 if (project.isNotEmpty()) {
-                    Spacer(Modifier.width(7.dp))
+                    if (lead) Spacer(Modifier.width(7.dp))
                     Text(
                         project,
                         style = MaterialTheme.typography.labelMedium,
@@ -960,24 +979,6 @@ private fun SessionCard(
                         modifier = Modifier.weight(1f, fill = false),
                     )
                 }
-                // The state tag, in the daemon's words. "Needs answer" shows in
-                // either view; the rest only in Focus, where the row was
-                // enrolled (in All it is noise). Derived from the live status
-                // stream, so a turn ending is visible without a refresh.
-                val focusState = liveFocusState(row.session.focusState, working, blocked)
-                if (blocked) {
-                    Spacer(Modifier.width(7.dp))
-                    FocusPill("needs_answer")
-                } else if (showFocusState && focusState.isNotEmpty()) {
-                    Spacer(Modifier.width(7.dp))
-                    // A turn that ended while we watched the stream is unread
-                    // by definition: you were looking at the list.
-                    FocusPill(
-                        focusState,
-                        unread = row.session.focusUnread ||
-                            row.session.focusState == "working",
-                    )
-                }
             }
             Spacer(Modifier.width(8.dp))
             Text(
@@ -986,6 +987,9 @@ private fun SessionCard(
                 color = pal.dim,
                 maxLines = 1,
             )
+            // The daemon last: the line starts with how the session is.
+            Spacer(Modifier.width(7.dp))
+            ProviderChip(row.provider, row.profileName, Modifier.widthIn(max = 112.dp))
         }
 
         Spacer(Modifier.height(4.dp))

@@ -237,7 +237,8 @@ a { color: var(--accent); }
 }
 .row-when { color: var(--dim); font-size: 11px; flex: none; margin-left: auto; }
 
-/* The first line: state, which daemon, where, and when at the far end.
+/* The first line: state first, then where, with when and which daemon at
+   the far end.
    The session id is not shown; right-click or long-press copies it. Folder and branch are words, not chips,
    and give way (branch first) so nothing is pushed off the edge. */
 .row-meta {
@@ -251,7 +252,7 @@ a { color: var(--accent); }
 .row-meta > .tag { flex: none; }
 /* A long daemon name is cut at a share of the row; a short one is never
    squeezed by the folder and branch beside it. */
-.row-meta > .tag.host { flex: 0 0 auto; max-width: 42%; overflow: hidden; text-overflow: ellipsis; }
+.row-meta > .tag.host { flex: 0 0 auto; max-width: 34%; overflow: hidden; text-overflow: ellipsis; }
 .row-folder, .row-branch {
   min-width: 0;
   overflow: hidden;
@@ -1130,8 +1131,15 @@ button.icon-btn.icon-idle {
   flex-direction: column;
   gap: 6px;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
+  /* A floating card like the session bar above it and the chat's live
+     strip, not a full-width strip with a rule under it. */
+  margin: 0 10px 6px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  backdrop-filter: blur(16px) saturate(1.3);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
   flex: none;
 }
 .live-tui-meta {
@@ -2171,5 +2179,177 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/* ------------------------------------------------------- portrait sheet */
+/* A portrait phone: the session page is a sheet that comes up from the
+   bottom over the dimmed list, and the conversations opened from the list
+   sit above it as bubbles, like a browser's tabs. Elsewhere none of this
+   shows. */
+.tabstrip, .sheet-grip { display: none; }
+@media (max-width: 720px) and (orientation: portrait) {
+  .app { --tabs-h: 62px; }
+  /* The list stays behind the sheet. */
+  .app.show-chat > .pane-list { display: flex; }
+  .app > .pane-chat,
+  .app:not(.show-chat) > .pane-chat {
+    display: flex;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: calc(var(--tabs-h) + env(safe-area-inset-top, 0px));
+    z-index: 30;
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+    border-radius: 18px 18px 0 0;
+    border-top: 1px solid var(--line);
+    background: var(--bg);
+    box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.55);
+    transform: translateY(105%);
+    visibility: hidden;
+    transition: transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0s linear 300ms;
+  }
+  .app.show-chat > .pane-chat {
+    transform: none;
+    visibility: visible;
+    transition: transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0s;
+  }
+  .app > .pane-chat.dragging { transition: none; }
+  /* The dimmed list behind; a tap on it closes the sheet (app.js). */
+  .app::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.6);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 300ms ease;
+  }
+  .app.show-chat::after { opacity: 1; pointer-events: auto; }
+  .sheet-grip {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 8;
+    width: 96px;
+    height: 16px;
+    cursor: grab;
+    touch-action: none;
+  }
+  .sheet-grip::before {
+    content: "";
+    position: absolute;
+    left: 30px;
+    right: 30px;
+    top: 6px;
+    height: 4px;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--text) 30%, transparent);
+  }
+  /* Over the sheet: the Changes pane, dialogs, toasts. */
+  .pane-side { z-index: 35; }
+  .modal { z-index: 40; }
+  .toast { z-index: 45; }
+  /* Inside the sheet the floating bar sits under the grip, not the notch. */
+  .chat-float { top: 16px; }
+  .chat-head { padding-top: 6px; }
+
+  .tabstrip {
+    position: fixed;
+    top: env(safe-area-inset-top, 0px);
+    left: 0;
+    right: 0;
+    height: var(--tabs-h);
+    z-index: 31;
+    align-items: center;
+    gap: 10px;
+    padding: 0 12px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-8px);
+    transition: opacity 200ms ease, transform 200ms ease;
+  }
+  .tabstrip::-webkit-scrollbar { display: none; }
+  .app.show-chat > .tabstrip {
+    display: flex;
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+  .tab-home, .tab-bubble {
+    flex: none;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border-radius: 50%;
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    color: var(--text);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  }
+  .tab-home svg { width: 20px; height: 20px; }
+  .tab-wrap { position: relative; flex: none; }
+  .tab-bubble {
+    border: 2px solid color-mix(in srgb, var(--tab) 55%, transparent);
+    background: color-mix(in srgb, var(--tab) 16%, var(--surface-2));
+    -webkit-touch-callout: none;
+    user-select: none;
+  }
+  .tab-bubble[aria-current="true"] {
+    width: 50px;
+    height: 50px;
+    border-color: var(--tab);
+    background: color-mix(in srgb, var(--tab) 30%, var(--surface-2));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tab) 25%, transparent),
+      0 6px 18px rgba(0, 0, 0, 0.45);
+  }
+  .tab-initials { font-size: 14px; font-weight: 700; letter-spacing: 0.3px; }
+  .tab-state {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid var(--bg);
+  }
+  .tab-working { background: var(--tab); animation: breathe 1.6s ease-in-out infinite; }
+  .tab-ask {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 17px;
+    height: 17px;
+    background: var(--warn);
+    color: #000;
+    font-size: 11px;
+    font-weight: 800;
+  }
+  .tab-close {
+    position: absolute;
+    bottom: -4px;
+    right: -6px;
+    width: 22px;
+    height: 22px;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    border-radius: 50%;
+    border: 1px solid var(--line);
+    background: var(--surface-3);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1;
   }
 }

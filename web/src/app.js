@@ -855,6 +855,14 @@ function restoreDraft() {
   draftFor = openDraftKey();
   const d = draftFor ? readDrafts()[draftFor] : null;
   prompt.value = d && typeof d.text === "string" ? d.text : "";
+  sizePrompt();
+  // The terminal's text line holds the same draft as the message box.
+  const line = $("live-tui-input");
+  if (line) line.value = prompt.value;
+}
+
+function sizePrompt() {
+  const prompt = $("prompt");
   prompt.style.height = "auto";
   prompt.style.height = Math.min(Math.max(prompt.scrollHeight, 38), 220) + "px";
 }
@@ -2335,6 +2343,7 @@ function reconcileList(host, want) {
 }
 
 function renderSessions() {
+  renderTabs();
   const host = $("sessions");
   const want = [];
   const rows = visibleRows();
@@ -2405,7 +2414,7 @@ function renderSessions() {
       btn.appendChild(done);
     }
 
-    // Three lines: where and how it is (state, daemon, folder, branch, when),
+    // Three lines: how and where it is (state, folder, branch, when, daemon),
     // then what it is (the title), then what was last said.
     const meta = el("div", "row-meta");
     // Working = breathing dot; permission/question = blinking "?" in that spot.
@@ -2428,7 +2437,6 @@ function renderSessions() {
     hostTag.title = (pal.label || row.provider)
       ? `${row.profileName} · ${pal.label || row.provider}`
       : "Daemon profile";
-    meta.appendChild(hostTag);
     // The daemon's word for it, so the list, Focus and every other client agree.
     if (blocked.has(key)) meta.appendChild(el("span", "tag waiting", FOCUS_LABELS.needs_answer));
     // Focus state tag. Same row layout as any other session — one more chip.
@@ -2460,6 +2468,8 @@ function renderSessions() {
       meta.appendChild(br);
     }
     meta.appendChild(el("span", "row-when", stamp(row.sortKey)));
+    // The daemon last: the line starts with how the session is.
+    meta.appendChild(hostTag);
     btn.appendChild(meta);
     btn.appendChild(el("div", "row-title", listTitle(row.session)));
 
@@ -2517,6 +2527,7 @@ function showChatPane(on) {
   const app = $("app");
   const was = app.classList.contains("show-chat");
   app.classList.toggle("show-chat", !!on);
+  syncLiveTuiHold();
   if (on && !was && isCompact() && !chatHistoryPushed) {
     try {
       history.pushState({ pane: "chat" }, "");
@@ -2534,7 +2545,190 @@ function backToList() {
 window.addEventListener("popstate", () => {
   chatHistoryPushed = false;
   $("app").classList.remove("show-chat");
+  syncLiveTuiHold();
 });
+document.addEventListener("visibilitychange", () => syncLiveTuiHold());
+
+// ------------------------------------------------------------- tabs
+//
+// On a portrait phone the session page is a sheet that comes up from the
+// bottom, and the conversations opened from the list stay above it as
+// bubbles, like a browser's tabs: tap one to switch, tap the open one's ×
+// (or long-press any) to close it. The set is kept in this browser.
+
+const TABS_KEY = "agentremote.tabs";
+const TABS_MAX = 10;
+const sheetQuery = window.matchMedia("(max-width: 720px) and (orientation: portrait)");
+
+function readTabs() {
+  try {
+    const t = JSON.parse(localStorage.getItem(TABS_KEY) || "[]");
+    return Array.isArray(t) ? t.filter((x) => x && x.profileId && x.sessionId) : [];
+  } catch { return []; }
+}
+function writeTabs(tabs) {
+  try { localStorage.setItem(TABS_KEY, JSON.stringify(tabs.slice(-TABS_MAX))); } catch { /* blocked */ }
+}
+
+/** The session just opened becomes a tab (at the end, as a browser does). */
+function addTab(row) {
+  if (!row || !row.session || !row.session.id) return;
+  const tabs = readTabs();
+  const at = tabs.findIndex((t) => t.profileId === row.profileId && t.sessionId === row.session.id);
+  const tab = {
+    profileId: row.profileId,
+    sessionId: row.session.id,
+    title: listTitle(row.session),
+    cwd: row.session.cwd || "",
+    provider: row.provider || "",
+    profileName: row.profileName || "",
+  };
+  if (at >= 0) tabs[at] = tab;
+  else {
+    tabs.push(tab);
+    // Past the cap the oldest go, but never the one being opened.
+    while (tabs.length > TABS_MAX) tabs.shift();
+  }
+  writeTabs(tabs);
+  renderTabs();
+}
+
+function closeTab(profileId, sessionId) {
+  const tabs = readTabs();
+  const at = tabs.findIndex((t) => t.profileId === profileId && t.sessionId === sessionId);
+  if (at < 0) return;
+  tabs.splice(at, 1);
+  writeTabs(tabs);
+  const open = state.open;
+  if (open && open.profileId === profileId && open.sessionId === sessionId) {
+    // The open one closed: its neighbour comes forward, as in a browser;
+    // with none left the sheet goes down.
+    const next = tabs[Math.min(at, tabs.length - 1)];
+    if (next) openTab(next);
+    else backToList();
+  }
+  renderTabs();
+}
+
+function openTab(tab) {
+  const row = (state.rows || []).find((r) => r.profileId === tab.profileId
+      && r.session && r.session.id === tab.sessionId)
+    || {
+      profileId: tab.profileId,
+      profileName: tab.profileName || (profileById(tab.profileId) || {}).name || "",
+      provider: tab.provider,
+      session: { id: tab.sessionId, title: tab.title, cwd: tab.cwd, provider: tab.provider },
+      sortKey: 0,
+    };
+  openSession(row);
+}
+
+/** Two letters for a bubble: the first letters of the title's first words. */
+function tabInitials(title) {
+  const words = String(title || "").replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/);
+  const first = (words[0] || "?")[0] || "?";
+  const second = words.length > 1 ? words[1][0] : (words[0] || "")[1] || "";
+  return (first + second).toUpperCase();
+}
+
+function renderTabs() {
+  const strip = $("tabstrip");
+  if (!strip) return;
+  const tabs = readTabs();
+  const working = workingKeys(), blocked = blockedKeys();
+  const open = state.open;
+  const sig = JSON.stringify([tabs.map((t) => [t.profileId, t.sessionId, t.title, t.provider]),
+    open && [open.profileId, open.sessionId],
+    tabs.map((t) => blocked.has(`${t.profileId}/${t.sessionId}`) ? 2
+      : working.has(`${t.profileId}/${t.sessionId}`) ? 1 : 0)]);
+  if (strip._sig === sig) return;
+  strip._sig = sig;
+  strip.textContent = "";
+  // First: down to the list (closes the sheet; the tabs stay).
+  const home = el("button", "tab-home");
+  home.type = "button";
+  home.title = "All sessions";
+  home.setAttribute("aria-label", "All sessions");
+  home.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"'
+    + ' stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">'
+    + '<path d="M4 6h16M4 12h16M4 18h10"/></svg>';
+  home.addEventListener("click", backToList);
+  strip.appendChild(home);
+  tabs.forEach((t) => {
+    const key = `${t.profileId}/${t.sessionId}`;
+    const active = !!open && open.profileId === t.profileId && open.sessionId === t.sessionId;
+    const b = el("button", "tab-bubble");
+    b.type = "button";
+    b.style.setProperty("--tab", providerOf(t.provider).accent);
+    b.title = `${t.title}${t.profileName ? " · " + t.profileName : ""}`;
+    b.setAttribute("aria-label", t.title);
+    if (active) b.setAttribute("aria-current", "true");
+    b.appendChild(el("span", "tab-initials", tabInitials(t.title)));
+    if (blocked.has(key)) b.appendChild(el("span", "tab-state tab-ask", "?"));
+    else if (working.has(key)) b.appendChild(el("span", "tab-state tab-working"));
+    let pressTimer = null, longPressed = false;
+    b.addEventListener("pointerdown", () => {
+      longPressed = false;
+      pressTimer = setTimeout(() => { longPressed = true; closeTab(t.profileId, t.sessionId); }, 550);
+    });
+    ["pointerup", "pointerleave", "pointercancel"].forEach((ev) =>
+      b.addEventListener(ev, () => clearTimeout(pressTimer)));
+    b.addEventListener("contextmenu", (e) => e.preventDefault());
+    b.addEventListener("click", () => {
+      if (longPressed) return;
+      if (!active) openTab(t);
+    });
+    const wrap = el("div", "tab-wrap");
+    wrap.appendChild(b);
+    if (active) {
+      const x = el("button", "tab-close", "×");
+      x.type = "button";
+      x.title = "Close this conversation's tab";
+      x.setAttribute("aria-label", "Close tab " + t.title);
+      x.addEventListener("click", (e) => { e.stopPropagation(); closeTab(t.profileId, t.sessionId); });
+      wrap.appendChild(x);
+    }
+    strip.appendChild(wrap);
+    if (active) requestAnimationFrame(() => wrap.scrollIntoView({ inline: "nearest", block: "nearest" }));
+  });
+}
+
+/** Drag the sheet's grip down to close it. */
+function wireSheetGrip() {
+  const grip = $("sheet-grip");
+  const sheet = document.querySelector(".pane-chat");
+  if (!grip || !sheet) return;
+  // A tap on the dimmed list behind the sheet closes it (the scrim is the
+  // app's ::after, so the click lands on the app itself or the list).
+  $("app").addEventListener("click", (e) => {
+    // Only a click on the scrim itself: a click on a list row bubbles here
+    // too, after it has just opened the sheet.
+    if (e.target !== $("app")) return;
+    if (!sheetQuery.matches || !$("app").classList.contains("show-chat")) return;
+    backToList();
+  });
+  let startY = 0, dy = 0, dragging = false;
+  grip.addEventListener("pointerdown", (e) => {
+    if (!sheetQuery.matches) return;
+    dragging = true; startY = e.clientY; dy = 0;
+    grip.setPointerCapture(e.pointerId);
+    sheet.classList.add("dragging");
+  });
+  grip.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    dy = Math.max(0, e.clientY - startY);
+    sheet.style.transform = `translateY(${dy}px)`;
+  });
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    sheet.classList.remove("dragging");
+    sheet.style.transform = "";
+    if (dy > 90) backToList();
+  };
+  grip.addEventListener("pointerup", end);
+  grip.addEventListener("pointercancel", end);
+}
 
 // ---------------------------------------------------------- follow scroll
 //
@@ -2626,6 +2820,7 @@ async function openSession(row) {
 
   $("chat-head").classList.remove("hidden");
   syncShareButton();
+  addTab(row);
   restoreDraft();
   $("composer").classList.remove("hidden");
   closePop();
@@ -3445,6 +3640,7 @@ function pickFace(tui) {
 function openLiveTui() {
   if (!state.open || !state.open.sessionId) return;
   state.liveTui = true;
+  liveTuiActiveAt = Date.now();
   state.liveTuiSeq = 0;
   state.liveTuiCols = 0;
   $("live-tui").classList.remove("hidden");
@@ -3518,6 +3714,52 @@ function startLiveTuiFeed() {
 
 const LIVE_TUI_STREAM_RETRY_MS = 10000;
 
+// The terminal stream outlives the session page: going back to the list
+// leaves it running, so coming back shows the pane at once. It is let go only
+// when the session page is out of sight AND the page itself has been hidden
+// (another app, another tab, the screen off) for five minutes; it reconnects
+// when both are back.
+const LIVE_TUI_RELEASE_MS = 5 * 60 * 1000;
+let liveTuiReleaseTimer = null;
+let liveTuiReleased = false;
+
+const sessionPageVisible = () => !isCompact() || $("app").classList.contains("show-chat");
+
+// Also let it go when nobody can see it and nothing has happened for five
+// minutes: no new frame from the host and no key from the reader. A still
+// pane nobody looks at is not worth a connection.
+let liveTuiActiveAt = Date.now();
+const terminalOnScreen = () => document.visibilityState !== "hidden" && sessionPageVisible();
+setInterval(() => {
+  if (!state.liveTui || liveTuiReleased || terminalOnScreen()) return;
+  if (Date.now() - liveTuiActiveAt < LIVE_TUI_RELEASE_MS) return;
+  stopLiveTuiFeed();
+  liveTuiReleased = true;
+}, 30 * 1000);
+
+function syncLiveTuiHold() {
+  const hidden = document.visibilityState === "hidden";
+  if (state.liveTui && hidden && !sessionPageVisible()) {
+    if (!liveTuiReleaseTimer && !liveTuiReleased) {
+      liveTuiReleaseTimer = setTimeout(() => {
+        liveTuiReleaseTimer = null;
+        if (!state.liveTui) return;
+        stopLiveTuiFeed();
+        liveTuiReleased = true;
+      }, LIVE_TUI_RELEASE_MS);
+    }
+    return;
+  }
+  clearTimeout(liveTuiReleaseTimer);
+  liveTuiReleaseTimer = null;
+  // Back in sight: a released stream reconnects.
+  if (liveTuiReleased && terminalOnScreen() && state.liveTui && state.open) {
+    liveTuiReleased = false;
+    liveTuiActiveAt = Date.now();
+    startLiveTuiFeed();
+  }
+}
+
 function startLiveTuiPolling() {
   clearInterval(state.liveTuiTimer);
   pollLiveTui(true);
@@ -3534,6 +3776,9 @@ function stopLiveTuiFeed() {
 }
 
 function closeLiveTui() {
+  clearTimeout(liveTuiReleaseTimer);
+  liveTuiReleaseTimer = null;
+  liveTuiReleased = false;
   flushLiveTuiText();
   state.liveTui = false;
   state.liveTuiKeys = false;
@@ -3544,6 +3789,7 @@ function closeLiveTui() {
   if (tr) tr.classList.remove("hidden");
   if (state.open) {
     $("composer")?.classList.remove("hidden");
+    sizePrompt();   // the draft may have grown in the terminal's line
     // Back on the chat: a reader who was following lands on the newest row
     // (the transcript kept filling while it was out of sight).
     if (tr && state.stick) jumpBottom(tr);
@@ -3621,6 +3867,7 @@ function paintLiveTuiFrame(frame, force) {
     }
     if (!force && frame.seq === state.liveTuiSeq) return;
     state.liveTuiSeq = frame.seq;
+    liveTuiActiveAt = Date.now();   // the pane changed
     pane.dataset.hadFrame = "1";
     pane.classList.remove("empty-tui");
     const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
@@ -3703,6 +3950,7 @@ const _tuiQueue = [];      // { text } | { keys } | { line: { text, keys } }
 let _tuiSending = false;
 
 function sendLiveTuiKeys(keys, text) {
+  liveTuiActiveAt = Date.now();     // the reader acted
   if (text && keys && keys.length) {
     // A whole line from the text field: text, a pause, then Enter. The
     // pause is the daemon's (some harnesses read a fast CR as pasted text).
@@ -7626,6 +7874,9 @@ function wire() {
     // Full line into TUI (Enter included) via key path: text + Enter.
     sendLiveTuiKeys(["Enter"], text);
     if (input) input.value = "";
+    // Sent from the terminal: the shared draft goes too.
+    $("prompt").value = "";
+    flushDraft();
   });
   $("live-tui-input")?.addEventListener("keydown", (e) => {
     // isComposing: Enter while an IME candidate window is open commits the
@@ -7674,6 +7925,8 @@ function wire() {
     searchTimer = setTimeout(refreshSessions, 400);
   });
 
+  wireSheetGrip();
+  renderTabs();
   // The floating bar: the conversation and the terminal start below it, so
   // they are told how tall it is (with its live strip) as that changes.
   const float = $("chat-float");
@@ -7692,6 +7945,17 @@ function wire() {
   };
   prompt.addEventListener("input", grow);
   prompt.addEventListener("input", scheduleDraftSave);
+  // One draft per session, whichever face it is typed in: the message box
+  // and the terminal's text line mirror each other.
+  prompt.addEventListener("input", () => {
+    const line = $("live-tui-input");
+    if (line && line.value !== prompt.value) line.value = prompt.value;
+  });
+  $("live-tui-input")?.addEventListener("input", (e) => {
+    if (prompt.value === e.target.value) return;
+    prompt.value = e.target.value;
+    scheduleDraftSave();
+  });
   prompt.addEventListener("input", syncSlashMenu);
   // The on-screen keyboard opening: the page is resized to what is left
   // above it (viewport interactive-widget=resizes-content; Safari moves the
@@ -7702,6 +7966,24 @@ function wire() {
     jumpBottom($("transcript"));
     syncJumpPill();
   };
+  // The same for the terminal: its bottom (the prompt, the cursor) is where
+  // it is used, so the keyboard coming up brings the pane to its end.
+  const tuiFollow = () => {
+    if (!state.liveTui) return;
+    const pane = $("live-tui-pane");
+    if (pane) pane.scrollTop = pane.scrollHeight;
+  };
+  const tuiKeyboard = () => [0, 150, 350].forEach((ms) => setTimeout(tuiFollow, ms));
+  $("live-tui-input")?.addEventListener("focus", tuiKeyboard);
+  $("live-tui-pane")?.addEventListener("focus", () => { if (isCompact()) tuiKeyboard(); });
+  if (window.visualViewport) {
+    let lastTuiH = window.visualViewport.height;
+    window.visualViewport.addEventListener("resize", () => {
+      const h = window.visualViewport.height;
+      if (h < lastTuiH - 40) tuiFollow();
+      lastTuiH = h;
+    });
+  }
   prompt.addEventListener("focus", () => {
     if (!isCompact()) return;
     // The keyboard takes a moment to come up; follow it as it does.
@@ -7750,6 +8032,7 @@ function wire() {
       const text = prompt.value;
       prompt.value = "";
       grow();
+      if ($("live-tui-input")) $("live-tui-input").value = "";
       flushDraft();     // sent: the draft goes
       send(text);
     }
@@ -7773,6 +8056,7 @@ function wire() {
     const text = prompt.value;
     prompt.value = "";
     grow();
+    if ($("live-tui-input")) $("live-tui-input").value = "";
     flushDraft();
     send(text);
   });

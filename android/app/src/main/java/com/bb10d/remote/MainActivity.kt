@@ -2,6 +2,13 @@ package com.bb10d.remote
 
 import android.Manifest
 import android.content.Intent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.EnterTransition
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -111,6 +118,9 @@ private object Routes {
     const val NONE = "-"
 }
 
+private const val TRANSCRIPT_ROUTE =
+    "${Routes.TRANSCRIPT}/{profileId}/{sessionId}?job={job}&provider={provider}"
+
 @Composable
 private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boolean) {
     val context = LocalContext.current
@@ -156,7 +166,12 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
     }
 
     NavHost(navController = nav, startDestination = Routes.SESSIONS) {
-        composable(Routes.SESSIONS) {
+        composable(
+            Routes.SESSIONS,
+            // Stays put under the session sheet while it slides up or down.
+            exitTransition = { ExitTransition.KeepUntilTransitionsFinished },
+            popEnterTransition = { EnterTransition.None },
+        ) {
             SessionsScreen(
                 vm = viewModel(factory = factory),
                 onOpen = { ref, provider ->
@@ -225,13 +240,25 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
         }
 
         composable(
-            route = "${Routes.TRANSCRIPT}/{profileId}/{sessionId}?job={job}&provider={provider}",
+            route = TRANSCRIPT_ROUTE,
             arguments = listOf(
                 navArgument("profileId") { type = NavType.StringType },
                 navArgument("sessionId") { type = NavType.StringType },
                 navArgument("job") { defaultValue = "" },
                 navArgument("provider") { defaultValue = "" },
             ),
+            // The session page comes up from the bottom like a sheet and goes
+            // back down; switching between its tabs just cross-fades.
+            enterTransition = {
+                if (initialState.destination.route == TRANSCRIPT_ROUTE) fadeIn(tween(160))
+                else slideInVertically(tween(320)) { it }
+            },
+            exitTransition = {
+                if (targetState.destination.route == TRANSCRIPT_ROUTE) fadeOut(tween(160))
+                else fadeOut(tween(200))
+            },
+            popEnterTransition = { fadeIn(tween(200)) },
+            popExitTransition = { slideOutVertically(tween(280)) { it } },
         ) { entry ->
             val profileId = entry.arguments?.getString("profileId").orEmpty()
             val rawSession = entry.arguments?.getString("sessionId").orEmpty()
@@ -249,6 +276,13 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
             TranscriptScreen(
                 vm = viewModel(key = ref.key + jobId + provider, factory = transcriptFactory),
                 onBack = { nav.popBackStack() },
+                onOpenTab = { tab ->
+                    // Another tab: this page is replaced, so Back still goes
+                    // to the list rather than through every tab visited.
+                    nav.navigate(Routes.transcript(tab.profileId, tab.sessionId, provider = tab.provider)) {
+                        popUpTo(entry.destination.id) { inclusive = true }
+                    }
+                },
             )
         }
     }

@@ -79,6 +79,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bb10d.remote.data.ExecMode
+import com.bb10d.remote.data.SessionTab
 import com.bb10d.remote.ui.components.ErrorBanner
 import com.bb10d.remote.ui.components.WorkingDots
 import androidx.compose.ui.graphics.Color
@@ -101,6 +102,8 @@ import kotlinx.coroutines.withContext
 fun TranscriptScreen(
     vm: TranscriptViewModel,
     onBack: () -> Unit,
+    /** Another open conversation's bubble was tapped. */
+    onOpenTab: (SessionTab) -> Unit = {},
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val jobState by vm.job.collectAsStateWithLifecycle()
@@ -120,9 +123,11 @@ fun TranscriptScreen(
         else -> isSystemInDarkTheme()
     }
     AgentRemoteTheme(accent = accent, dark = dark) {
-        TranscriptScreenBody(
+        val sheet = isSheetLayout()
+        val body: @Composable () -> Unit = { TranscriptScreenBody(
             vm = vm,
             onBack = onBack,
+            sheet = sheet,
             ui = ui,
             jobState = jobState,
             live = live,
@@ -132,7 +137,31 @@ fun TranscriptScreen(
             accent = accent,
             harness = harness,
             conn = conn,
-        )
+        ) }
+        if (!sheet) {
+            body()
+        } else {
+            val tabs by vm.repository.tabStore.tabs.collectAsStateWithLifecycle()
+            val ref by vm.ref.collectAsStateWithLifecycle()
+            val working by vm.repository.workingKeys.collectAsStateWithLifecycle()
+            val blocked by vm.repository.blockedKeys.collectAsStateWithLifecycle()
+            SessionSheetFrame(
+                tabs = tabs,
+                current = ref,
+                working = working,
+                blocked = blocked,
+                onHome = onBack,
+                onOpen = onOpenTab,
+                onClose = { tab ->
+                    val next = vm.repository.tabStore.close(tab.ref)
+                    if (tab.ref.key == ref.key) {
+                        // The open one closed: its neighbour comes forward,
+                        // as in a browser; with none left the sheet goes.
+                        if (next != null) onOpenTab(next) else onBack()
+                    }
+                },
+            ) { body() }
+        }
     }
 }
 
@@ -141,6 +170,7 @@ fun TranscriptScreen(
 private fun TranscriptScreenBody(
     vm: TranscriptViewModel,
     onBack: () -> Unit,
+    sheet: Boolean,
     ui: TranscriptUi,
     jobState: com.bb10d.remote.data.JobState,
     live: com.bb10d.remote.data.ActiveJobDto?,
@@ -319,8 +349,10 @@ private fun TranscriptScreenBody(
             // The live strip is a second, smaller card under it.
             Column(
                 Modifier
-                    .statusBarsPadding()
-                    .padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 4.dp),
+                    // In the sheet the band above it holds the status bar,
+                    // and the sheet's grip sits over the bar's top edge.
+                    .then(if (sheet) Modifier else Modifier.statusBarsPadding())
+                    .padding(start = 10.dp, end = 10.dp, top = if (sheet) 16.dp else 6.dp, bottom = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Surface(
@@ -508,6 +540,10 @@ private fun TranscriptScreenBody(
                         LiveTuiPane(
                             repo = vm.repository,
                             ref = ref,
+                            // One draft per session, whichever face it is
+                            // typed in.
+                            line = composerText,
+                            onLine = vm::updateComposer,
                             modifier = Modifier.fillMaxSize().padding(top = topPad),
                         )
                     }

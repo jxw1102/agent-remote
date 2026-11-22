@@ -10,6 +10,9 @@
 </head>
 <body>
 <div id="app" class="app">
+  <!-- Portrait phone: the open conversations as bubbles above the session
+       sheet, like a browser's tabs. Hidden everywhere else. -->
+  <nav id="tabstrip" class="tabstrip" aria-label="Open conversations"></nav>
   <!-- Left: every daemon's sessions in one list. -->
   <aside class="pane-list">
     <header class="list-head">
@@ -76,6 +79,8 @@
 
   <!-- Right: the open transcript. -->
   <main class="pane-chat">
+    <!-- Portrait phone: the sheet's grip; drag it down to close the sheet. -->
+    <div id="sheet-grip" class="sheet-grip" aria-hidden="true"></div>
     <!-- The session's bar and its live strip float over the top of the
          conversation, which scrolls on underneath them. -->
     <div id="chat-float" class="chat-float">

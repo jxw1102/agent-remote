@@ -28,6 +28,10 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.layout.ime
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,8 +59,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
-/** The daemon answered 404 to the frame stream: it predates it. */
-private class StreamUnsupported : Exception()
 
 /**
  * The TUI face of a session window: the host tmux pane for an Interactive
@@ -68,24 +70,59 @@ private class StreamUnsupported : Exception()
 fun LiveTuiPane(
     repo: AgentRepository,
     ref: SessionRef,
+    /** The session's draft: the same text as the chat's message box. */
+    line: String,
+    onLine: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val pal = palette
-    var text by remember { mutableStateOf("Connecting to host TUI…") }
-    var status by remember { mutableStateOf("Host TUI") }
-    var live by remember { mutableStateOf(false) }
-    var line by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-    var seq by remember { mutableStateOf(0L) }
-    // The host pane's width in columns (the daemon says; 120 before it does).
-    var cols by remember { mutableStateOf(120) }
+    // The stream and what it last showed are held by the app (TuiFeeds), so
+    // leaving this page and coming back finds the pane already there.
+    val feed = remember(ref.key) { repo.tuiFeeds.flowFor(ref) }
+    DisposableEffect(ref.key) {
+        repo.tuiFeeds.acquire(ref)
+        onDispose { repo.tuiFeeds.release(ref) }
+    }
+    val view by feed.collectAsState()
+    val text = view.text
+    val status = view.status
+    val live = view.live
+    val seq = view.seq
+    val cols = view.cols
+    var keyError by remember { mutableStateOf<String?>(null) }
+    val error = keyError ?: view.error
     val scroll = rememberScrollState()
+    // The bottom of a terminal is where it is used (the prompt, the cursor),
+    // so the pane keeps to its bottom: on the first frame, on every frame
+    // while the reader is there, and whenever the keyboard comes up and
+    // squeezes the pane. Scrolling up to read stops that until the reader
+    // comes back down.
+    var stick by remember(ref.key) { mutableStateOf(true) }
+    LaunchedEffect(scroll) {
+        snapshotFlow { scroll.isScrollInProgress to (scroll.value >= scroll.maxValue - 24) }
+            .collect { (moving, atBottom) -> if (moving) stick = atBottom else if (atBottom) stick = true }
+    }
+    LaunchedEffect(scroll.maxValue, text, stick) {
+        if (stick) scroll.scrollTo(scroll.maxValue)
+    }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val imeBottom = androidx.compose.foundation.layout.WindowInsets.ime.getBottom(density)
+    val lastIme = remember { intArrayOf(0) }
+    LaunchedEffect(imeBottom) {
+        val rising = imeBottom > lastIme[0]
+        lastIme[0] = imeBottom
+        if (rising) {
+            stick = true
+            scroll.scrollTo(scroll.maxValue)
+        }
+    }
 
     // Keys are a stream: one sender, in the order they were pressed. Each tap
     // used to launch its own request, and two taps could arrive swapped.
     val outbox = remember { Channel<Pair<List<String>, String>>(Channel.UNLIMITED) }
 
     fun sendKeys(keys: List<String> = emptyList(), body: String = "") {
+        repo.tuiFeeds.touch(ref)
         outbox.trySend(keys to body)
     }
 
@@ -93,67 +130,8 @@ fun LiveTuiPane(
         val client = repo.client(ref.profileId) ?: return@LaunchedEffect
         for ((keys, body) in outbox) {
             runCatching { client.tuiKeys(ref.sessionId, keys, body) }
-                .onFailure { error = repo.reason(it) }
-                .onSuccess { error = null }
-        }
-    }
-
-    fun show(frame: TuiFrameDto) {
-        error = null
-        if (!frame.attached) {
-            live = false
-            status = frame.error.ifBlank { "No host TUI attached" }
-            if (seq == 0L) {
-                text = frame.error.ifBlank {
-                    "No interactive TUI for this session. Start a turn in Interactive mode."
-                }
-            }
-        } else if (frame.seq != seq) {
-            seq = frame.seq
-            if (frame.cols > 0) cols = frame.cols
-            live = true
-            status = if (frame.jobId.isNotBlank()) {
-                "Live · job ${frame.jobId.take(8)}"
-            } else {
-                "Live"
-            }
-            text = frame.text.ifBlank { "(empty pane)" }
-        } else {
-            live = true
-        }
-    }
-
-    LaunchedEffect(ref.key) {
-        val client = repo.client(ref.profileId) ?: return@LaunchedEffect
-        // Daemon ≥ 2.22 pushes a frame when the pane changes; the echo of a
-        // key is then one hop away instead of up to a 400 ms poll.
-        if (repo.profile(ref.profileId)?.caps?.tuiStream == true) {
-            try {
-                TuiStream(client, ref.sessionId).events().collect { ev ->
-                    when (ev) {
-                        is TuiStream.Event.Frame -> show(ev.frame)
-                        is TuiStream.Event.Down -> {
-                            if (ev.unsupported) throw StreamUnsupported()
-                            live = false
-                            status = "Reconnecting…"
-                        }
-                    }
-                }
-            } catch (_: StreamUnsupported) {
-                // Fall through to polling.
-            }
-        }
-        // Older daemons: ask for the pane every 400 ms.
-        while (isActive) {
-            val frame = runCatching { client.tui(ref.sessionId) }.getOrElse {
-                error = repo.reason(it)
-                live = false
-                status = "Error"
-                delay(1200)
-                continue
-            }
-            show(frame)
-            delay(400)
+                .onFailure { keyError = repo.reason(it) }
+                .onSuccess { keyError = null }
         }
     }
 
@@ -165,24 +143,32 @@ fun LiveTuiPane(
     val tuiLight = tuiBg.luminance() > 0.5f
     Column(
         modifier
-            // The strip under the text line belongs to the controls, not
-            // to the terminal.
-            .background(MaterialTheme.colorScheme.surface),
+            // The page's own background, as on the chat face; the keys and
+            // the text line below carry the controls' surface themselves.
+            .background(MaterialTheme.colorScheme.background),
     ) {
-        // Whether the pane is live: the one line of chrome this face adds to
-        // the session window's own bar.
-        Text(
-            text = buildString {
-                append(if (live) "● " else "")
-                append(status)
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = if (live) pal.ok else pal.dim,
-            maxLines = 1,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 4.dp),
-        )
+        // Whether the pane is live, as a small floating card under the
+        // session bar: the same look as the chat's live strip.
+        androidx.compose.material3.Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+            border = androidx.compose.foundation.BorderStroke(1.dp, pal.hairline),
+            shadowElevation = 6.dp,
+            modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 2.dp, bottom = 6.dp),
+        ) {
+            Text(
+                text = buildString {
+                    append(if (live) "\u25CF " else "")
+                    append(status)
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = if (live) pal.ok else pal.dim,
+                maxLines = 1,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+            )
+        }
         // weight must sit on a Column direct child — AnsiText wraps Text
         // in SelectionContainer, so weight on its modifier was ignored and
         // the pane grew to full content height, pushing the input off-screen.
@@ -269,7 +255,7 @@ fun LiveTuiPane(
             val t = line.trim()
             if (t.isEmpty()) return
             sendKeys(listOf("Enter"), t)
-            line = ""
+            onLine("")
         }
         Row(
             Modifier
@@ -280,7 +266,7 @@ fun LiveTuiPane(
         ) {
             OutlinedTextField(
                 value = line,
-                onValueChange = { line = it },
+                onValueChange = onLine,
                 modifier = Modifier
                     .weight(1f)
                     .heightIn(min = 52.dp),

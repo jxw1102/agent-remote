@@ -12,6 +12,7 @@ import com.bb10d.remote.data.MessageDto
 import com.bb10d.remote.data.Profile
 import com.bb10d.remote.data.SessionDto
 import com.bb10d.remote.data.SessionRef
+import com.bb10d.remote.data.SessionTab
 import com.bb10d.remote.data.StepDto
 import com.bb10d.remote.data.Time
 import com.bb10d.remote.net.DaemonClient
@@ -230,6 +231,19 @@ class TranscriptViewModel(
         get() = repo.client(_ref.value.profileId)
 
     init {
+        // This conversation is one of the open tabs over the session sheet,
+        // under its current title.
+        viewModelScope.launch {
+            combine(_ref, _session, harnessProvider, profile) { ref, session, harness, profile ->
+                SessionTab(
+                    profileId = ref.profileId,
+                    sessionId = ref.sessionId,
+                    title = session?.title?.trim().orEmpty().ifEmpty { "Session" },
+                    provider = harness,
+                    profileName = profile?.displayName.orEmpty(),
+                )
+            }.collect { if (it.sessionId.isNotEmpty()) repo.tabStore.add(it) }
+        }
         viewModelScope.launch {
             watcher.events.collect { event ->
                 if (event.text.isNotBlank()) {
