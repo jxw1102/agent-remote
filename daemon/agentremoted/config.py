@@ -200,6 +200,11 @@ DEFAULTS = {
     "permission_timeout": 300,
     # How long to wait for the phone to answer a question panel. 0 = forever.
     "question_timeout": 0,
+    # Start Claude's terminals in its classic renderer, so the conversation
+    # scrolls into tmux history and the Live TUI can page back through it.
+    # False leaves Claude's own choice (its fullscreen renderer keeps no
+    # scrollback in tmux).
+    "tui_scrollback": True,
     "claude_env": {},
 
     # ---- grok provider --------------------------------------------------

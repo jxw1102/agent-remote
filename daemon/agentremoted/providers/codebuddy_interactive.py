@@ -65,6 +65,7 @@ class CodebuddyInteractiveManager(InteractiveManager):
     binary_attr = "codebuddy_bin"
     default_binary = "codebuddy"
     disable_view_env = "CODEBUDDY_CODE_DISABLE_AGENT_VIEW"
+    classic_screen_env = ""     # Claude's switch; not known for CodeBuddy
     product = "codebuddy"
 
     def _pane_busy(self, name: str) -> bool:

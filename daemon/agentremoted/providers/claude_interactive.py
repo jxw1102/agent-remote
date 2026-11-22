@@ -359,6 +359,11 @@ class InteractiveManager:
     binary_attr = "claude_bin"
     default_binary = "claude"
     disable_view_env = "CLAUDE_CODE_DISABLE_AGENT_VIEW"
+    # Claude's fullscreen renderer draws on the terminal's alternate screen,
+    # so tmux keeps none of the conversation: the Live TUI's scrollback is
+    # empty. Set, this makes the CLI use its classic renderer, whose output
+    # scrolls into tmux history (config `tui_scrollback`, on by default).
+    classic_screen_env = "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"
     product = "claude"
 
     def __init__(self, config, runner=None):
@@ -409,12 +414,16 @@ class InteractiveManager:
         joined = " ".join(shlex.quote(p) for p in parts)
         hook = shlex.quote(self._hook_url(tui.name))
         view = self.disable_view_env
+        classic = self.classic_screen_env \
+            if getattr(self.config, "tui_scrollback", True) else ""
         if guest:
             bits = [
                 "ulimit -n 65536 2>/dev/null",
                 "export AGENTREMOTE_HOOK_URL=%s" % hook,
                 "export %s=1" % view,
             ]
+            if classic:
+                bits.append("export %s=1" % classic)
             for key, value in self._extra_exports(tui):
                 bits.append("export %s=%s" % (key, shlex.quote(str(value))))
             bits.append("exec %s" % joined)
@@ -423,6 +432,8 @@ class InteractiveManager:
             "AGENTREMOTE_HOOK_URL=%s" % hook,
             "%s=1" % view,
         ]
+        if classic:
+            assigns.append("%s=1" % classic)
         for key, value in self._extra_exports(tui):
             assigns.append("%s=%s" % (key, shlex.quote(str(value))))
         return "ulimit -n 65536 2>/dev/null; %s exec %s" % (

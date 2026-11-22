@@ -19,6 +19,15 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.31.1** Claude's terminals have scrollback. Claude Code's fullscreen
+renderer (the default on newer accounts) draws on the alternate screen, so
+tmux held none of the conversation and the Live TUI had nothing to page
+back through. The daemon now starts Claude with
+`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`, its classic renderer, whose
+output scrolls into tmux history. Terminals already running keep the
+renderer they started with. `"tui_scrollback": false` in the config leaves
+the choice to Claude.
+
 **2.31.0** Terminal scrollback is read a page at a time.
 `GET /api/sessions/<id>/tui/history` takes `before` (skip the newest K
 history lines, the ones the client already has) and `at` (the `history`
