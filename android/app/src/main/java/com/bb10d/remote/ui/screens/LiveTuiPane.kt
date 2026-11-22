@@ -36,6 +36,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -156,6 +157,12 @@ fun LiveTuiPane(
         }
     }
 
+    // The terminal takes the app's own theme: its background and text are
+    // the screen's, and on a light theme the host's colours (picked for a
+    // dark terminal) are adapted so they stay readable.
+    val tuiBg = MaterialTheme.colorScheme.background
+    val tuiFg = MaterialTheme.colorScheme.onBackground
+    val tuiLight = tuiBg.luminance() > 0.5f
     Column(
         modifier
             // The strip under the text line belongs to the controls, not
@@ -187,7 +194,7 @@ fun LiveTuiPane(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .background(Color(0xFF0A0C10)),
+                .background(tuiBg),
         ) {
             val density = LocalDensity.current
             val fit = with(density) {
@@ -199,7 +206,7 @@ fun LiveTuiPane(
                 // size and in a colour that shows on the dark pane.
                 Text(
                     text,
-                    color = Color(0xFF9AA3B2),
+                    color = pal.dim,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
                 )
@@ -210,7 +217,8 @@ fun LiveTuiPane(
                     .verticalScroll(scroll)
                     .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 8.dp, vertical = 6.dp),
-                defaultColor = Color(0xFFD0D4DC),
+                defaultColor = tuiFg,
+                light = tuiLight,
                 fontFamily = FontFamily.Monospace,
                 fontSize = size,
                 lineHeight = size * 1.3f,

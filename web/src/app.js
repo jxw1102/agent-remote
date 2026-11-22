@@ -67,6 +67,39 @@ const _ANSI_BG = [
   "#0c0c0c", "#cd3131", "#0dbc79", "#e5e510",
   "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
 ];
+// The same eight on a light background (VS Code's light terminal).
+const _ANSI_FG_LIGHT = [
+  "#000000", "#cd3131", "#107c10", "#949800",
+  "#0451a5", "#bc05bc", "#0598bc", "#555555",
+];
+const _ANSI_FG_BRIGHT_LIGHT = [
+  "#666666", "#cd3131", "#14ce14", "#b5ba00",
+  "#0451a5", "#bc05bc", "#0598bc", "#a5a5a5",
+];
+
+/**
+ * A colour picked for a dark terminal, made readable on a light one: light
+ * text turns dark with its hue kept, a dark background block turns light,
+ * mid tones stay. Same rule as Android's adaptForLight.
+ */
+function _adaptForLight(r, g, b, background) {
+  const lin = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  const lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  const mx = Math.max(r, g, b) / 255, mn = Math.min(r, g, b) / 255;
+  let h = 0, sat = 0, l = (mx + mn) / 2;
+  if (mx !== mn) {
+    const d = mx - mn;
+    sat = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+    const R = r / 255, G = g / 255, B = b / 255;
+    h = mx === R ? (G - B) / d + (G < B ? 6 : 0) : mx === G ? (B - R) / d + 2 : (R - G) / d + 4;
+    h /= 6;
+  }
+  if (!background && lum > 0.4) l = Math.min(1 - l, 0.38);
+  else if (background && lum < 0.2) l = Math.max(1 - l, 0.88);
+  else return `rgb(${r},${g},${b})`;
+  return `hsl(${Math.round(h * 360)},${Math.round(sat * 100)}%,${Math.round(l * 100)}%)`;
+}
+
 function _ansi256(n) {
   n = n | 0;
   if (n < 0) return null;
@@ -88,9 +121,23 @@ function _escHtml(s) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
-/** Convert SGR sequences into <span style=…>…</span> (safe HTML). */
-function ansiToHtml(raw) {
+/** Convert SGR sequences into <span style=…>…</span> (safe HTML).
+ *  `light`: drawn on a light background, so the host's colours are adapted. */
+function ansiToHtml(raw, light = false) {
   if (!raw) return "";
+  const named = light ? _ANSI_FG_LIGHT : _ANSI_FG;
+  const namedBright = light ? _ANSI_FG_BRIGHT_LIGHT : _ANSI_FG_BRIGHT;
+  const rgbOf = (c) => {
+    const m = /^#([0-9a-f]{6})$/i.exec(c) || null;
+    if (m) { const v = parseInt(m[1], 16); return [v >> 16, (v >> 8) & 255, v & 255]; }
+    const r = /^rgb\((\d+),(\d+),(\d+)\)$/.exec(c);
+    return r ? [+r[1], +r[2], +r[3]] : null;
+  };
+  const adapt = (c, background) => {
+    if (!light || !c) return c;
+    const v = rgbOf(c);
+    return v ? _adaptForLight(v[0], v[1], v[2], background) : c;
+  };
   // Normalise CSI
   const s = String(raw).replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "");
   let i = 0;
@@ -132,20 +179,22 @@ function ansiToHtml(raw) {
       else if (code === 24) underline = false;
       else if (code === 39) fg = null;
       else if (code === 49) bg = null;
-      else if (code >= 30 && code <= 37) fg = _ANSI_FG[code - 30];
-      else if (code >= 90 && code <= 97) fg = _ANSI_FG_BRIGHT[code - 90];
-      else if (code >= 40 && code <= 47) bg = _ANSI_BG[code - 40];
-      else if (code >= 100 && code <= 107) bg = _ANSI_FG_BRIGHT[code - 100];
+      else if (code >= 30 && code <= 37) fg = named[code - 30];
+      else if (code >= 90 && code <= 97) fg = namedBright[code - 90];
+      else if (code >= 40 && code <= 47) bg = adapt(_ANSI_BG[code - 40], true);
+      else if (code >= 100 && code <= 107) bg = adapt(_ANSI_FG_BRIGHT[code - 100], true);
       else if (code === 38 || code === 48) {
         const isFg = code === 38;
         const mode = parts[p + 1];
         if (mode === 5 && parts[p + 2] != null) {
-          const c = _ansi256(parts[p + 2]);
-          if (isFg) fg = c; else bg = c;
+          const n = parts[p + 2] | 0;
+          const c = _ansi256(n);
+          if (isFg) fg = n < 8 ? named[n] : n < 16 ? namedBright[n - 8] : adapt(c, false);
+          else bg = adapt(c, true);
           p += 2;
         } else if (mode === 2 && parts[p + 4] != null) {
           const c = `rgb(${parts[p + 2]|0},${parts[p + 3]|0},${parts[p + 4]|0})`;
-          if (isFg) fg = c; else bg = c;
+          if (isFg) fg = adapt(c, false); else bg = adapt(c, true);
           p += 4;
         }
       }
@@ -747,6 +796,67 @@ function setTuiFace(profileId, sessionId, on) {
   for (let i = 0; i < keys.length - TUI_FACES_MAX; i++) delete map[keys[i]];
   state.settings.tuiFace = map;
   store.save();
+}
+
+// ------------------------------------------------------------ drafts
+//
+// What is typed in a session's message box and not sent yet is kept in this
+// browser, per session, so leaving the session, reloading the page or a
+// crashed tab does not lose it. Its own storage key: it is written on every
+// pause in typing, and the profiles blob need not be rewritten for that.
+
+const DRAFTS_KEY = "agentremote.drafts";
+const DRAFTS_MAX = 100;
+const DRAFT_TTL_MS = 30 * 24 * 3600 * 1000;
+let draftTimer = null;
+let draftFor = "";      // the session the text in the box belongs to
+
+function readDrafts() {
+  try {
+    const map = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "{}");
+    return map && typeof map === "object" ? map : {};
+  } catch { return {}; }
+}
+
+function openDraftKey() {
+  const open = state.open;
+  return open && open.sessionId ? `${open.profileId}:${open.sessionId}` : "";
+}
+
+function writeDraft(key, text) {
+  if (!key) return;
+  const map = readDrafts();
+  delete map[key];
+  if (text && text.trim()) map[key] = { text, at: Date.now() };
+  const now = Date.now();
+  const keys = Object.keys(map);
+  keys.forEach((k, i) => {
+    const d = map[k];
+    if (!d || now - (d.at || 0) > DRAFT_TTL_MS || i < keys.length - DRAFTS_MAX) delete map[k];
+  });
+  try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(map)); } catch { /* full or blocked */ }
+}
+
+/** Save the box for the session it belongs to, now (before switching away). */
+function flushDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = null;
+  if (draftFor) writeDraft(draftFor, $("prompt").value);
+}
+
+function scheduleDraftSave() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(flushDraft, 300);
+}
+
+/** Put the open session's draft (or nothing) in the box. */
+function restoreDraft() {
+  const prompt = $("prompt");
+  draftFor = openDraftKey();
+  const d = draftFor ? readDrafts()[draftFor] : null;
+  prompt.value = d && typeof d.text === "string" ? d.text : "";
+  prompt.style.height = "auto";
+  prompt.style.height = Math.min(Math.max(prompt.scrollHeight, 38), 220) + "px";
 }
 
 function setSoundCues(on) {
@@ -2274,7 +2384,7 @@ function renderSessions() {
     // Done, revealed on hover (CSS) so idle rows stay clean. Only on rows that
     // are actually in Focus — there is no "Track" counterpart because joining
     // is automatic: acting on a session through the daemon enrols it. Nested
-    // inside the row button like .session-id-tag, and it stops propagation so
+    // inside the row button, and it stops propagation so
     // the click never also opens the session.
     if (row.session.focus === true && focusCapable(profileById(row.profileId))) {
       const done = el("button", "row-done");
@@ -2295,23 +2405,22 @@ function renderSessions() {
       btn.appendChild(done);
     }
 
-    const top = el("div", "row-top");
+    // Three lines: where and how it is (state, daemon, folder, branch, when),
+    // then what it is (the title), then what was last said.
+    const meta = el("div", "row-meta");
     // Working = breathing dot; permission/question = blinking "?" in that spot.
     if (blocked.has(key)) {
       const mark = el("span", "pulse-ask", "?");
       mark.title = "Waiting for your answer";
       mark.setAttribute("aria-label", "Waiting for your answer");
-      top.appendChild(mark);
+      meta.appendChild(mark);
     } else if (working.has(key)) {
       const dot = el("span", "pulse");
       dot.style.background = pal.accent;
-      top.appendChild(dot);
+      dot.title = "Working";
+      dot.setAttribute("aria-label", "Working");
+      meta.appendChild(dot);
     }
-    top.appendChild(el("div", "row-title", listTitle(row.session)));
-    top.appendChild(el("div", "row-when", stamp(row.sortKey)));
-    btn.appendChild(top);
-
-    const meta = el("div", "row-meta");
     // Host chip in this session's harness colour (Mbp+Grok → cyan, not multi purple).
     // No separate Grok/Claude/Codex tag — host colour already implies harness.
     const hostTag = el("span", "tag host", row.profileName);
@@ -2320,17 +2429,6 @@ function renderSessions() {
       ? `${row.profileName} · ${pal.label || row.provider}`
       : "Daemon profile";
     meta.appendChild(hostTag);
-    const folder = String(row.session.cwd || "").replace(/\/+$/, "").split("/").pop();
-    if (folder) {
-      const f = el("span", "row-folder", folder);
-      f.title = row.session.cwd;
-      meta.appendChild(f);
-    }
-    if (row.session.git_branch) {
-      const br = el("span", "row-branch", "⑂ " + row.session.git_branch);
-      br.title = "Branch " + row.session.git_branch;
-      meta.appendChild(br);
-    }
     // The daemon's word for it, so the list, Focus and every other client agree.
     if (blocked.has(key)) meta.appendChild(el("span", "tag waiting", FOCUS_LABELS.needs_answer));
     // Focus state tag. Same row layout as any other session — one more chip.
@@ -2350,21 +2448,20 @@ function renderSessions() {
         + (unread ? " — you have not opened it since" : "");
       meta.appendChild(tag);
     }
-    if (row.session.id) {
-      // Enough of the id to tell two sessions apart; the tooltip has all of
-      // it and a click copies all of it, without opening the session.
-      const idTag = el("button", "tag session-id-tag", String(row.session.id).slice(0, 8));
-      idTag.setAttribute("aria-label", "Copy session id " + row.session.id);
-      idTag.type = "button";
-      idTag.title = `Copy session id\n${row.session.id}`;
-      idTag.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        copySessionId(btn._row.session.id);
-      });
-      meta.appendChild(idTag);
+    const folder = String(row.session.cwd || "").replace(/\/+$/, "").split("/").pop();
+    if (folder) {
+      const f = el("span", "row-folder", folder);
+      f.title = row.session.cwd;
+      meta.appendChild(f);
     }
+    if (row.session.git_branch) {
+      const br = el("span", "row-branch", "⑂ " + row.session.git_branch);
+      br.title = "Branch " + row.session.git_branch;
+      meta.appendChild(br);
+    }
+    meta.appendChild(el("span", "row-when", stamp(row.sortKey)));
     btn.appendChild(meta);
+    btn.appendChild(el("div", "row-title", listTitle(row.session)));
 
     btn.addEventListener("contextmenu", (e) => {
       e.preventDefault();
@@ -2429,6 +2526,7 @@ function showChatPane(on) {
 }
 
 function backToList() {
+  flushDraft();
   if (chatHistoryPushed) history.back();   // popstate does the rest
   else showChatPane(false);
 }
@@ -2455,7 +2553,8 @@ function syncJumpPill() {
   const pill = $("jump-latest");
   if (!pill) return;
   const view = $("transcript");
-  const show = !!state.open && !nearBottom(view)
+  // Not over the terminal: the pill belongs to the conversation.
+  const show = !!state.open && !state.liveTui && !nearBottom(view)
     && view.scrollHeight > view.clientHeight + NEAR_BOTTOM_PX;
   pill.classList.toggle("hidden", !show);
   if (!show) { unseenLive = 0; return; }
@@ -2496,6 +2595,7 @@ function applyAccent(provider) {
 }
 
 async function openSession(row) {
+  flushDraft();
   stopJobWatch();
   closeLiveTui();
   showChatPane(true);
@@ -2526,6 +2626,7 @@ async function openSession(row) {
 
   $("chat-head").classList.remove("hidden");
   syncShareButton();
+  restoreDraft();
   $("composer").classList.remove("hidden");
   closePop();
   syncComposer();
@@ -3361,6 +3462,7 @@ function openLiveTui() {
   // straight back.
   focusLiveTuiPane();
   updateLiveTuiCapture();
+  syncJumpPill();
   startLiveTuiFeed();
 }
 
@@ -3446,6 +3548,7 @@ function closeLiveTui() {
     // (the transcript kept filling while it was out of sight).
     if (tr && state.stick) jumpBottom(tr);
   }
+  syncJumpPill();
   updateLiveTuiCapture();
   updateLiveTuiButton();
 }
@@ -3490,6 +3593,14 @@ async function pollLiveTui(force) {
 }
 
 /** Draw one frame, however it arrived (pushed or polled). */
+/** Is the TUI pane drawn on a light background (the app's theme)? */
+function paneIsLight() {
+  const c = getComputedStyle($("live-tui-pane")).backgroundColor;
+  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(c || "");
+  if (!m) return false;
+  return (0.2126 * m[1] + 0.7152 * m[2] + 0.0722 * m[3]) / 255 > 0.5;
+}
+
 function paintLiveTuiFrame(frame, force) {
   {
     const status = $("live-tui-status");
@@ -3516,7 +3627,7 @@ function paintLiveTuiFrame(frame, force) {
     // Coloured SGR when ?ansi=1 (default plain has no escapes).
     const raw = frame.text || "(empty pane)";
     if (frame.ansi || raw.includes("\u001b[") || raw.includes("\x1b[")) {
-      screen.innerHTML = ansiToHtml(raw);
+      screen.innerHTML = ansiToHtml(raw, paneIsLight());
     } else {
       screen.textContent = raw;
     }
@@ -6757,7 +6868,7 @@ function attachPathToPrompt(path) {
   const prompt = $("prompt");
   const sep = prompt.value && !/\s$/.test(prompt.value) ? " " : "";
   prompt.value = prompt.value + sep + "[attached: " + path + "]";
-  prompt.dispatchEvent(new Event("input"));
+  prompt.dispatchEvent(new Event("input"));   // also saves the draft
   prompt.focus();
 }
 
@@ -7563,13 +7674,52 @@ function wire() {
     searchTimer = setTimeout(refreshSessions, 400);
   });
 
+  // The floating bar: the conversation and the terminal start below it, so
+  // they are told how tall it is (with its live strip) as that changes.
+  const float = $("chat-float");
+  const measureFloat = () => {
+    const h = float.offsetHeight ? float.offsetTop + float.offsetHeight : 0;
+    float.parentElement.style.setProperty("--float-h", h + "px");
+  };
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(measureFloat).observe(float);
+  window.addEventListener("resize", measureFloat);
+  measureFloat();
+
   const prompt = $("prompt");
   const grow = () => {
     prompt.style.height = "auto";
     prompt.style.height = Math.min(Math.max(prompt.scrollHeight, 38), 220) + "px";
   };
   prompt.addEventListener("input", grow);
+  prompt.addEventListener("input", scheduleDraftSave);
   prompt.addEventListener("input", syncSlashMenu);
+  // The on-screen keyboard opening: the page is resized to what is left
+  // above it (viewport interactive-widget=resizes-content; Safari moves the
+  // visual viewport instead), and the conversation follows to its newest
+  // row, so the reply being typed sits right under what it answers.
+  const keyboardFollow = () => {
+    if (!state.open || state.liveTui || document.activeElement !== prompt) return;
+    jumpBottom($("transcript"));
+    syncJumpPill();
+  };
+  prompt.addEventListener("focus", () => {
+    if (!isCompact()) return;
+    // The keyboard takes a moment to come up; follow it as it does.
+    [0, 150, 350].forEach((ms) => setTimeout(keyboardFollow, ms));
+  });
+  if (window.visualViewport) {
+    let lastH = window.visualViewport.height;
+    window.visualViewport.addEventListener("resize", () => {
+      const h = window.visualViewport.height;
+      if (h < lastH - 40) keyboardFollow();     // shrank: a keyboard came up
+      lastH = h;
+    });
+  }
+  // A tab being closed or hidden may never fire the timer.
+  window.addEventListener("pagehide", flushDraft);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushDraft();
+  });
   prompt.addEventListener("focus", syncSlashMenu);
   prompt.addEventListener("blur", () => { if (pop.kind === "slash") closePop(); });
   $("composer-pop").addEventListener("keydown", onPopKeydown);
@@ -7600,6 +7750,7 @@ function wire() {
       const text = prompt.value;
       prompt.value = "";
       grow();
+      flushDraft();     // sent: the draft goes
       send(text);
     }
   });
@@ -7622,6 +7773,7 @@ function wire() {
     const text = prompt.value;
     prompt.value = "";
     grow();
+    flushDraft();
     send(text);
   });
 

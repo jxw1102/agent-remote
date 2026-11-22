@@ -227,26 +227,23 @@ a { color: var(--accent); }
 }
 .row:hover { background: var(--surface-2); }
 .row[aria-current="true"] { background: var(--surface-3); }
-.row-top { display: flex; gap: 8px; align-items: baseline; }
 .row-title {
-  flex: 1;
-  min-width: 0;
+  margin-top: 3px;
   font-size: 13.5px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.row-when { color: var(--dim); font-size: 11px; flex: none; }
+.row-when { color: var(--dim); font-size: 11px; flex: none; margin-left: auto; }
 
-/* One line under the title: which daemon, where, then what state it is in
-   and a short id at the far end. Folder and branch are words, not chips, and
-   give way (branch first) so nothing is pushed off the edge. */
+/* The first line: state, which daemon, where, and when at the far end.
+   The session id is not shown; right-click or long-press copies it. Folder and branch are words, not chips,
+   and give way (branch first) so nothing is pushed off the edge. */
 .row-meta {
   display: flex;
   gap: 7px;
   align-items: center;
-  margin-top: 4px;
   flex-wrap: nowrap;
   min-width: 0;
   overflow: hidden;
@@ -528,12 +525,32 @@ a { color: var(--accent); }
   min-height: 0;
   overflow: hidden;
 }
+/* The bar floats: a rounded, frosted card over the top of the conversation,
+   which scrolls on underneath it. app.js measures the stack into
+   --float-h so the first message and the terminal start below it. */
+.chat-float {
+  position: absolute;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  left: calc(10px + env(safe-area-inset-left, 0px));
+  right: calc(10px + env(safe-area-inset-right, 0px));
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;    /* only the cards themselves take clicks */
+}
+.chat-float > * { pointer-events: auto; }
 .chat-head {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--line);
+  padding: 8px 10px 8px 14px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  backdrop-filter: blur(16px) saturate(1.3);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
   flex: none;
 }
 .chat-title { flex: 1; min-width: 0; }
@@ -583,23 +600,6 @@ button.session-id:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
-/* Session-list id: the first eight characters, at the end of the row. The
-   whole id is in the tooltip and is what a click copies. The full 36 used
-   to sit here and was cut off, or pushed off the row by a long branch. */
-button.tag.session-id-tag {
-  flex: none;
-  margin-left: auto;
-  padding: 0 2px;
-  border: 0;
-  background: none;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  line-height: 1.4;
-  color: var(--dim);
-  opacity: 0.75;
-  cursor: pointer;
-}
-button.tag.session-id-tag:hover { color: var(--accent); opacity: 1; }
 .sid-row {
   display: flex;
   gap: 8px;
@@ -664,20 +664,26 @@ button.icon-btn.icon-idle {
   flex-wrap: wrap;
   column-gap: 10px;
   row-gap: 2px;
-  padding: 6px 16px;
-  background: var(--accent-soft);
+  padding: 6px 14px;
+  /* A second, smaller floating card under the bar. */
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  background-image: linear-gradient(var(--accent-soft), var(--accent-soft));
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
   color: var(--accent);
   font-size: 12.5px;
   line-height: 1.35;
-  border-bottom: 1px solid var(--line);
   flex: none;
   min-width: 0;
 }
 /* Human gate (ask / permission): stand out from the normal working strip. */
 .banner.needs-answer {
-  background: rgba(95, 201, 139, 0.12);
+  background-image: linear-gradient(rgba(95, 201, 139, 0.14), rgba(95, 201, 139, 0.14));
   color: var(--ok);
-  border-bottom-color: rgba(95, 201, 139, 0.28);
+  border-color: rgba(95, 201, 139, 0.32);
 }
 /*
  * Line 1: human description + elapsed/queued.
@@ -725,7 +731,9 @@ button.icon-btn.icon-idle {
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 18px 0 8px;
+  /* Starts below the floating bar; scrolls on underneath it. */
+  padding: calc(var(--float-h, 0px) + 18px) 0 8px;
+  scroll-padding-top: calc(var(--float-h, 0px) + 8px);
   -webkit-overflow-scrolling: touch;
 }
 .thread { max-width: 900px; margin: 0 auto; padding: 0 20px; }
@@ -1110,8 +1118,9 @@ button.icon-btn.icon-idle {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: #0a0c10;
-  border-top: 1px solid var(--line);
+  background: var(--bg);
+  /* Below the floating bar, like the conversation. */
+  padding-top: calc(var(--float-h, 0px) + 6px);
 }
 .live-tui.hidden { display: none !important; }
 .live-tui-bar {
@@ -1230,8 +1239,10 @@ button.icon-btn.icon-idle {
      shredded every box border. Too narrow to fit at the minimum font size
      scrolls sideways instead. */
   white-space: pre;
-  color: #d0d4dc;
-  background: #0a0c10;
+  /* The app's own theme, so the terminal is part of the session window
+     rather than a black panel dropped into it. */
+  color: var(--text);
+  background: var(--bg);
   outline: none;
   cursor: text;
 }
@@ -2028,7 +2039,8 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   .icon-btn.back-btn { display: inline-flex; flex: none; margin-right: 2px; }
   .pane-list { border-right: 0; }
   .thread { padding: 0 14px; }
-  .chat-head { padding: 8px 10px; }
+  .chat-head { padding: 6px 8px; }
+  .chat-float { left: 8px; right: 8px; top: calc(6px + env(safe-area-inset-top, 0px)); }
   .composer { padding-left: 12px; padding-right: 12px; }
   .gate { padding-left: 12px; padding-right: 12px; }
   .gate-foot .help { flex: 1 0 100%; }
@@ -2113,7 +2125,6 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   html, body { height: 100dvh; }
 }
 .list-head { padding-top: calc(12px + env(safe-area-inset-top, 0px)); }
-.chat-head { padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
 .composer { padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px)); }
 .pane-list, .pane-chat {
   padding-left: env(safe-area-inset-left, 0px);

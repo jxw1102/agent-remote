@@ -89,6 +89,7 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
 
     val profileStore = ProfileStore(context)
     val settingsStore = SettingsStore(context)
+    val draftStore = DraftStore(context)
     private val chime = Chime(context)
 
     /** Play a progress cue, honouring the two switches. */

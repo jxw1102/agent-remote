@@ -925,34 +925,15 @@ private fun SessionCard(
             }
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
+        // Three lines, as on the web: where and how it is (state, daemon,
+        // folder, branch, when), then what it is (the title), then what was
+        // last said. Folder and branch are words, not pills, and give way
+        // (they share what is left) so the state and time are never cut. The
+        // session id is not shown; long-press the row to copy it.
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (working) {
                 WorkingPulse(accent.tint, Modifier.padding(end = 8.dp))
             }
-            Text(
-                // Don't echo attachment filenames — the transcript chip already shows them.
-                text = listTitle(row.session),
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = Time.relativeStamp(row.sortKey),
-                style = MaterialTheme.typography.labelSmall,
-                color = pal.dim,
-            )
-        }
-
-        Spacer(Modifier.height(5.dp))
-
-        // One line: which daemon, where, what state it is in, and a short id
-        // at the far end. Folder and branch are words, not pills, and give
-        // way (they share what is left) so the state and the id are never cut.
-        Row(verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                 ProviderChip(row.provider, row.profileName, Modifier.widthIn(max = 132.dp))
                 val project = row.session.cwd.trimEnd('/').substringAfterLast('/')
@@ -998,23 +979,29 @@ private fun SessionCard(
                     )
                 }
             }
-            // Enough of the id to tell two sessions apart. Long-press the row
-            // to copy all of it.
-            if (row.ref.sessionId.isNotEmpty()) {
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    row.ref.sessionId.take(8),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = pal.dim.copy(alpha = 0.75f),
-                    maxLines = 1,
-                )
-            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = Time.relativeStamp(row.sortKey),
+                style = MaterialTheme.typography.labelSmall,
+                color = pal.dim,
+                maxLines = 1,
+            )
         }
+
+        Spacer(Modifier.height(4.dp))
+        Text(
+            // Don't echo attachment filenames — the transcript chip already shows them.
+            text = listTitle(row.session),
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
 
         val preview = listPreview(row.session, searching)
         if (preview.isNotBlank()) {
-            Spacer(Modifier.height(5.dp))
+            Spacer(Modifier.height(3.dp))
             Text(
                 // One line of what was last said, as prose: the markdown marks
                 // of a reply ("**Progress:**") are noise at this size.

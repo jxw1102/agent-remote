@@ -6,6 +6,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -28,8 +30,10 @@ fun AnsiText(
     lineHeight: TextUnit = TextUnit.Unspecified,
     fontFamily: FontFamily = FontFamily.Monospace,
     selectable: Boolean = true,
+    /** Drawn on a light background: colours made for a dark terminal are adapted. */
+    light: Boolean = false,
 ) {
-    val annotated = remember(text, defaultColor) { ansiToAnnotated(text, defaultColor) }
+    val annotated = remember(text, defaultColor, light) { ansiToAnnotated(text, defaultColor, light) }
     if (selectable) {
         SelectionContainer {
             Text(
@@ -60,6 +64,37 @@ private val ANSI_BRIGHT = listOf(
     Color(0xFF3B8EEA), Color(0xFFD670D6), Color(0xFF29B8DB), Color(0xFFE5E5E5),
 )
 
+// The same eight on a light background (VS Code's light terminal): the dark
+// set's white and yellow vanish on white.
+private val ANSI_FG_LIGHT = listOf(
+    Color(0xFF000000), Color(0xFFCD3131), Color(0xFF107C10), Color(0xFF949800),
+    Color(0xFF0451A5), Color(0xFFBC05BC), Color(0xFF0598BC), Color(0xFF555555),
+)
+private val ANSI_BRIGHT_LIGHT = listOf(
+    Color(0xFF666666), Color(0xFFCD3131), Color(0xFF14CE14), Color(0xFFB5BA00),
+    Color(0xFF0451A5), Color(0xFFBC05BC), Color(0xFF0598BC), Color(0xFFA5A5A5),
+)
+
+/**
+ * A colour the host program picked for a dark terminal, made readable on a
+ * light one. Text that is light (white, pale grey, yellow) is turned dark
+ * with its hue kept; a dark background block (an input box, a highlight)
+ * is turned light. Mid tones are left alone.
+ */
+internal fun adaptForLight(c: Color, background: Boolean): Color {
+    val hsl = FloatArray(3)
+    androidx.core.graphics.ColorUtils.colorToHSL(c.toArgb(), hsl)
+    val lum = c.luminance()
+    if (!background && lum > 0.4f) {
+        hsl[2] = minOf(1f - hsl[2], 0.38f)
+    } else if (background && lum < 0.2f) {
+        hsl[2] = maxOf(1f - hsl[2], 0.88f)
+    } else {
+        return c
+    }
+    return Color(androidx.core.graphics.ColorUtils.HSLToColor(hsl)).copy(alpha = c.alpha)
+}
+
 private fun ansi256(n: Int): Color {
     if (n < 0) return Color.Unspecified
     if (n < 8) return ANSI_FG[n]
@@ -76,7 +111,13 @@ private fun ansi256(n: Int): Color {
     return Color(gray, gray, gray)
 }
 
-fun ansiToAnnotated(raw: String, defaultColor: Color): AnnotatedString {
+fun ansiToAnnotated(raw: String, defaultColor: Color, light: Boolean = false): AnnotatedString {
+    val named = if (light) ANSI_FG_LIGHT else ANSI_FG
+    val namedBright = if (light) ANSI_BRIGHT_LIGHT else ANSI_BRIGHT
+    // 256-colour and truecolour picks are adapted; the named sixteen have
+    // their own light set above.
+    fun fgOf(c: Color) = if (light) adaptForLight(c, background = false) else c
+    fun bgOf(c: Color) = if (light) adaptForLight(c, background = true) else c
     if (raw.isEmpty()) return AnnotatedString("")
     // Strip OSC sequences (title etc.)
     val s = raw.replace(Regex("\u001B\\][^\u0007\u001B]*(?:\u0007|\u001B\\\\)"), "")
@@ -130,16 +171,18 @@ fun ansiToAnnotated(raw: String, defaultColor: Color): AnnotatedString {
                     24 -> underline = false
                     39 -> fg = null
                     49 -> bg = null
-                    in 30..37 -> fg = ANSI_FG[code - 30]
-                    in 90..97 -> fg = ANSI_BRIGHT[code - 90]
-                    in 40..47 -> bg = ANSI_FG[code - 40]
-                    in 100..107 -> bg = ANSI_BRIGHT[code - 100]
+                    in 30..37 -> fg = named[code - 30]
+                    in 90..97 -> fg = namedBright[code - 90]
+                    in 40..47 -> bg = bgOf(ANSI_FG[code - 40])
+                    in 100..107 -> bg = bgOf(ANSI_BRIGHT[code - 100])
                     38, 48 -> {
                         val isFg = code == 38
                         val mode = parts.getOrNull(p + 1)
                         if (mode == 5 && parts.getOrNull(p + 2) != null) {
-                            val c = ansi256(parts[p + 2])
-                            if (isFg) fg = c else bg = c
+                            val n = parts[p + 2]
+                            val c = ansi256(n)
+                            if (isFg) fg = if (n < 8) named[n] else if (n < 16) namedBright[n - 8] else fgOf(c)
+                            else bg = bgOf(c)
                             p += 2
                         } else if (mode == 2 && parts.getOrNull(p + 4) != null) {
                             val c = Color(
@@ -147,7 +190,7 @@ fun ansiToAnnotated(raw: String, defaultColor: Color): AnnotatedString {
                                 parts[p + 3].coerceIn(0, 255),
                                 parts[p + 4].coerceIn(0, 255),
                             )
-                            if (isFg) fg = c else bg = c
+                            if (isFg) fg = fgOf(c) else bg = bgOf(c)
                             p += 4
                         }
                     }

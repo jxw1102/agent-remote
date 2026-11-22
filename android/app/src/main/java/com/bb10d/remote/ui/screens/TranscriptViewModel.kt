@@ -1201,15 +1201,19 @@ class TranscriptViewModel(
      * Composer draft lives here (not in Compose remember) so it survives the
      * document-picker Activity Result lifecycle.
      */
-    private val _composerText = MutableStateFlow("")
+    // Kept on the phone per session as well (DraftStore), so leaving the
+    // session or the app being killed does not lose what was typed.
+    private val _composerText = MutableStateFlow(repo.draftStore.get(initialRef))
     val composerText: StateFlow<String> = _composerText.asStateFlow()
 
     fun updateComposer(text: String) {
         _composerText.value = text
+        repo.draftStore.put(_ref.value, text)
     }
 
     fun clearComposer() {
         _composerText.value = ""
+        repo.draftStore.put(_ref.value, "")
     }
 
     /**
@@ -1285,6 +1289,7 @@ class TranscriptViewModel(
             .joinToString(" ")
         if (text.isBlank()) return
         _composerText.value = ""
+        repo.draftStore.put(_ref.value, "")
         _attachments.value = emptyList()
         send(text)
     }

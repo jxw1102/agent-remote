@@ -16,6 +16,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material3.Surface
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.gestures.scrollBy
@@ -214,6 +220,21 @@ private fun TranscriptScreenBody(
     LaunchedEffect(ui.scrollTick) {
         if (ui.items.isNotEmpty()) listState.scrollToItem(bottomRow)
     }
+    // The keyboard coming up shrinks the list from below (imePadding). The
+    // list keeps its first row, so the newest ones slid under the keyboard;
+    // now the conversation follows it up to its newest row, so the reply
+    // being typed sits right under what it answers. Tracked through the
+    // keyboard's whole slide, not only where it ends.
+    val density = LocalDensity.current
+    val imeBottom = WindowInsets.ime.getBottom(density)
+    val lastIme = remember { intArrayOf(0) }
+    LaunchedEffect(imeBottom) {
+        val rising = imeBottom > lastIme[0]
+        lastIme[0] = imeBottom
+        if (!rising || tuiView || ui.items.isEmpty()) return@LaunchedEffect
+        listState.scrollToItem(bottomRow)
+        listState.scrollBy(1_000_000f)
+    }
     // The tail appearing at the bottom is followed like new output.
     LaunchedEffect(jobState.running) {
         if (!jobState.running || ui.items.isEmpty()) return@LaunchedEffect
@@ -293,8 +314,23 @@ private fun TranscriptScreenBody(
 
     Scaffold(
         topBar = {
-            Column {
+            // The bar floats: a rounded card over the top of the
+            // conversation, which scrolls on underneath it (as on the web).
+            // The live strip is a second, smaller card under it.
+            Column(
+                Modifier
+                    .statusBarsPadding()
+                    .padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                    border = BorderStroke(1.dp, pal.hairline),
+                    shadowElevation = 8.dp,
+                ) {
                 TopAppBar(
+                    windowInsets = WindowInsets(0, 0, 0, 0),
                     title = {
                         Column {
                             Text(
@@ -430,9 +466,16 @@ private fun TranscriptScreenBody(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.background,
+                        containerColor = Color.Transparent,
                     ),
                 )
+                }
+                if (jobState.running) Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                    border = BorderStroke(1.dp, accent.tint.copy(alpha = 0.25f)),
+                    shadowElevation = 6.dp,
+                ) {
                 StatusBanner(
                     running = jobState.running,
                     phase = live?.phase.orEmpty(),
@@ -443,15 +486,17 @@ private fun TranscriptScreenBody(
                     accent = accent.tint,
                     agent = accent.label,
                 )
-                Hairline()
+                }
             }
         },
         containerColor = MaterialTheme.colorScheme.background,
     ) { padding ->
+        // Everything starts below the floating bar but may scroll under it.
+        val topPad = padding.calculateTopPadding()
         Column(
             Modifier
                 .fillMaxSize()
-                .padding(padding)
+                .padding(bottom = padding.calculateBottomPadding())
                 .imePadding(),
         ) {
             Box(Modifier.weight(1f)) {
@@ -463,18 +508,19 @@ private fun TranscriptScreenBody(
                         LiveTuiPane(
                             repo = vm.repository,
                             ref = ref,
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.fillMaxSize().padding(top = topPad),
                         )
                     }
 
                     ui.loading && ui.items.isEmpty() -> Box(
-                        Modifier.fillMaxSize(),
+                        Modifier.fillMaxSize().padding(top = topPad),
                         contentAlignment = Alignment.Center,
                     ) { CircularProgressIndicator(color = accent.tint) }
 
                     ui.error != null && ui.items.isEmpty() -> Box(
                         Modifier
                             .fillMaxSize()
+                            .padding(top = topPad)
                             .padding(16.dp),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -491,7 +537,7 @@ private fun TranscriptScreenBody(
                         contentPadding = PaddingValues(
                             start = 14.dp,
                             end = 14.dp,
-                            top = 10.dp,
+                            top = topPad + 10.dp,
                             bottom = 16.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(10.dp),

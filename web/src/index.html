@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="color-scheme" content="dark">
 <title>Agent Remote</title>
 <link rel="stylesheet" href="app.css">
@@ -76,6 +76,9 @@
 
   <!-- Right: the open transcript. -->
   <main class="pane-chat">
+    <!-- The session's bar and its live strip float over the top of the
+         conversation, which scrolls on underneath them. -->
+    <div id="chat-float" class="chat-float">
     <header id="chat-head" class="chat-head hidden">
       <!-- Narrow windows show one pane at a time; this returns to the list. -->
       <button id="btn-back" class="icon-btn back-btn" type="button"
@@ -211,6 +214,7 @@
     </header>
 
     <div id="banner" class="banner hidden"></div>
+    </div>
 
     <!-- Shown when new output arrives while reading earlier messages. -->
     <button id="jump-latest" class="jump-latest hidden" type="button"
