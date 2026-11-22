@@ -76,7 +76,6 @@ internal fun AttachmentChips(
     Row(
         Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 10.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -159,14 +158,16 @@ internal fun Composer(
     // padding of its own (the card and the page give those); + and Send are
     // round, like the bubbles and the bar's switch.
     Column(Modifier.fillMaxWidth()) {
+        // + and Send stand clear of the card's edge (8 dp at the sides, 11 dp
+        // at the foot) and centre on a one-line field.
         Row(
-            Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+            Modifier.padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 4.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
             IconButton(
                 onClick = onAttach,
                 modifier = Modifier
-                    .padding(bottom = 4.dp)
+                    .padding(bottom = 8.dp)
                     .size(40.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f)),
@@ -212,6 +213,7 @@ internal fun Composer(
             IconButton(
                 onClick = onStop,
                 enabled = running,
+                modifier = Modifier.padding(bottom = 4.dp),   // level with Send
             ) {
                 Icon(
                     Icons.Outlined.Stop,
@@ -223,7 +225,7 @@ internal fun Composer(
                 onClick = onSend,
                 enabled = canSend,
                 modifier = Modifier
-                    .padding(bottom = 4.dp)
+                    .padding(bottom = 7.dp)
                     .size(42.dp)
                     .clip(CircleShape)
                     .background(if (canSend) accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f)),
@@ -287,12 +289,8 @@ internal fun TurnChips(
     val efforts = caps.effortsFor(harness).withCurrent(effort)
     val scope = if (perSession) "This session only"
                 else "Used for every session on ${profile.displayName}"
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface),
-    ) {
-        HorizontalDivider(color = palette.hairline)
+    // No surface or rule of its own: it sits inside the floating card.
+    Column(Modifier.fillMaxWidth()) {
         Row(
             Modifier
                 .fillMaxWidth()

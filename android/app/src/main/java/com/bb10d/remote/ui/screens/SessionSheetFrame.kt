@@ -26,6 +26,12 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.verticalScroll
@@ -75,12 +81,13 @@ import com.bb10d.remote.ui.theme.Accent
 import com.bb10d.remote.ui.theme.palette
 import kotlin.math.roundToInt
 
-/** A phone held upright: the session page is a sheet with tabs above it. */
+/**
+ * A phone, upright or sideways: the session page is a sheet over the list,
+ * with the tabs, the folding bar and the floating bottom bar. (A tablet
+ * keeps the plain page.)
+ */
 @Composable
-internal fun isSheetLayout(): Boolean {
-    val c = LocalConfiguration.current
-    return c.screenWidthDp < 600 && c.screenHeightDp > c.screenWidthDp
-}
+internal fun isSheetLayout(): Boolean = LocalConfiguration.current.smallestScreenWidthDp < 600
 
 /**
  * The session page as a sheet over a dimmed band, with the open
@@ -130,6 +137,7 @@ internal fun SessionSheetFrame(
         // The session page reports its floating bottom bar's height here, so
         // the tab column stands just above it.
         val bottomInset = remember { mutableStateOf(0.dp) }
+        val sideInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)
         LaunchedEffect(Unit) {
             SheetMotion.switching = false
             offset.animateTo(0f, tween(320, easing = FastOutSlowInEasing))
@@ -163,7 +171,9 @@ internal fun SessionSheetFrame(
                         .background(MaterialTheme.colorScheme.background),
                 ) {
                     CompositionLocalProvider(LocalSheetBottomInset provides bottomInset) {
-                        content()
+                        // Sideways, the camera cutout and a side navigation
+                        // bar are at the page's ends: keep clear of them.
+                        Box(Modifier.fillMaxSize().windowInsetsPadding(sideInsets)) { content() }
                     }
                 }
                 // The system status bar over the sheet's top: translucent, so
@@ -172,7 +182,12 @@ internal fun SessionSheetFrame(
                 TabStrip(
                     tabs, current, working, blocked, conn, ::dismiss, onOpen,
                     onClose = { tab -> if (onClose(tab)) dismiss() },
-                    modifier = Modifier.align(Alignment.BottomEnd),
+                    // The page's floating bottom bar, as it reported it. (The
+                    // column sits outside the page, so it is handed the
+                    // height; reading the local here gave it the default 0,
+                    // which left the bubbles standing on the bar.)
+                    bottomInset = bottomInset.value,
+                    modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(sideInsets),
                 )
             }
         }
@@ -190,18 +205,35 @@ private fun TabStrip(
     onHome: () -> Unit,
     onOpen: (SessionTab) -> Unit,
     onClose: (SessionTab) -> Unit,
+    bottomInset: androidx.compose.ui.unit.Dp,
     modifier: Modifier = Modifier,
 ) {
     val pal = palette
     val scroll = rememberScrollState()
-    // A column at the end of the screen, just above the floating bottom bar:
-    // the newest tab on top, the back bubble at the foot, nearest the thumb.
+    // A column at the end of the screen, a little above the floating bottom
+    // bar, the newest tab on top. (Back to the list is in the session bar.)
     Column(
         modifier
             .navigationBarsPadding()
             .imePadding()
-            .padding(end = 12.dp, bottom = LocalSheetBottomInset.current.value + 8.dp)
-            .verticalScroll(scroll, reverseScrolling = true),
+            // A scrolling column clips at its edge, which cut the bubbles'
+            // shadows off: the room for them is inside the scroll.
+            // A shadow reaches further below a bubble than above it, so the
+            // foot gets the most room (the column's own offset is shortened
+            // by as much, and the bubbles stay where they were).
+            .padding(bottom = (bottomInset - 10.dp).coerceAtLeast(0.dp))
+            // Three bubbles at most show at once (the open one and two
+            // more, with the shadows' room), two on a phone held sideways,
+            // where there is less height; the rest scroll.
+            .heightIn(
+                max = if (LocalConfiguration.current.screenHeightDp < 480)
+                    50.dp + 44.dp + 12.dp + 20.dp + 32.dp
+                else 50.dp + 44.dp + 44.dp + 12.dp * 2 + 20.dp + 32.dp,
+            )
+            .verticalScroll(scroll, reverseScrolling = true)
+            // End padding: the bubbles' centres sit over Send's (the bar's
+            // 10 dp inset, its row's 8 dp, half of Send's 42 dp).
+            .padding(start = 16.dp, top = 20.dp, end = 14.dp, bottom = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -211,12 +243,18 @@ private fun TabStrip(
         // standing over the text being read.
         var fan by remember { mutableStateOf(false) }
         LaunchedEffect(fan) {
+            scroll.scrollTo(0)      // start at the foot, by the open bubble
             if (fan) {
                 kotlinx.coroutines.delay(6000)
                 fan = false
             }
         }
-        tabs.reversed().forEach { tab ->
+        // The open conversation's bubble stays where it is, at the foot of
+        // the column; the others fan out above it, the most recently opened
+        // nearest.
+        val ordered = tabs.filter { it.ref.key != current.key } +
+            tabs.filter { it.ref.key == current.key }
+        ordered.forEach { tab ->
             val active = tab.ref.key == current.key
             if (active || fan) TabBubble(
                 tab, current, working, blocked, conn,
@@ -227,19 +265,6 @@ private fun TabStrip(
                 onFan = { if (tabs.size > 1) fan = !fan },
             )
         }
-        Surface(
-            onClick = onHome,
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            shadowElevation = 4.dp,
-            // Back to the list: the sheet goes down, the tabs stay.
-            modifier = Modifier.size(44.dp).semantics { contentDescription = "Back to sessions" },
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
-            }
-        }
-
     }
 }
 

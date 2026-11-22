@@ -16,6 +16,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.animation.core.tween
@@ -435,7 +441,7 @@ private fun TranscriptScreenBody(
                     visible = titleFlash,
                     enter = fadeIn(tween(260)),
                     exit = fadeOut(tween(260)),
-                    modifier = Modifier.align(Alignment.CenterStart).padding(start = 6.dp, end = 150.dp),
+                    modifier = Modifier.align(Alignment.CenterStart).padding(start = 58.dp, end = 170.dp),
                 ) {
                     Text(
                         text = session?.title?.ifBlank { null } ?: "Session",
@@ -445,34 +451,43 @@ private fun TranscriptScreenBody(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                AnimatedContent(
-                    targetState = barOpen,
-                    modifier = Modifier.fillMaxWidth(),
-                    contentAlignment = Alignment.TopEnd,
-                    transitionSpec = {
-                        (fadeIn(tween(200, delayMillis = 90)) togetherWith fadeOut(tween(90)))
-                            .using(SizeTransform(clip = true) { _, _ -> tween(280) })
-                    },
-                    label = "session-bar",
-                ) { open ->
-                if (open) Surface(
-                    // Any touch on the open bar keeps it open a while longer.
-                    modifier = Modifier.pointerInput(Unit) {
-                        awaitEachGesture {
-                            awaitFirstDown(requireUnconsumed = false)
-                            barTick++
-                        }
-                    },
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-                    border = BorderStroke(1.dp, pal.hairline),
-                    shadowElevation = 8.dp,
+                // One bar in both states; only its card changes shape, and
+                // that change is animated. Open, the card is one rounded
+                // rectangle. Folded, it is two pieces: a circle round Back and
+                // a pill round the Chat | TUI switch and More, with the title
+                // faded out between them. The buttons never move.
+                val fold by animateFloatAsState(
+                    targetValue = if (barOpen) 0f else 1f,
+                    animationSpec = tween(300, easing = FastOutSlowInEasing),
+                    label = "bar-fold",
+                )
+                var actionsPx by remember { mutableIntStateOf(0) }
+                BoxWithConstraints(
+                    Modifier
+                        .fillMaxWidth()
+                        // Any touch on the open bar keeps it open a while
+                        // longer. Folded, the gap between the pieces takes no
+                        // touch, so the page under it still scrolls.
+                        .then(
+                            if (barOpen) Modifier.pointerInput(Unit) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    barTick++
+                                }
+                            } else Modifier,
+                        ),
                 ) {
-                Column {
+                BarCard(
+                    fold = fold,
+                    total = maxWidth,
+                    actionsWidth = with(LocalDensity.current) { actionsPx.toDp() },
+                    modifier = Modifier.matchParentSize(),
+                )
+                Column(Modifier.clip(RoundedCornerShape(18.dp))) {
                 TopAppBar(
                     windowInsets = WindowInsets(0, 0, 0, 0),
                     title = {
-                        Column {
+                        Column(Modifier.alpha(1f - fold)) {
                             Text(
                                 text = session?.title?.ifBlank { null } ?: "Session",
                                 fontWeight = FontWeight.SemiBold,
@@ -504,9 +519,21 @@ private fun TranscriptScreenBody(
                             }
                         }
                     },
-                    // No back arrow: system Back (and, on a phone, the
-                    // back bubble before the tabs) leave the session.
+                    // Back to the list, at the start of the bar.
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                Icons.AutoMirrored.Outlined.ArrowBack,
+                                contentDescription = "Back to sessions",
+                            )
+                        }
+                    },
                     actions = {
+                        // Measured, so the folded pill knows what to hug.
+                        Row(
+                            Modifier.onSizeChanged { actionsPx = it.width },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                         if (jobState.queued.isNotEmpty()) {
                             IconButton(onClick = { showQueue = true }) {
                                 Box {
@@ -530,7 +557,8 @@ private fun TranscriptScreenBody(
                             )
                         }
                         Box {
-                            IconButton(onClick = { menuOpen = true }) {
+                            // Folded, More joins the bar again as it opens its menu.
+                            IconButton(onClick = { barOpen = true; barTick++; menuOpen = true }) {
                                 Icon(Icons.Outlined.MoreVert, contentDescription = "More")
                             }
                             DropdownMenu(menuOpen, onDismissRequest = { menuOpen = false }) {
@@ -603,6 +631,7 @@ private fun TranscriptScreenBody(
                                 )
                             }
                         }
+                        }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = Color.Transparent,
@@ -640,54 +669,6 @@ private fun TranscriptScreenBody(
                             .padding(horizontal = 16.dp, vertical = 7.dp),
                     )
                 }
-                }
-                } else Surface(
-                    // Folded: a slim pill that shows which face the session is
-                    // on (the Chat | TUI switch, still working), not the
-                    // title; a tap elsewhere on it opens the bar.
-                    onClick = { barOpen = true; barTick++ },
-                    shape = RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-                    border = BorderStroke(1.dp, pal.hairline),
-                    shadowElevation = 6.dp,
-                    // Folded, it sits at the top end of the page.
-                    modifier = Modifier
-                        .semantics { contentDescription = "Show the session bar" },
-                ) {
-                    Row(
-                        Modifier.padding(start = 4.dp, end = 10.dp, top = 3.dp, bottom = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (showLiveTui) {
-                            FaceSwitch(
-                                tui = tuiOn,
-                                accent = accent.tint,
-                                onPick = vm::setTuiView,
-                            )
-                        } else {
-                            // No terminal for this session: it is on Chat.
-                            Text(
-                                "Chat",
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.SemiBold,
-                                color = accent.tint,
-                                modifier = Modifier.padding(start = 12.dp, top = 5.dp, bottom = 5.dp),
-                            )
-                        }
-                        // Stop stays within reach while a turn runs.
-                        if (jobState.running) {
-                            IconButton(onClick = vm::stop, modifier = Modifier.size(40.dp)) {
-                                Icon(Icons.Outlined.Stop, contentDescription = "Stop", tint = pal.danger)
-                            }
-                        }
-                        // The chevron says what a tap on the pill does.
-                        Icon(
-                            Icons.Outlined.ExpandMore,
-                            contentDescription = null,
-                            tint = pal.dim,
-                            modifier = Modifier.padding(start = 4.dp).size(22.dp),
-                        )
-                    }
                 }
                 }
                 }
@@ -738,6 +719,8 @@ private fun TranscriptScreenBody(
                             // above a gate card floating at the bottom.
                             modifier = Modifier.fillMaxSize().padding(bottom = gatePad),
                             onControlsHeight = { tuiControlsPx = it },
+                            running = jobState.running,
+                            onStop = vm::stop,
                             topInset = topPad,
                         )
                     }
@@ -886,7 +869,7 @@ private fun TranscriptScreenBody(
             // chat's composer and its chips step aside.
             if (!tuiOn) Surface(
                 shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                color = MaterialTheme.colorScheme.surface,
                 border = BorderStroke(1.dp, pal.hairline),
                 shadowElevation = 8.dp,
             ) {

@@ -28,6 +28,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.layout.size
 import kotlinx.coroutines.launch
@@ -94,6 +95,9 @@ fun LiveTuiPane(
     topInset: androidx.compose.ui.unit.Dp = 0.dp,
     /** The keys and the text line's height, for what floats above them. */
     onControlsHeight: (Int) -> Unit = {},
+    /** A turn is running: the text line shows Stop, as the chat's box does. */
+    running: Boolean = false,
+    onStop: () -> Unit = {},
 ) {
     val pal = palette
     // The stream and what it last showed are held by the app (TuiFeeds), so
@@ -284,108 +288,128 @@ fun LiveTuiPane(
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             )
         }
-        Column(Modifier.onSizeChanged { onControlsHeight(it.height) }) {
-        // Soft keys, under the terminal and above the text line, within
-        // reach of the thumbs. Real chrome buttons (surface + border) so
-        // they stay readable beside the near-black pane. All eight share
-        // the row: none is ever scrolled out of sight. The keyboard button
-        // in the text line puts the row away or brings it back.
+        // The bottom bar, the same in both of the session's faces: one
+        // floating card, a row of small controls on top (the chat's chips
+        // there, the terminal keys here) and under it the text field with
+        // Stop and Send. Same card, same field, same buttons in the same
+        // places, so switching Chat and TUI moves nothing.
         val settings by repo.settings.collectAsState()
         val keysShown = settings.tuiKeys
-        if (keysShown) Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(start = 8.dp, end = 8.dp, top = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            listOf(
-                Triple("Esc", listOf("Escape"), 1f),
-                Triple("Enter", listOf("Enter"), 1.5f),
-                Triple("Tab", listOf("Tab"), 1f),
-                Triple("\u2191", listOf("Up"), 1f),
-                Triple("\u2193", listOf("Down"), 1f),
-                Triple("\u2190", listOf("Left"), 1f),
-                Triple("\u2192", listOf("Right"), 1f),
-                Triple("^C", listOf("Ctrl+C"), 1f),
-            ).forEach { (label, keys, share) ->
-                LiveTuiKeyButton(
-                    label = label,
-                    onClick = { sendKeys(keys) },
-                    modifier = Modifier.weight(share),
-                )
-            }
-        }
-        // Pinned input chrome — never inside the pane scroll.
         fun submitLine() {
             val t = line.trim()
             if (t.isEmpty()) return
             sendKeys(listOf("Enter"), t)
             onLine("")
         }
-        // The text line floats, a card like the chat's message box.
         androidx.compose.material3.Surface(
             shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+            color = MaterialTheme.colorScheme.surface,
             border = androidx.compose.foundation.BorderStroke(1.dp, pal.hairline),
             shadowElevation = 8.dp,
-            modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 8.dp),
+            modifier = Modifier
+                .onSizeChanged { onControlsHeight(it.height) }
+                .padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
         ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedTextField(
-                value = line,
-                onValueChange = onLine,
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 52.dp),
-                singleLine = true,
-                placeholder = { Text("Type a line into the TUI") },
-                // The terminal keys toggle, inside the line at its end.
-                trailingIcon = {
-                androidx.compose.material3.IconToggleButton(
-                    checked = keysShown,
-                    onCheckedChange = { on -> scope.launch { repo.settingsStore.setTuiKeys(on) } },
-                ) {
-                    androidx.compose.material3.Icon(
-                        androidx.compose.material.icons.Icons.Outlined.Keyboard,
-                        contentDescription = if (keysShown) "Hide terminal keys" else "Show terminal keys",
-                        tint = if (keysShown) MaterialTheme.colorScheme.primary else pal.dim,
+        Column(Modifier.fillMaxWidth()) {
+            // The terminal keys, where the chat has its chips. All eight
+            // share the row; the keyboard button in the field puts the row
+            // away or brings it back.
+            if (keysShown) Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = 10.dp, end = 10.dp, top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                listOf(
+                    Triple("Esc", listOf("Escape"), 1f),
+                    Triple("Enter", listOf("Enter"), 1.5f),
+                    Triple("Tab", listOf("Tab"), 1f),
+                    Triple("\u2191", listOf("Up"), 1f),
+                    Triple("\u2193", listOf("Down"), 1f),
+                    Triple("\u2190", listOf("Left"), 1f),
+                    Triple("\u2192", listOf("Right"), 1f),
+                    Triple("^C", listOf("Ctrl+C"), 1f),
+                ).forEach { (label, keys, share) ->
+                    LiveTuiKeyButton(
+                        label = label,
+                        onClick = { sendKeys(keys) },
+                        modifier = Modifier.weight(share),
                     )
                 }
-                },
-                textStyle = MaterialTheme.typography.bodyMedium.copy(
-                    fontFamily = FontFamily.Monospace,
-                ),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { submitLine() }),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = MaterialTheme.colorScheme.onSurface,
-                    unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = pal.hairline,
-                    cursorColor = MaterialTheme.colorScheme.primary,
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                ),
-            )
-            Spacer(Modifier.width(8.dp))
-            // An icon, as in the chat's message box.
-            androidx.compose.material3.FilledIconButton(
-                onClick = { submitLine() },
-                enabled = line.isNotBlank(),
-                modifier = Modifier.size(48.dp),
-            ) {
-                androidx.compose.material3.Icon(
-                    androidx.compose.material.icons.Icons.AutoMirrored.Outlined.Send,
-                    contentDescription = "Send the line",
-                )
             }
-        }
+            // The chat row's own insets, so Send is clear of the card's edge
+            // and in the same place in both faces.
+            Row(
+                Modifier.padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                // The chat's own field: no frame (the card is the frame),
+                // the same type, the same height.
+                androidx.compose.material3.TextField(
+                    value = line,
+                    onValueChange = onLine,
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    placeholder = {
+                        Text("Type into the terminal", maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    },
+                    // The terminal keys toggle, inside the field at its end.
+                    trailingIcon = {
+                        androidx.compose.material3.IconToggleButton(
+                            checked = keysShown,
+                            onCheckedChange = { on -> scope.launch { repo.settingsStore.setTuiKeys(on) } },
+                        ) {
+                            androidx.compose.material3.Icon(
+                                androidx.compose.material.icons.Icons.Outlined.Keyboard,
+                                contentDescription = if (keysShown) "Hide terminal keys" else "Show terminal keys",
+                                tint = if (keysShown) MaterialTheme.colorScheme.primary else pal.dim,
+                            )
+                        }
+                    },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { submitLine() }),
+                    colors = androidx.compose.material3.TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                    ),
+                )
+                // Stop keeps its slot, as in the chat's box, so Send never
+                // slides when a turn starts.
+                androidx.compose.material3.IconButton(
+                    onClick = onStop,
+                    enabled = running,
+                    modifier = Modifier.padding(bottom = 4.dp),   // level with Send
+                ) {
+                    androidx.compose.material3.Icon(
+                        androidx.compose.material.icons.Icons.Outlined.Stop,
+                        contentDescription = "Stop",
+                        tint = if (running) pal.danger else Color.Transparent,
+                    )
+                }
+                val canSend = line.isNotBlank()
+                androidx.compose.material3.IconButton(
+                    onClick = { submitLine() },
+                    enabled = canSend,
+                    modifier = Modifier
+                        .padding(bottom = 7.dp)
+                        .size(42.dp)
+                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .background(
+                            if (canSend) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f),
+                        ),
+                ) {
+                    androidx.compose.material3.Icon(
+                        androidx.compose.material.icons.Icons.AutoMirrored.Outlined.Send,
+                        contentDescription = "Send the line",
+                        tint = if (canSend) MaterialTheme.colorScheme.onPrimary else pal.dim,
+                    )
+                }
+            }
         }
         }
     }

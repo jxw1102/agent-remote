@@ -180,7 +180,7 @@
           </svg>
         </button>
         </div>
-        <!-- Order: Chat|TUI · Stop · More (Session options first inside).
+        <!-- Order: Chat|TUI · More (Session options first inside). Stop is in the bottom bar.
              Stop always keeps its slot (icon-idle = invisible, not removed)
              so nothing slides into that space when a job is not running. -->
         <!-- The session window's two faces: the chat, or the host terminal.
@@ -206,27 +206,12 @@
             </svg>
           </button>
         </div>
-        <button id="btn-stop" class="icon-btn danger icon-idle" type="button"
-                title="Stop" aria-label="Stop" aria-hidden="true" tabindex="-1">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="6.5" y="6.5" width="11" height="11" rx="1.5"
-                  fill="currentColor"/>
-          </svg>
-        </button>
         <button id="btn-more" class="icon-btn more-btn" type="button"
                 title="More" aria-label="More actions" aria-haspopup="true"
                 aria-expanded="false" aria-controls="chat-more">
           <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
             <circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/>
             <circle cx="19" cy="12" r="1.8"/>
-          </svg>
-        </button>
-        <!-- Only on the folded bar: opens it again. -->
-        <button id="btn-bar-expand" class="icon-btn bar-expand" type="button"
-                title="Show the session bar" aria-label="Show the session bar">
-          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
-               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M6 9l6 6 6-6"/>
           </svg>
         </button>
       </div>
@@ -285,12 +270,19 @@
         <!-- The text line, with the terminal keys toggle inside it at its end. -->
         <div class="tui-input-wrap">
           <input id="live-tui-input" type="text" autocomplete="off" spellcheck="false"
-               placeholder="Type here (IME welcome) · Enter sends the line">
+               placeholder="Type into the terminal">
           <!-- Shows or hides the row of terminal keys (Esc, Enter, arrows…). -->
           <button id="btn-tui-keys" class="icon-btn tui-keys-toggle" type="button"
                     aria-pressed="true" aria-controls="live-tui-keys"
                     title="Terminal keys" aria-label="Terminal keys"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M7 14h10"/></svg></button>
         </div>
+        <button id="btn-tui-stop" class="icon-btn danger icon-idle stop-btn" type="button"
+                title="Stop" aria-label="Stop" aria-hidden="true" tabindex="-1">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="6.5" y="6.5" width="11" height="11" rx="1.5"
+                  fill="currentColor"/>
+          </svg>
+        </button>
         <button id="btn-live-tui-send" class="primary send-btn" type="button" title="Send the line" aria-label="Send the line"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l16-8-6 16-2.5-6.5z"/><path d="M11.5 13.5L20 4"/></svg></button>
       </div>
     </div>
@@ -314,6 +306,14 @@
         <textarea id="prompt" rows="1" spellcheck="false"
                   placeholder="Message, /command or !shell · Enter sends"
                   aria-controls="composer-pop"></textarea>
+        <!-- Stop the running turn: in the bottom bar, beside Send. -->
+        <button id="btn-stop" class="icon-btn danger icon-idle stop-btn" type="button"
+                title="Stop" aria-label="Stop" aria-hidden="true" tabindex="-1">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="6.5" y="6.5" width="11" height="11" rx="1.5"
+                  fill="currentColor"/>
+          </svg>
+        </button>
         <button id="btn-send" class="primary send-btn" type="button" title="Send" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l16-8-6 16-2.5-6.5z"/><path d="M11.5 13.5L20 4"/></svg></button>
       </div>
     </div>

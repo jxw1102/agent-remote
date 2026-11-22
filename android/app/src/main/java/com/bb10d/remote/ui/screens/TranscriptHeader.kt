@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -155,19 +156,30 @@ internal fun JumpToLatest(
  * the same window showing the host terminal instead of the chat.
  */
 @Composable
-internal fun FaceSwitch(tui: Boolean, accent: Color, onPick: (Boolean) -> Unit) {
+internal fun FaceSwitch(
+    tui: Boolean,
+    accent: Color,
+    /** On the folded bar: only the face in use shows; a tap goes to the other. */
+    single: Boolean = false,
+    onPick: (Boolean) -> Unit,
+) {
     val pal = palette
     val shape = RoundedCornerShape(50)
     Row(
         Modifier
             .padding(horizontal = 4.dp)
             .clip(shape)
-            .border(1.dp, pal.hairline, shape)
+            .border(1.dp, if (single) Color.Transparent else pal.hairline, shape)
             .padding(2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        FaceSide(Icons.Outlined.ChatBubbleOutline, "Chat", !tui, accent) { if (tui) onPick(false) }
-        FaceSide(Icons.Outlined.Terminal, "TUI", tui, accent) { if (!tui) onPick(true) }
+        if (single) {
+            if (tui) FaceSide(Icons.Outlined.Terminal, "TUI, switch to Chat", true, accent) { onPick(false) }
+            else FaceSide(Icons.Outlined.ChatBubbleOutline, "Chat, switch to TUI", true, accent) { onPick(true) }
+        } else {
+            FaceSide(Icons.Outlined.ChatBubbleOutline, "Chat", !tui, accent) { if (tui) onPick(false) }
+            FaceSide(Icons.Outlined.Terminal, "TUI", tui, accent) { if (!tui) onPick(true) }
+        }
     }
 }
 
@@ -193,5 +205,60 @@ private fun FaceSide(
     ) {
         Icon(icon, contentDescription = null, tint = if (selected) accent else pal.dim,
             modifier = Modifier.size(20.dp))
+    }
+}
+
+/**
+ * The session bar's card, in whatever shape it is in: one rounded rectangle
+ * when the bar is open ([fold] 0), two pieces when it is folded (1) - a
+ * circle round Back at the start and a pill round the end controls, which
+ * are [actionsWidth] wide - and everything between while it changes.
+ */
+@Composable
+internal fun BarCard(
+    fold: Float,
+    total: androidx.compose.ui.unit.Dp,
+    actionsWidth: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier,
+) {
+    val pal = palette
+    val color = MaterialTheme.colorScheme.surface
+    val edge = androidx.compose.foundation.BorderStroke(1.dp, pal.hairline)
+    if (fold <= 0f) {
+        // Open: one card, so there is no seam down the middle.
+        androidx.compose.material3.Surface(
+            modifier = modifier,
+            shape = RoundedCornerShape(18.dp),
+            color = color,
+            border = edge,
+            shadowElevation = 8.dp,
+        ) {}
+        return
+    }
+    val lerp = { a: androidx.compose.ui.unit.Dp, b: androidx.compose.ui.unit.Dp ->
+        androidx.compose.ui.unit.lerp(a, b, fold)
+    }
+    // The two parts meet just after Back (its 48 dp button and the bar's
+    // 4 dp inset either side), not in the middle: folding, Back's part only
+    // rounds off, and the other draws away from it toward the end controls.
+    val split = 56.dp
+    val outer = lerp(18.dp, 28.dp)
+    val inner = lerp(0.dp, 28.dp)
+    Box(modifier.padding(vertical = lerp(0.dp, 4.dp))) {
+        androidx.compose.material3.Surface(
+            modifier = Modifier.align(Alignment.CenterStart).width(split).fillMaxHeight(),
+            shape = RoundedCornerShape(topStart = outer, bottomStart = outer, topEnd = inner, bottomEnd = inner),
+            color = color,
+            border = edge,
+            shadowElevation = 6.dp,
+        ) {}
+        androidx.compose.material3.Surface(
+            modifier = Modifier.align(Alignment.CenterEnd)
+                .width(lerp(total - split, actionsWidth + 8.dp)).fillMaxHeight(),
+            shape = RoundedCornerShape(topStart = inner, bottomStart = inner, topEnd = outer, bottomEnd = outer),
+            color = color,
+            border = edge,
+            shadowElevation = 6.dp,
+        ) {}
     }
 }

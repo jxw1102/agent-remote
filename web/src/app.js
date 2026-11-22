@@ -2518,7 +2518,8 @@ function highlightInto(host, text, query) {
 // the chat and adds a history entry, so the browser's Back (and the Android
 // back gesture) returns to the list instead of leaving the page.
 
-const compactQuery = window.matchMedia("(max-width: 720px)");
+// A phone, upright or sideways: a narrow window, or a short one.
+const compactQuery = window.matchMedia("(max-width: 720px), (max-height: 520px)");
 const isCompact = () => compactQuery.matches;
 let chatHistoryPushed = false;
 
@@ -2557,7 +2558,7 @@ document.addEventListener("visibilitychange", () => syncLiveTuiHold());
 
 const TABS_KEY = "agentremote.tabs";
 const TABS_MAX = 10;
-const sheetQuery = window.matchMedia("(max-width: 720px) and (orientation: portrait)");
+const sheetQuery = compactQuery;
 
 function readTabs() {
   try {
@@ -2644,19 +2645,13 @@ function renderTabs() {
   if (strip._sig === sig) return;
   strip._sig = sig;
   strip.textContent = "";
-  // First: back to the list (the sheet goes down, the tabs stay).
-  const home = el("button", "tab-home");
-  home.type = "button";
-  home.title = "Back to sessions";
-  home.setAttribute("aria-label", "Back to sessions");
-  home.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"'
-    + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-    + '<path d="M15 5l-7 7 7 7"/></svg>';
-  home.addEventListener("click", backToList);
-  strip.appendChild(home);
-  tabs.forEach((t) => {
+  // The open conversation's bubble stays where it is, at the foot of the
+  // column; the others fan out above it, the most recently opened nearest.
+  const isOpen = (t) => !!open && open.profileId === t.profileId && open.sessionId === t.sessionId;
+  const ordered = tabs.filter(isOpen).concat(tabs.filter((t) => !isOpen(t)).reverse());
+  ordered.forEach((t) => {
     const key = `${t.profileId}/${t.sessionId}`;
-    const active = !!open && open.profileId === t.profileId && open.sessionId === t.sessionId;
+    const active = isOpen(t);
     const b = el("button", "tab-bubble");
     b.type = "button";
     b.style.setProperty("--tab", providerOf(t.provider).accent);
@@ -2707,7 +2702,7 @@ function renderTabs() {
       wrap.appendChild(x);
     }
     strip.appendChild(wrap);
-    if (active) requestAnimationFrame(() => wrap.scrollIntoView({ block: "nearest" }));
+
   });
 }
 
@@ -2722,6 +2717,7 @@ function fanTabs(on) {
   const strip = $("tabstrip");
   if (!strip) return;
   strip.classList.toggle("fan", !!on);
+  strip.scrollTop = 0;      // start at the foot, by the open bubble
   clearTimeout(fanTimer);
   if (on) fanTimer = setTimeout(() => fanTabs(false), 6000);
 }
@@ -2743,6 +2739,7 @@ function expandBar() {
   const float = $("chat-float");
   if (!float) return;
   float.classList.remove("collapsed");
+  requestAnimationFrame(syncBarPieces);
   scheduleBarCollapse();
 }
 
@@ -2757,17 +2754,35 @@ function collapseBar() {
     return;
   }
   float.classList.add("collapsed");
-  sizeBarPill();
+  syncBarPieces();
   flashTitle();
 }
 
-/** The pill is as wide as what it holds: Stop (while a turn runs), the
- *  Chat | TUI switch, the chevron. Asked again whenever one comes or goes. */
-function sizeBarPill() {
-  const float = $("chat-float");
-  if (!float || !float.classList.contains("collapsed")) return;
-  const actions = float.querySelector(".chat-actions");
-  if (actions) float.style.setProperty("--pill-w", Math.ceil(actions.scrollWidth + 14) + "px");
+/**
+ * Where the bar's two halves end when it folds: around Back, and around the
+ * Chat | TUI switch and More. The buttons do not move between the states,
+ * so this can be measured at any time.
+ */
+function syncBarPieces() {
+  const head = $("chat-head");
+  const back = $("btn-back");
+  const actions = head && head.querySelector(".chat-actions");
+  if (!head || !actions || !head.offsetWidth) return;
+  const hr = head.getBoundingClientRect();
+  const pad = 5;
+  if (back && back.offsetWidth) {
+    const r = back.getBoundingClientRect();
+    head.style.setProperty("--bl", Math.max(0, r.left - hr.left - pad) + "px");
+    // Where the two parts meet, open and folded alike: just after Back.
+    head.style.setProperty("--split", Math.max(0, r.right - hr.left + pad) + "px");
+  }
+  // From the first control that shows when folded (the switch, else More).
+  const sw = $("btn-live-tui");
+  const first = sw && sw.offsetWidth && !sw.classList.contains("icon-idle") ? sw : $("btn-more");
+  const ar = actions.getBoundingClientRect();
+  const left = first && first.offsetWidth ? first.getBoundingClientRect().left : ar.left;
+  head.style.setProperty("--al", Math.max(0, left - hr.left - pad - 2) + "px");
+  head.style.setProperty("--ar", Math.max(0, hr.right - ar.right - pad) + "px");
 }
 
 /** Which session this is, said for a moment as its bar folds away. */
@@ -2789,18 +2804,11 @@ function scheduleBarCollapse() {
 function wireBarCollapse() {
   const float = $("chat-float");
   if (!float) return;
-  // A tap on the folded bar opens it (and does nothing else).
+  // Folded, the bar is two pieces. Back, the Chat | TUI switch and Stop do
+  // their own job there; More joins the bar again and opens its menu.
   float.addEventListener("click", (e) => {
     if (!float.classList.contains("collapsed")) { scheduleBarCollapse(); return; }
-    // The Chat | TUI switch and Stop work folded too; they do not open the
-    // bar. The chevron, and anywhere else on the pill, does.
-    if (e.target.closest("#btn-live-tui") || e.target.closest("#btn-stop")) {
-      requestAnimationFrame(sizeBarPill);
-      return;
-    }
-    e.preventDefault();
-    e.stopPropagation();
-    expandBar();
+    if (e.target.closest("#btn-more")) expandBar();
   }, true);
   const onScroll = () => {
     if (!float.classList.contains("collapsed") && readerScrolling()) {
@@ -2810,12 +2818,11 @@ function wireBarCollapse() {
   };
   $("transcript")?.addEventListener("scroll", onScroll, { passive: true });
   $("live-tui-pane")?.addEventListener("scroll", onScroll, { passive: true });
-  // A window made wide again has its bar back; Stop coming or going resizes
-  // the pill.
+  // A window made wide again has its bar back.
   compactQuery.addEventListener("change", () => { if (!isCompact()) expandBar(); });
-  const stop = $("btn-stop");
-  if (stop && typeof MutationObserver !== "undefined") {
-    new MutationObserver(sizeBarPill).observe(stop, { attributes: true, attributeFilter: ["class"] });
+  window.addEventListener("resize", syncBarPieces);
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(syncBarPieces).observe(float.querySelector(".chat-actions"));
   }
   ["wheel", "touchmove"].forEach((ev) => $("live-tui-pane")?.addEventListener(ev,
     () => { state.gestureAt = Date.now(); }, { passive: true }));
@@ -5483,6 +5490,7 @@ function attachJob(jobId, sessionId = null, { adopted = false } = {}) {
   chimeLastStatusMs = 0;
   renderBanner();
   setIconIdle($("btn-stop"), false);
+  setIconIdle($("btn-tui-stop"), false);
   syncSendButton();
   state.jobTimer = setInterval(pollJob, 250);
   pollJob();
@@ -5497,6 +5505,7 @@ function detachJobWatch() {
   state.jobLastFetch = 0;
   // Keep the 34×34 Stop slot empty — do not collapse the row.
   setIconIdle($("btn-stop"), true);
+  setIconIdle($("btn-tui-stop"), true);
   syncSendButton();
 }
 
@@ -8134,6 +8143,8 @@ function wire() {
       $("btn-live-tui-send")?.click();
     }
   });
+  // The terminal's text line has a Stop of its own; it is the same button.
+  $("btn-tui-stop")?.addEventListener("click", () => $("btn-stop").click());
   $("btn-stop").addEventListener("click", async () => {
     if (!state.job) return;
     const profile = profileById(state.open.profileId);

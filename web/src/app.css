@@ -2057,7 +2057,7 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   /* Idle buttons give their place to the title; Stop comes in on the far
      side so nothing under a finger moves when a turn starts. */
   .chat-actions .icon-btn.icon-idle { display: none; }
-  #btn-stop { order: -1; }
+
   .icon-btn.more-btn { display: inline-flex; }
   .chat-more {
     display: none;
@@ -2095,7 +2095,7 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   .chat-more .icon-btn:hover:not(:disabled),
   .chat-more .icon-btn:focus-visible { background: var(--surface-3); color: var(--text); }
 }
-@media (max-width: 720px) {
+@media (max-width: 720px), (max-height: 520px) {
   .app, .app.with-side { grid-template-columns: 1fr; grid-template-rows: 1fr; }
   .app > .pane-list, .app > .pane-chat { grid-area: 1 / 1; }
   .app:not(.show-chat) > .pane-chat { display: none; }
@@ -2250,7 +2250,7 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
    sit above it as bubbles, like a browser's tabs. Elsewhere none of this
    shows. */
 .tabstrip { display: none; }
-@media (max-width: 720px) and (orientation: portrait) {
+@media (max-width: 720px), (max-height: 520px) {
   /* The list stays behind the sheet. */
   .app.show-chat > .pane-list { display: flex; }
   .app > .pane-chat,
@@ -2294,8 +2294,7 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   .pane-side { z-index: 35; }
   .modal { z-index: 40; }
   .toast { z-index: 45; }
-  /* No back arrow in the bar on the sheet: the back bubble before the tabs takes it down. */
-  .chat-head .back-btn { display: none !important; }
+  /* Back to the list is in the bar (and stays on its pill). */
   /* Inside the sheet the floating bar sits under the bubbles. */
   .chat-float { top: calc(env(safe-area-inset-top, 0px) + 8px); }
   .chat-head { padding-top: 6px; }
@@ -2304,14 +2303,21 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
      the back bubble at its foot, nearest the thumb. */
   .tabstrip {
     position: fixed;
-    right: calc(10px + env(safe-area-inset-right, 0px));
-    bottom: calc(var(--bottom-h, 90px) + 8px);
-    max-height: calc(100% - var(--bottom-h, 90px) - env(safe-area-inset-top, 0px) - 90px);
+    /* A scrolling box clips at its edge, which would cut the bubbles'
+       shadows: the room for them is its own padding. */
+    right: env(safe-area-inset-right, 0px);
+    /* A shadow reaches further below a bubble than above it: the foot gets
+       the most room, and the column sits lower by as much. */
+    bottom: max(0px, calc(var(--bottom-h, 90px) - 10px));
+    /* Three bubbles at most show at once (the open one and two more, with
+       the shadows' room); the rest scroll. */
+    max-height: calc(50px + 44px + 44px + 10px * 2 + 20px + 32px);
     z-index: 31;
     flex-direction: column-reverse;
     align-items: center;
     gap: 10px;
-    padding: 6px 2px;
+    /* Right padding: the bubbles' centres sit over Send's. */
+    padding: 20px 14px 32px 18px;
     overflow-y: auto;
     overflow-x: visible;
     scrollbar-width: none;
@@ -2488,50 +2494,93 @@ button.tui-keys-toggle svg { width: 20px; height: 20px; }
   pointer-events: none;
 }
 
-/* Folding (phones only; a wide window keeps its bar) is one motion: the
-   bar narrows toward its end, the title fading as it goes, until a pill is
-   left at the top end of the page with Stop while a turn runs, the
-   Chat | TUI switch, and a chevron that opens the bar again. --pill-w is
-   the pill's width, worked out by app.js from those controls. */
 .chat-float {
   left: auto !important;
   right: calc(10px + env(safe-area-inset-right, 0px));
   width: calc(100% - 20px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
-  transition: width 280ms cubic-bezier(0.2, 0.8, 0.2, 1), border-radius 280ms ease;
 }
-.chat-float .chat-title { transition: opacity 160ms ease; }
+.chat-float .chat-title { transition: opacity 180ms ease; }
 .bar-expand { display: none !important; }
-.chat-float.collapsed {
-  width: var(--pill-w, 120px);
-  border-radius: 999px;
-  overflow: hidden;
+
+/* Folding (phones only; a wide window keeps its bar): the bar comes apart
+   into two floating pieces, and the change of shape is animated. Back
+   stands alone at the start; the Chat | TUI switch and More stay together
+   as a pill at the end; the title fades out between them.
+
+   The bar's card is drawn as two parts that meet just after Back (the head's
+   ::before and ::after). Open, they are one rectangle; folded, each half
+   shrinks to hug its buttons and rounds off. The buttons themselves do not
+   move. app.js gives the parts their edges (--bl and --split for Back,
+   --al/--ar for the pill), measured from the buttons. */
+@media (max-width: 720px), (max-height: 520px) {
+  .chat-float {
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .chat-head { position: relative; isolation: isolate; }
+  .chat-head::before, .chat-head::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: -1;
+    background: color-mix(in srgb, var(--surface) 84%, transparent);
+    -webkit-backdrop-filter: blur(16px) saturate(1.3);
+    backdrop-filter: blur(16px) saturate(1.3);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--line) 80%, transparent),
+      0 8px 24px rgba(0, 0, 0, 0.35);
+    transition: left 300ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      right 300ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      top 300ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      bottom 300ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      border-radius 300ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      clip-path 300ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  /* Open: two halves of one card. Each is clipped on its inner side, so
+     neither its ring nor its shadow draws a seam down the middle. */
+  /* They meet just after Back (--split), not in the middle: folding, Back's
+     half only rounds off, and the other half draws away from it toward the
+     end controls. */
+  .chat-head::before {
+    left: 0;
+    right: calc(100% - var(--split, 52px));
+    border-radius: 16px 0 0 16px;
+    clip-path: inset(-40px 0 -40px -40px);
+  }
+  .chat-head::after {
+    left: var(--split, 52px);
+    right: 0;
+    border-radius: 0 16px 16px 0;
+    clip-path: inset(-40px -40px -40px 0);
+  }
+  /* Folded: each half hugs its buttons. */
+  .chat-float.collapsed .chat-head::before {
+    left: var(--bl, 4px);
+    right: calc(100% - var(--split, 52px));
+    top: 2px;
+    bottom: 2px;
+    border-radius: 26px;
+    clip-path: inset(-40px -40px -40px -40px);
+  }
+  .chat-float.collapsed .chat-head::after {
+    left: var(--al, 60%);
+    right: var(--ar, 2px);
+    top: 2px;
+    bottom: 2px;
+    border-radius: 26px;
+    clip-path: inset(-40px -40px -40px -40px);
+  }
+  .chat-float.collapsed { pointer-events: none; }   /* only the pieces take touches */
+  .chat-float.collapsed .back-btn,
+  .chat-float.collapsed .chat-actions { pointer-events: auto; }
 }
-.chat-float.collapsed .chat-head { padding: 4px 6px; gap: 4px; justify-content: flex-end; }
-/* The title gives up its room entirely, so the pill is as tall as its
-   buttons and they are not pushed out of it. */
-.chat-float.collapsed .chat-title {
-  opacity: 0;
-  flex: 0 0 0;
-  width: 0;
-  height: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-.chat-float.collapsed .back-btn,
+.chat-float.collapsed .chat-title { opacity: 0; pointer-events: none; }
 .chat-float.collapsed .banner,
-.chat-float.collapsed .chat-more,
-.chat-float.collapsed .chat-more > *,
-.chat-float.collapsed .more-btn,
+.chat-float.collapsed .chat-more:not(.open),
 .chat-float.collapsed .icon-btn.icon-idle { display: none !important; }
-.chat-float.collapsed .chat-actions { flex: none; gap: 4px; }
-.chat-float.collapsed .bar-expand {
-  display: inline-flex !important;
-  width: 34px;
-  min-width: 34px;
-  height: 34px;
-  min-height: 34px;
-  color: var(--dim);
-}
 
 /* The bar's buttons: quiet, rounded, borderless inside the card. */
 .chat-head .icon-btn {
@@ -2544,7 +2593,7 @@ button.tui-keys-toggle svg { width: 20px; height: 20px; }
   border-color: transparent;
 }
 .chat-head .chat-title h1 { letter-spacing: 0.1px; }
-@media (max-width: 720px) {
+@media (max-width: 720px), (max-height: 520px) {
   .chat-float { right: 8px; width: calc(100% - 16px); }
 }
 
@@ -2588,9 +2637,9 @@ button.tui-keys-toggle svg { width: 20px; height: 20px; }
    line, centred, then gone. */
 .title-flash {
   position: absolute;
-  top: calc(env(safe-area-inset-top, 0px) + 12px);
-  left: 12px;
-  right: 150px;
+  top: calc(env(safe-area-inset-top, 0px) + 22px);
+  left: 66px;        /* between the back button and the pill */
+  right: 170px;
   z-index: 6;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2610,7 +2659,7 @@ button.tui-keys-toggle svg { width: 20px; height: 20px; }
    does not collide with them: the top of the page under the bar (shorter
    once it has folded to a pill), and the bottom under the message box. */
 .pane-chat { --fade-top: calc(var(--float-h, 0px) + 14px); }
-.pane-chat:has(.chat-float.collapsed) { --fade-top: 58px; }
+.pane-chat:has(.chat-float.collapsed) { --fade-top: 64px; }
 .transcript, .live-tui-pane {
   -webkit-mask-image: linear-gradient(to bottom,
     transparent 0, transparent calc(var(--fade-top) * 0.6), #000 var(--fade-top),
@@ -2639,3 +2688,63 @@ button.tui-keys-toggle svg { width: 20px; height: 20px; }
   color: var(--st-working);
 }
 .banner:not(.needs-answer) .pulse { background: var(--st-working) !important; }
+
+/* Stop, in the bottom bar beside Send (and on the terminal's text line):
+   round like its neighbours, and not there at all between turns. */
+button.stop-btn {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+button.stop-btn.icon-idle { display: none !important; }
+
+/* The bottom bar is the same in both of the session's faces: one floating
+   card, a row of small controls on top (the chat's chips there, the
+   terminal keys here) and under it the field with Stop and Send. On a
+   phone the terminal's keys row and its text line are drawn as that one
+   card (the grid's ::before behind rows 3 and 4), with the composer's
+   metrics, so switching Chat and TUI moves nothing at the bottom. */
+.live-tui-line input { font: inherit; }
+@media (max-width: 720px), (max-height: 520px) {
+  .live-tui { background: var(--bg); }
+  .live-tui::before {
+    content: "";
+    grid-area: 3 / 1 / 5 / -1;
+    margin: 0 8px calc(8px + env(safe-area-inset-bottom, 0px));
+    border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--surface) 82%, transparent);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+    z-index: 0;
+  }
+  .live-tui:focus-within::before { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+  .live-tui > .live-tui-line,
+  .live-tui .tui-capture,
+  .live-tui .live-tui-keys { position: relative; z-index: 1; }
+  .live-tui-pane { border-bottom: 0; }
+  /* The line itself has no card of its own here; the shared one is it. */
+  .live-tui-line {
+    margin: 0 8px calc(8px + env(safe-area-inset-bottom, 0px));
+    padding: 2px 10px 8px;
+    border: 0;
+    background: none;
+    box-shadow: none;
+  }
+  .live-tui-line:focus-within { border: 0; }
+  .tui-capture { margin: 10px 0 4px 18px; }
+  .live-tui-keys { padding: 10px 18px 4px 6px; }
+}
+
+/* A phone held sideways is the same phone: the sheet, the tabs, the folding
+   bar and the floating bottom bar all apply (the breakpoints above take a
+   short window as well as a narrow one). There is less height, so the
+   fanned tabs show two at most, and the page keeps clear of the notch and
+   the home indicator at its sides. */
+@media (max-height: 520px) {
+  .tabstrip { max-height: calc(50px + 44px + 10px + 20px + 32px); }
+  .thread { max-width: none; }
+}
