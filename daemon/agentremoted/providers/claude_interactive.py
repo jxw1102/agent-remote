@@ -212,6 +212,24 @@ def _trust_dialog_key(text: str) -> str:
     return "Down"
 
 
+def _bypass_warning(text: str) -> bool:
+    """Claude's one-time "running in Bypass Permissions mode" consent screen.
+
+    Shown the first time `--dangerously-skip-permissions` is used on a host,
+    with "No, exit" selected. It says "you accept all responsibility", so
+    the daemon does not key past it: that answer is the host owner's.
+    """
+    return bool(text) and "Bypass Permissions mode" in text \
+        and "Yes, I accept" in text
+
+
+_BYPASS_WARNING_HELP = (
+    "Claude Code is waiting for a one-time answer on this host: it asks you "
+    "to accept Bypass Permissions mode, which interactive turns run in. On "
+    "the host, run `claude --dangerously-skip-permissions`, choose "
+    "\"Yes, I accept\", exit, then send the message again.")
+
+
 def _claude_pane_ready(text: str) -> bool:
     """True when the input chrome is up and the first-run splash is gone.
 
@@ -410,7 +428,7 @@ class InteractiveManager:
 
     def _blocked_reason(self, text: str) -> str:
         """Non-empty when the pane is waiting on a human we must not key past."""
-        return ""
+        return _BYPASS_WARNING_HELP if _bypass_warning(text) else ""
 
     def _startup_key(self, text: str, nudge_i: int) -> str:
         """One tmux key to dismiss first-run chrome, or "" to leave the pane."""

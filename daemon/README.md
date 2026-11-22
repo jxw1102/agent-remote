@@ -19,6 +19,16 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.28.2** The first interactive turn on a new host says what it is
+waiting for. The first time Claude Code is started with
+`--dangerously-skip-permissions` on a machine it stops on a consent screen
+("WARNING: Claude Code running in Bypass Permissions mode", with "No, exit"
+selected). The daemon waited 90 s and failed with "claude TUI did not become
+ready" and a scrap of the screen. It now fails at once and tells the client
+what to do: run `claude --dangerously-skip-permissions` on the host once and
+choose "Yes, I accept". The daemon does not answer that screen itself; it
+reads "you accept all responsibility", which is the host owner's to say.
+
 **2.28.1** A question asked from a terminal reads properly on the phone.
 When Claude opens AskUserQuestion in a TUI the daemon is not driving, the
 pane watcher publishes it. It rebuilt the question from the screen: the last
