@@ -121,6 +121,7 @@ _SESSION_FILE = re.compile(r"^/api/sessions/([^/]+)/file$")
 _SESSION_CHANGES = re.compile(r"^/api/sessions/([^/]+)/changes$")
 _SESSION_TUI_KEYS = re.compile(r"^/api/sessions/([^/]+)/tui/keys$")
 _SESSION_TUI_STREAM = re.compile(r"^/sse/sessions/([^/]+)/tui$")
+_SESSION_TUI_HISTORY = re.compile(r"^/api/sessions/([^/]+)/tui/history$")
 # session id -> the runner whose TUI answered for it. A session never changes
 # harness, so this only saves probing every runner on every frame and key.
 _TUI_RUNNERS = {}
@@ -1897,6 +1898,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         # 1: GET /sse/sessions/<id>/tui pushes frames, and POST …/tui/keys
         # takes an ordered `events` list. Absent: poll GET …/tui.
         payload["tui_stream"] = 1
+        # 1: GET …/tui/history?lines=N returns the pane's scrollback.
+        payload["tui_history"] = 1
         payload["tui_cols"] = TUI_COLS
         payload["tui_rows"] = TUI_ROWS
         caps = payload.get("caps")
@@ -1904,6 +1907,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             caps = dict(caps)
             caps["tui_keys"] = 2
             caps["tui_stream"] = 1
+            caps["tui_history"] = 1
             payload["caps"] = caps
 
     def _stamp_upload_caps(self, payload: dict) -> None:
@@ -2377,6 +2381,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_tui_capture(m.group(1), query)
             return
 
+        m = _SESSION_TUI_HISTORY.match(path)
+        if m:
+            self._handle_tui_history(m.group(1), query)
+            return
+
         m = _SESSION_TUI_STREAM.match(path)
         if m:
             self._handle_tui_stream(m.group(1), query)
@@ -2632,6 +2641,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             # indexes it; _tui_route lets that through.
             if self._tui_route(m.group(1)):
                 self._handle_tui_capture(m.group(1), query)
+            return
+        m = _SESSION_TUI_HISTORY.match(path)
+        if m:
+            if self._tui_route(m.group(1)):
+                self._handle_tui_history(m.group(1), query)
             return
         m = _SESSION_ONE.match(path)
         if m:
@@ -3680,6 +3694,41 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         self._send_json(self._tui_frame(
             session_id, self._flag(query or {}, "ansi")))
+
+    def _handle_tui_history(self, session_id: str, query=None):
+        """GET /api/sessions/<id>/tui/history?lines=N[&ansi=1] — scrollback.
+
+        The newest N lines that scrolled off the top of the pane (oldest
+        first), so a client can show them above the screen when the reader
+        scrolls the terminal to its top. `more` says whether there is older.
+        """
+        if not self._tui_in_scope(session_id):
+            self._error(404, "session not found")
+            return
+        from .live_tui import history_session
+        q = query or {}
+        raw = q.get("lines")
+        raw = raw[0] if isinstance(raw, list) else raw
+        try:
+            lines = int(raw or 200)
+        except (TypeError, ValueError):
+            lines = 200
+        ansi = self._flag(q, "ansi")
+        last = None
+        for r in self._tui_runners():
+            mgr = r._interactive_mgr() if hasattr(r, "_interactive_mgr") else r
+            try:
+                out = history_session(mgr, session_id, lines=lines, ansi=ansi)
+            except Exception:  # one harness failing must not hide another
+                log.exception("tui history failed")
+                continue
+            last = out
+            if out.get("attached"):
+                self._send_json(out)
+                return
+        self._send_json(last or {"session_id": session_id, "attached": False,
+                                 "text": "", "lines": 0, "history": 0,
+                                 "more": False, "ansi": ansi})
 
     def _handle_tui_events(self, session_id, events):
         if not isinstance(events, list) or not events or len(events) > 256:

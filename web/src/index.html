@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="color-scheme" content="dark">
+<!-- Installed to a home screen: the page runs under a translucent status bar. -->
+<meta name="theme-color" content="#0b0b0d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Agent Remote</title>
 <link rel="stylesheet" href="app.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 108 108'%3E%3Crect width='108' height='108' rx='54' fill='%2312121a'/%3E%3Cpath d='M34 40 L48 54 L34 68' stroke='%23d97757' stroke-width='7' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M56 68 L76 68' stroke='%2300d4ff' stroke-width='7' stroke-linecap='round'/%3E%3C/svg%3E">
@@ -250,7 +255,7 @@
         <!-- Soft keys: fixed-size buttons on their own row so layout never
              shifts. This row is deliberately the original eight — everything
              else reaches the host by being typed at the focused pane. -->
-        <div class="live-tui-keys" role="toolbar" aria-label="Live TUI keys">
+        <div id="live-tui-keys" class="live-tui-keys" role="toolbar" aria-label="Live TUI keys">
           <button type="button" data-tui-key="Escape" title="Escape">Esc</button>
           <button type="button" data-tui-key="Enter" title="Enter">Enter</button>
           <button type="button" data-tui-key="Tab" title="Tab">Tab</button>
@@ -266,11 +271,15 @@
            screen — it keeps the host's column count and centres in a wide
            window instead of stretching across it. -->
       <pre id="live-tui-pane" class="live-tui-pane" tabindex="0"
-           role="group" aria-label="Host terminal"><code id="live-tui-screen"></code></pre>
+           role="group" aria-label="Host terminal"><span id="live-tui-more" class="live-tui-more"></span><code id="live-tui-history"></code><code id="live-tui-screen"></code></pre>
       <div class="live-tui-line">
+        <!-- Shows or hides the row of terminal keys (Esc, Enter, arrows…). -->
+        <button id="btn-tui-keys" class="icon-btn tui-keys-toggle" type="button"
+                aria-pressed="true" aria-controls="live-tui-keys"
+                title="Terminal keys" aria-label="Terminal keys"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M7 14h10"/></svg></button>
         <input id="live-tui-input" type="text" autocomplete="off" spellcheck="false"
                placeholder="Type here (IME welcome) · Enter sends the line">
-        <button id="btn-live-tui-send" class="primary" type="button">Send line</button>
+        <button id="btn-live-tui-send" class="primary send-btn" type="button" title="Send the line" aria-label="Send the line"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l16-8-6 16-2.5-6.5z"/><path d="M11.5 13.5L20 4"/></svg></button>
       </div>
     </div>
 
@@ -290,7 +299,7 @@
         <textarea id="prompt" rows="1" spellcheck="false"
                   placeholder="Message, /command or !shell · Enter sends"
                   aria-controls="composer-pop"></textarea>
-        <button id="btn-send" class="primary" type="button">Send</button>
+        <button id="btn-send" class="primary send-btn" type="button" title="Send" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l16-8-6 16-2.5-6.5z"/><path d="M11.5 13.5L20 4"/></svg></button>
       </div>
     </div>
   </main>

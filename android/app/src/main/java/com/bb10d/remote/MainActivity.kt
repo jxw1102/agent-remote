@@ -2,13 +2,12 @@ package com.bb10d.remote
 
 import android.Manifest
 import android.content.Intent
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.EnterTransition
+import android.view.WindowManager
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.navigation.compose.dialog
+import com.bb10d.remote.ui.screens.SheetMotion
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -166,12 +165,7 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
     }
 
     NavHost(navController = nav, startDestination = Routes.SESSIONS) {
-        composable(
-            Routes.SESSIONS,
-            // Stays put under the session sheet while it slides up or down.
-            exitTransition = { ExitTransition.KeepUntilTransitionsFinished },
-            popEnterTransition = { EnterTransition.None },
-        ) {
+        composable(Routes.SESSIONS) {
             SessionsScreen(
                 vm = viewModel(factory = factory),
                 onOpen = { ref, provider ->
@@ -239,7 +233,11 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
             )
         }
 
-        composable(
+        // A window over the list rather than a screen in its place: the
+        // list stays drawn (and live) under the session sheet, as the page a
+        // modal sheet covers. TranscriptScreen draws its own scrim and runs
+        // its own slide in and out.
+        dialog(
             route = TRANSCRIPT_ROUTE,
             arguments = listOf(
                 navArgument("profileId") { type = NavType.StringType },
@@ -247,19 +245,15 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
                 navArgument("job") { defaultValue = "" },
                 navArgument("provider") { defaultValue = "" },
             ),
-            // The session page comes up from the bottom like a sheet and goes
-            // back down; switching between its tabs just cross-fades.
-            enterTransition = {
-                if (initialState.destination.route == TRANSCRIPT_ROUTE) fadeIn(tween(160))
-                else slideInVertically(tween(320)) { it }
-            },
-            exitTransition = {
-                if (targetState.destination.route == TRANSCRIPT_ROUTE) fadeOut(tween(160))
-                else fadeOut(tween(200))
-            },
-            popEnterTransition = { fadeIn(tween(200)) },
-            popExitTransition = { slideOutVertically(tween(280)) { it } },
+            dialogProperties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false,
+                // Back is handled inside, so the sheet can slide away first.
+                dismissOnBackPress = false,
+                dismissOnClickOutside = false,
+            ),
         ) { entry ->
+            FullScreenDialogWindow()
             val profileId = entry.arguments?.getString("profileId").orEmpty()
             val rawSession = entry.arguments?.getString("sessionId").orEmpty()
             val sessionId = if (rawSession == Routes.NONE) "" else rawSession
@@ -278,7 +272,9 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
                 onBack = { nav.popBackStack() },
                 onOpenTab = { tab ->
                     // Another tab: this page is replaced, so Back still goes
-                    // to the list rather than through every tab visited.
+                    // to the list rather than through every tab visited. The
+                    // sheet is already up: the next one does not slide in.
+                    SheetMotion.switching = true
                     nav.navigate(Routes.transcript(tab.profileId, tab.sessionId, provider = tab.provider)) {
                         popUpTo(entry.destination.id) { inclusive = true }
                     }
@@ -292,6 +288,33 @@ private fun openUrl(context: android.content.Context, url: String) {
     runCatching {
         context.startActivity(
             Intent(Intent.ACTION_VIEW, url.toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }
+}
+
+/**
+ * The session page's dialog window: full screen, no system dim (the page
+ * draws a scrim that follows the sheet), no window animation (the sheet
+ * slides itself), and resized for the keyboard like the activity is.
+ */
+@Composable
+private fun FullScreenDialogWindow() {
+    val window = (LocalView.current.parent as? DialogWindowProvider)?.window ?: return
+    androidx.compose.runtime.SideEffect {
+        window.setDimAmount(0f)
+        // The page draws under the status bar itself (with its own
+        // translucent band); the bar is not filled in by the window.
+        @Suppress("DEPRECATION")
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        @Suppress("DEPRECATION")
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        window.setWindowAnimations(0)
+        @Suppress("DEPRECATION")
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        window.setLayout(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
         )
     }
 }

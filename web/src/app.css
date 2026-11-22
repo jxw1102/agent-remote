@@ -537,21 +537,22 @@ a { color: var(--accent); }
   z-index: 6;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  pointer-events: none;    /* only the cards themselves take clicks */
-}
-.chat-float > * { pointer-events: auto; }
-.chat-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 10px 8px 14px;
+  /* One card: the bar, and the live strip folded into its bottom while a
+     turn runs. */
   border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
   border-radius: 16px;
   background: color-mix(in srgb, var(--surface) 80%, transparent);
   -webkit-backdrop-filter: blur(16px) saturate(1.3);
   backdrop-filter: blur(16px) saturate(1.3);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+/* Nothing open (no bar, no strip): no empty card either. */
+.chat-float:not(:has(> :not(.hidden))) { display: none; }
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px 8px 14px;
   flex: none;
 }
 .chat-title { flex: 1; min-width: 0; }
@@ -666,14 +667,10 @@ button.icon-btn.icon-idle {
   column-gap: 10px;
   row-gap: 2px;
   padding: 6px 14px;
-  /* A second, smaller floating card under the bar. */
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--surface) 72%, transparent);
-  background-image: linear-gradient(var(--accent-soft), var(--accent-soft));
-  -webkit-backdrop-filter: blur(16px);
-  backdrop-filter: blur(16px);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  /* The bottom row of the bar's card, tinted, under a hairline. */
+  border-top: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 0 0 15px 15px;
+  background: var(--accent-soft);
   color: var(--accent);
   font-size: 12.5px;
   line-height: 1.35;
@@ -682,9 +679,8 @@ button.icon-btn.icon-idle {
 }
 /* Human gate (ask / permission): stand out from the normal working strip. */
 .banner.needs-answer {
-  background-image: linear-gradient(rgba(95, 201, 139, 0.14), rgba(95, 201, 139, 0.14));
+  background: rgba(95, 201, 139, 0.14);
   color: var(--ok);
-  border-color: rgba(95, 201, 139, 0.32);
 }
 /*
  * Line 1: human description + elapsed/queued.
@@ -1120,8 +1116,10 @@ button.icon-btn.icon-idle {
   display: flex;
   flex-direction: column;
   background: var(--bg);
-  /* Below the floating bar, like the conversation. */
-  padding-top: calc(var(--float-h, 0px) + 6px);
+  /* The terminal runs to the top of the pane, under the floating bar (and
+     under its own key card); its text starts below them (--tui-top). */
+  position: relative;
+  --tui-top: calc(var(--float-h, 0px) + var(--tui-bar-h, 0px) + 10px);
 }
 .live-tui.hidden { display: none !important; }
 .live-tui-bar {
@@ -1131,9 +1129,13 @@ button.icon-btn.icon-idle {
   flex-direction: column;
   gap: 6px;
   padding: 8px 12px;
-  /* A floating card like the session bar above it and the chat's live
-     strip, not a full-width strip with a rule under it. */
-  margin: 0 10px 6px;
+  /* A floating card like the session bar above it, laid over the top of
+     the terminal just under the bar. */
+  position: absolute;
+  top: calc(var(--float-h, 0px) + 6px);
+  left: 10px;
+  right: 10px;
+  z-index: 5;
   border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
   border-radius: 14px;
   background: color-mix(in srgb, var(--surface) 80%, transparent);
@@ -1236,7 +1238,8 @@ button.icon-btn.icon-idle {
   flex: 1;
   min-height: 0;
   margin: 0;
-  padding: 12px 14px;
+  padding: var(--tui-top) 14px 12px;
+  scroll-padding-top: var(--tui-top);
   overflow: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   /* Start at the cap; app.js scales it down until the host's own column
@@ -2073,17 +2076,25 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     background: var(--surface);
   }
   .live-tui-bar, .live-tui-meta { display: contents; }
+  .live-tui { --tui-top: calc(var(--float-h, 0px) + 8px); }
   .live-tui-hint { display: none; }
+  /* Only when it has something to say; then a small card over the top of
+     the terminal, under the bar. */
   .live-tui-status {
-    grid-area: 1 / 1 / 2 / -1;
-    max-width: none;
+    position: absolute;
+    top: calc(var(--float-h, 0px) + 6px);
+    left: 10px;
+    z-index: 5;
+    max-width: calc(100% - 20px);
     padding: 5px 10px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--surface) 85%, transparent);
+    border: 1px solid var(--line);
   }
   .live-tui-status.live { display: none; }
   .live-tui-pane {
-    grid-area: 2 / 1 / 3 / -1;
-    padding: 6px 8px;
-    border-top: 1px solid var(--line);
+    grid-area: 1 / 1 / 3 / -1;
+    padding: var(--tui-top) 8px 6px;
     border-bottom: 1px solid var(--line);
   }
   .tui-capture {
@@ -2199,12 +2210,12 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     left: 0;
     right: 0;
     bottom: 0;
-    top: calc(var(--tabs-h) + env(safe-area-inset-top, 0px));
+    /* The sheet reaches the top of the screen; the bubbles float over it. */
+    top: 0;
     z-index: 30;
     padding-left: env(safe-area-inset-left, 0px);
     padding-right: env(safe-area-inset-right, 0px);
     border-radius: 18px 18px 0 0;
-    border-top: 1px solid var(--line);
     background: var(--bg);
     box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.55);
     transform: translateY(105%);
@@ -2228,11 +2239,15 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     pointer-events: none;
     transition: opacity 300ms ease;
   }
-  .app.show-chat::after { opacity: 1; pointer-events: auto; }
+  /* --sheet-open: 1 with the sheet up, falling toward 0 as its grip is
+     dragged down, so the dark overlay follows the sheet (app.js). */
+  .app.show-chat::after { opacity: var(--sheet-open, 1); pointer-events: auto; }
+  .app.sheet-dragging::after { transition: none; }
   .sheet-grip {
     display: block;
     position: absolute;
-    top: 0;
+    /* Under the floating bubbles, above the session bar. */
+    top: calc(env(safe-area-inset-top, 0px) + var(--tabs-h) - 6px);
     left: 50%;
     transform: translateX(-50%);
     z-index: 8;
@@ -2255,8 +2270,10 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
   .pane-side { z-index: 35; }
   .modal { z-index: 40; }
   .toast { z-index: 45; }
-  /* Inside the sheet the floating bar sits under the grip, not the notch. */
-  .chat-float { top: 16px; }
+  /* No back arrow on the sheet: +, Back and the grip take it down. */
+  .chat-head .back-btn { display: none !important; }
+  /* Inside the sheet the floating bar sits under the bubbles and the grip. */
+  .chat-float { top: calc(env(safe-area-inset-top, 0px) + var(--tabs-h) + 10px); }
   .chat-head { padding-top: 6px; }
 
   .tabstrip {
@@ -2271,18 +2288,24 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     padding: 0 12px;
     overflow-x: auto;
     scrollbar-width: none;
-    opacity: 0;
+    /* The bubbles ride with the sheet: down off the screen with it, up with
+       it, and along with a drag of its grip (app.js). */
+    display: flex;
     pointer-events: none;
-    transform: translateY(-8px);
-    transition: opacity 200ms ease, transform 200ms ease;
+    /* Exactly as far down as the sheet, so the two move as one. */
+    transform: translateY(105vh);
+    visibility: hidden;
+    transition: transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0s linear 300ms;
   }
+
   .tabstrip::-webkit-scrollbar { display: none; }
   .app.show-chat > .tabstrip {
-    display: flex;
-    opacity: 1;
     pointer-events: auto;
     transform: none;
+    visibility: visible;
+    transition: transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0s;
   }
+  .app > .tabstrip.dragging { transition: none; }
   .tab-home, .tab-bubble {
     flex: none;
     position: relative;
@@ -2324,7 +2347,11 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     border-radius: 50%;
     border: 2px solid var(--bg);
   }
-  .tab-working { background: var(--tab); animation: breathe 1.6s ease-in-out infinite; }
+  .tab-live { background: var(--ok); }
+  .tab-working { animation: breathe 1.6s ease-in-out infinite; }
+  .tab-down { background: var(--dim); }
+  /* The live strip under the session bar is the bubbles' dot here. */
+  .banner { display: none !important; }
   .tab-ask {
     display: inline-flex;
     align-items: center;
@@ -2352,4 +2379,48 @@ img.host-file-img { display: block; max-width: 100%; margin: 0 auto; }
     font-size: 14px;
     line-height: 1;
   }
+}
+
+/* Send (and the terminal's Send line): an icon, not a word. */
+button.send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding-left: 0;
+  padding-right: 0;
+}
+button.send-btn svg { width: 20px; height: 20px; display: block; }
+
+/* The text line's toggle for the terminal keys row. */
+.live-tui.keys-hidden .live-tui-keys { display: none !important; }
+.live-tui-line button.tui-keys-toggle { flex: none; padding: 0; width: 40px; min-width: 40px; }
+button.tui-keys-toggle svg { width: 20px; height: 20px; }
+button.tui-keys-toggle[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-soft);
+}
+
+/* The terminal's scrollback, fetched when it is scrolled to its top: the
+   same grid as the screen, just above it. */
+#live-tui-history { display: block; width: max-content; margin: 0 auto; font: inherit; opacity: 0.9; }
+#live-tui-history:empty { display: none; }
+.live-tui-more { display: block; text-align: center; color: var(--dim); font-size: 11px; padding: 4px 0 8px; font-family: inherit; }
+.live-tui-more:empty { display: none; }
+
+/* The system status bar over the session page: a translucent, frosted band
+   (a home-screen web app runs under it; in a browser tab it is 0 high). */
+.pane-chat::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: env(safe-area-inset-top, 0px);
+  z-index: 9;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  pointer-events: none;
 }

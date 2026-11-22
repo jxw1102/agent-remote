@@ -19,6 +19,15 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.29.0** The terminal's scrollback. A Live TUI frame is the visible
+screen only; what scrolled off its top was out of reach from a client.
+`GET /api/sessions/<id>/tui/history?lines=N[&ansi=1]` returns the newest N
+lines of the pane's tmux history (oldest first, up to 5000), the lines just
+above the screen, with `history` (all the scrollback tmux holds) and
+`more`. `/api/ping` advertises `tui_history: 1`. Web and Android 1.9.18
+fetch it when the terminal is scrolled to its top, 200 lines more each
+time, and keep it joined to the screen as new output scrolls off.
+
 **2.28.3** The question watcher publishes only the panel that is on
 screen. A question already answered left its footer and options in the
 scrollback, and the watcher published them again as a new card; it now needs

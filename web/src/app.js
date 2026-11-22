@@ -1306,6 +1306,8 @@ async function pingProfile(profile) {
     profile.sessionOptions = !!ping.session_options;
     // Live TUI frames pushed over SSE + ordered key batches (agentremoted ≥ 2.22).
     profile.tuiStream = !!ping.tui_stream;
+    // GET …/tui/history: the terminal's scrollback (agentremoted ≥ 2.29).
+    profile.tuiHistory = !!ping.tui_history || !!(ping.caps && ping.caps.tui_history);
     profile.chunkedUpload = !!ping.chunked_upload
       || !!(ping.caps && ping.caps.chunked_upload);
     if (typeof ping.max_upload_mb === "number" && ping.max_upload_mb > 0) {
@@ -2637,21 +2639,23 @@ function renderTabs() {
   const tabs = readTabs();
   const working = workingKeys(), blocked = blockedKeys();
   const open = state.open;
-  const sig = JSON.stringify([tabs.map((t) => [t.profileId, t.sessionId, t.title, t.provider]),
+  const sig = JSON.stringify([tabs.map((t) => [t.profileId, t.sessionId, t.title, t.provider,
+    connOf(t.profileId)]),
     open && [open.profileId, open.sessionId],
     tabs.map((t) => blocked.has(`${t.profileId}/${t.sessionId}`) ? 2
       : working.has(`${t.profileId}/${t.sessionId}`) ? 1 : 0)]);
   if (strip._sig === sig) return;
   strip._sig = sig;
   strip.textContent = "";
-  // First: down to the list (closes the sheet; the tabs stay).
+  // First: +, like a browser's new tab. It goes down to the list (the sheet
+  // closes, the tabs stay), where the next conversation is picked or begun.
   const home = el("button", "tab-home");
   home.type = "button";
-  home.title = "All sessions";
-  home.setAttribute("aria-label", "All sessions");
+  home.title = "Open another session";
+  home.setAttribute("aria-label", "Open another session");
   home.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"'
-    + ' stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">'
-    + '<path d="M4 6h16M4 12h16M4 18h10"/></svg>';
+    + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    + '<path d="M12 5v14M5 12h14"/></svg>';
   home.addEventListener("click", backToList);
   strip.appendChild(home);
   tabs.forEach((t) => {
@@ -2664,8 +2668,18 @@ function renderTabs() {
     b.setAttribute("aria-label", t.title);
     if (active) b.setAttribute("aria-current", "true");
     b.appendChild(el("span", "tab-initials", tabInitials(t.title)));
+    // The live status, as a dot on the bubble: green while its daemon is
+    // live, breathing while the agent works, "?" when it waits on you, grey
+    // while the daemon is out of reach. (On a phone it replaces the live
+    // strip under the session bar.)
     if (blocked.has(key)) b.appendChild(el("span", "tab-state tab-ask", "?"));
-    else if (working.has(key)) b.appendChild(el("span", "tab-state tab-working"));
+    else {
+      const live = connOf(t.profileId) === "live";
+      const dot = el("span", "tab-state " + (!live ? "tab-down"
+        : working.has(key) ? "tab-live tab-working" : "tab-live"));
+      dot.title = !live ? "Daemon not connected" : working.has(key) ? "Working" : "Live";
+      b.appendChild(dot);
+    }
     let pressTimer = null, longPressed = false;
     b.addEventListener("pointerdown", () => {
       longPressed = false;
@@ -2713,17 +2727,28 @@ function wireSheetGrip() {
     dragging = true; startY = e.clientY; dy = 0;
     grip.setPointerCapture(e.pointerId);
     sheet.classList.add("dragging");
+    $("tabstrip").classList.add("dragging");
+    $("app").classList.add("sheet-dragging");
   });
   grip.addEventListener("pointermove", (e) => {
     if (!dragging) return;
     dy = Math.max(0, e.clientY - startY);
+    // The bubbles move with the sheet.
     sheet.style.transform = `translateY(${dy}px)`;
+    $("tabstrip").style.transform = `translateY(${dy}px)`;
+    // The overlay lightens as the sheet goes down.
+    const h = sheet.offsetHeight || window.innerHeight;
+    $("app").style.setProperty("--sheet-open", String(Math.max(0, 1 - dy / h)));
   });
   const end = () => {
     if (!dragging) return;
     dragging = false;
     sheet.classList.remove("dragging");
+    $("tabstrip").classList.remove("dragging");
+    $("app").classList.remove("sheet-dragging");
+    $("app").style.removeProperty("--sheet-open");
     sheet.style.transform = "";
+    $("tabstrip").style.transform = "";
     if (dy > 90) backToList();
   };
   grip.addEventListener("pointerup", end);
@@ -3639,6 +3664,7 @@ function pickFace(tui) {
 
 function openLiveTui() {
   if (!state.open || !state.open.sessionId) return;
+  resetTuiHistory();
   state.liveTui = true;
   liveTuiActiveAt = Date.now();
   state.liveTuiSeq = 0;
@@ -3776,6 +3802,7 @@ function stopLiveTuiFeed() {
 }
 
 function closeLiveTui() {
+  resetTuiHistory();
   clearTimeout(liveTuiReleaseTimer);
   liveTuiReleaseTimer = null;
   liveTuiReleased = false;
@@ -3839,6 +3866,77 @@ async function pollLiveTui(force) {
 }
 
 /** Draw one frame, however it arrived (pushed or polled). */
+// ---- terminal scrollback ---------------------------------------------------
+// Scrolling the terminal to its top asks the daemon for what scrolled off it,
+// 200 lines more each time while there are more. While it is shown, new
+// output that scrolls off the screen joins it, so the two stay joined.
+
+let tuiHist = { text: "", lines: 0, total: 0, more: true, loading: false, gen: 0 };
+let tuiHistTimer = null;
+
+function resetTuiHistory() {
+  clearTimeout(tuiHistTimer);
+  tuiHist = { text: "", lines: 0, total: 0, more: true, loading: false, gen: tuiHist.gen + 1 };
+  const h = $("live-tui-history");
+  if (h) h.textContent = "";
+  const m = $("live-tui-more");
+  if (m) m.textContent = "";
+}
+
+async function loadTuiHistory(lines, { anchor = false, keep = 0 } = {}) {
+  const open = state.open;
+  const profile = open && profileById(open.profileId);
+  if (!profile || !profile.tuiHistory || tuiHist.loading || !state.liveTui) return;
+  const gen = tuiHist.gen;
+  tuiHist.loading = true;
+  if (anchor) $("live-tui-more").textContent = "Loading earlier lines…";
+  try {
+    const got = await call(profile,
+      `/api/sessions/${encodeURIComponent(open.sessionId)}/tui/history?ansi=1&lines=${lines}`,
+      { timeout: 20000 });
+    if (gen !== tuiHist.gen) return;
+    if (!got || !got.attached) { tuiHist.more = false; return; }
+    const rows = String(got.text || "").split("\n");
+    // A refresh keeps exactly what was shown plus what has scrolled off
+    // since, so nothing above the reader moves.
+    const wanted = keep > 0
+      ? Math.max(0, Math.min(rows.length, keep + (got.history - tuiHist.total)))
+      : rows.length;
+    const text = got.text ? rows.slice(rows.length - wanted).join("\n") : "";
+    const pane = $("live-tui-pane");
+    const before = pane.scrollHeight;
+    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
+    tuiHist.text = text;
+    tuiHist.lines = text ? wanted : 0;
+    tuiHist.total = got.history || 0;
+    tuiHist.more = tuiHist.lines < tuiHist.total;
+    $("live-tui-history").innerHTML = text ? ansiToHtml(text, paneIsLight()) : "";
+    if (anchor) pane.scrollTop += pane.scrollHeight - before;   // keep the reader's line
+    else if (atBottom) pane.scrollTop = pane.scrollHeight;
+  } catch { /* the next scroll to the top asks again */ }
+  finally {
+    if (gen === tuiHist.gen) {
+      tuiHist.loading = false;
+      $("live-tui-more").textContent = tuiHist.lines && !tuiHist.more
+        ? "Start of the terminal's history" : "";
+    }
+  }
+}
+
+function maybeLoadTuiHistory() {
+  const pane = $("live-tui-pane");
+  if (!state.liveTui || !pane || pane.scrollTop > 24 || !state.liveTuiSeq) return;
+  if (tuiHist.more && !tuiHist.loading) loadTuiHistory(tuiHist.lines + 200, { anchor: true });
+}
+
+function refreshTuiHistorySoon() {
+  if (!tuiHist.lines) return;
+  clearTimeout(tuiHistTimer);
+  tuiHistTimer = setTimeout(() => {
+    loadTuiHistory(Math.min(tuiHist.lines + 400, 5000), { keep: tuiHist.lines });
+  }, 1200);
+}
+
 /** Is the TUI pane drawn on a light background (the app's theme)? */
 function paneIsLight() {
   const c = getComputedStyle($("live-tui-pane")).backgroundColor;
@@ -3867,6 +3965,7 @@ function paintLiveTuiFrame(frame, force) {
     }
     if (!force && frame.seq === state.liveTuiSeq) return;
     state.liveTuiSeq = frame.seq;
+    refreshTuiHistorySoon();
     liveTuiActiveAt = Date.now();   // the pane changed
     pane.dataset.hadFrame = "1";
     pane.classList.remove("empty-tui");
@@ -4283,6 +4382,13 @@ function watchTranscriptScroll() {
     view.addEventListener(ev, gesture, { passive: true });
   });
   view.addEventListener("scroll", () => {
+    // Reaching the top asks for the earlier messages by itself, as if the
+    // "Load earlier messages" button had been pressed.
+    // Only when the reader scrolled there: a rebuild also passes the top.
+    if (view.scrollTop < 120 && readerScrolling()) {
+      const more = view.querySelector(".load-older");
+      if (more && !more.disabled) loadOlder(more);
+    }
     const top = view.scrollTop;
     // Momentum keeps firing scrolls long after the finger is gone; each one
     // moving up renews the window, so the flick runs to its own stop.
@@ -4976,6 +5082,9 @@ function slashKeydown(e) {
   return true;
 }
 
+const SEND_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l16-8-6 16-2.5-6.5z"/><path d="M11.5 13.5L20 4"/></svg>';
+const SEND_ICON_QUEUE = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h11M4 12h11M4 18h7"/><path d="M17 15l3 3-3 3"/><path d="M14 18h6"/></svg>';
+
 /** Send says what it will do: a headless turn in progress queues the message. */
 function syncSendButton() {
   const ctx = turnContext();
@@ -4983,9 +5092,15 @@ function syncSendButton() {
   const queues = running && ctx
     && execModeOf(ctx.profile, ctx.harness) !== "interactive";
   const b = $("btn-send");
-  b.textContent = queues ? "Queue" : "Send";
-  b.title = queues ? "Runs after the current turn"
-    : (running ? "Typed into the running session" : "");
+  // An icon only: a paper plane, or a queue arrow while a turn runs.
+  const icon = queues ? "queue" : "send";
+  if (b.dataset.icon !== icon) {
+    b.dataset.icon = icon;
+    b.innerHTML = queues ? SEND_ICON_QUEUE : SEND_ICON;
+  }
+  b.setAttribute("aria-label", queues ? "Queue" : "Send");
+  b.title = queues ? "Queue: runs after the current turn"
+    : (running ? "Send: typed into the running session" : "Send");
 }
 
 function syncComposer() {
@@ -5759,6 +5874,7 @@ function setConn(id, next) {
   const cur = state.conn[id];
   if (cur && cur.state === next) return;
   state.conn[id] = { state: next, since: Date.now() };
+  renderTabs();     // each bubble's dot says whether its daemon is live
   clearTimeout(connTimers[id]);
   delete connTimers[id];
   if (next === "reconnecting" || next === "connecting") {
@@ -6287,6 +6403,7 @@ function normalizeProfile(p) {
     share: !!p.share,
     linkedFiles: !!p.linkedFiles,
     tuiStream: !!p.tuiStream,
+    tuiHistory: !!p.tuiHistory,
     chunkedUpload: !!p.chunkedUpload,
     ...(typeof p.maxUploadMb === "number" && p.maxUploadMb > 0
       ? { maxUploadMb: p.maxUploadMb } : {}),
@@ -7878,6 +7995,21 @@ function wire() {
     $("prompt").value = "";
     flushDraft();
   });
+  // The terminal keys row can be put away from the text line; the choice is
+  // kept in this browser.
+  const syncTuiKeys = () => {
+    const on = state.settings.tuiKeys !== false;
+    $("live-tui")?.classList.toggle("keys-hidden", !on);
+    $("btn-tui-keys")?.setAttribute("aria-pressed", on ? "true" : "false");
+  };
+  $("btn-tui-keys")?.addEventListener("mousedown", (e) => e.preventDefault());
+  $("btn-tui-keys")?.addEventListener("click", () => {
+    state.settings.tuiKeys = state.settings.tuiKeys === false;
+    store.save();
+    syncTuiKeys();
+    if (state.liveTui) fitLiveTuiPane();
+  });
+  syncTuiKeys();
   $("live-tui-input")?.addEventListener("keydown", (e) => {
     // isComposing: Enter while an IME candidate window is open commits the
     // candidate — it is not the user sending the line.
@@ -7927,6 +8059,15 @@ function wire() {
 
   wireSheetGrip();
   renderTabs();
+  $("live-tui-pane")?.addEventListener("scroll", maybeLoadTuiHistory, { passive: true });
+  // The terminal's key card floats over its top; the terminal's text starts
+  // below it, so it is told how tall the card is.
+  const tuiBar = document.querySelector(".live-tui-bar");
+  if (tuiBar && typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => {
+      $("live-tui").style.setProperty("--tui-bar-h", (tuiBar.offsetHeight || 0) + "px");
+    }).observe(tuiBar);
+  }
   // The floating bar: the conversation and the terminal start below it, so
   // they are told how tall it is (with its live strip) as that changes.
   const float = $("chat-float");

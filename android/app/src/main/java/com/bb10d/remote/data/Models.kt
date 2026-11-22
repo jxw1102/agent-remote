@@ -179,6 +179,8 @@ data class PingDto(
     @SerialName("session_options") val sessionOptions: Boolean = false,
     /** 1: Live TUI frames pushed over SSE (agentremoted ≥ 2.22); 0: poll. */
     @SerialName("tui_stream") val tuiStream: Int = 0,
+    /** 1: GET …/tui/history returns the pane's scrollback (agentremoted ≥ 2.29). */
+    @SerialName("tui_history") val tuiHistory: Int = 0,
     /** Chunked POST /api/attachments (agentremoted ≥ 2.8.6). */
     @SerialName("chunked_upload") val chunkedUpload: Boolean = false,
     @SerialName("max_upload_mb") val maxUploadMb: Int = 16,
@@ -529,6 +531,17 @@ data class DropListDto(
 data class JobStartedDto(@SerialName("job_id") val jobId: String = "")
 
 /** GET /api/sessions/<id>/tui — host tmux pane frame. */
+/** GET …/tui/history: the newest [lines] of scrollback, oldest first. */
+@Serializable
+data class TuiHistoryDto(
+    val attached: Boolean = false,
+    val text: String = "",
+    val lines: Int = 0,
+    /** All the scrollback tmux holds for the pane. */
+    val history: Int = 0,
+    val more: Boolean = false,
+)
+
 @Serializable
 data class TuiFrameDto(
     @SerialName("session_id") val sessionId: String = "",
@@ -695,6 +708,8 @@ data class Caps(
     val sessionOptions: Boolean = false,
     /** Live TUI frames are pushed, not polled (agentremoted >= 2.22). */
     val tuiStream: Boolean = false,
+    /** The terminal's scrollback can be fetched (agentremoted >= 2.29). */
+    val tuiHistory: Boolean = false,
     /** Chunked attachments (agentremoted >= 2.8.6). */
     val chunkedUpload: Boolean = false,
     /** Largest attachment the daemon accepts (ping max_upload_mb). */
@@ -842,6 +857,7 @@ data class Caps(
             changesTurn = ping.changesTurn,
             sessionOptions = ping.sessionOptions,
             tuiStream = ping.tuiStream > 0 || ping.caps["tui_stream"] == true,
+            tuiHistory = ping.tuiHistory > 0 || ping.caps["tui_history"] == true,
             chunkedUpload = ping.chunkedUpload || ping.caps["chunked_upload"] == true,
             maxUploadMb = ping.maxUploadMb.takeIf { it > 0 } ?: 16,
             providers = ping.providers,

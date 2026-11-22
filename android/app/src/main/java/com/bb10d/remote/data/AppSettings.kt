@@ -45,6 +45,8 @@ data class AppSettings(
      * one it was left on. Same idea as the web client.
      */
     val tuiViewSessions: Set<String> = emptySet(),
+    /** The TUI face's row of terminal keys (Esc, Enter, arrows…) is shown. */
+    val tuiKeys: Boolean = true,
 )
 
 private val Context.settingsStore: DataStore<Preferences> by preferencesDataStore("settings")
@@ -62,6 +64,7 @@ class SettingsStore(context: Context) {
         val richText = booleanPreferencesKey("richText")
         val processViewSessions = stringSetPreferencesKey("processViewSessions")
         val tuiViewSessions = stringSetPreferencesKey("tuiViewSessions")
+        val tuiKeys = booleanPreferencesKey("tuiKeys")
     }
 
     val state: Flow<AppSettings> = store.data.map { p ->
@@ -76,6 +79,7 @@ class SettingsStore(context: Context) {
             richText = p[K.richText] ?: d.richText,
             processViewSessions = p[K.processViewSessions] ?: d.processViewSessions,
             tuiViewSessions = p[K.tuiViewSessions] ?: d.tuiViewSessions,
+            tuiKeys = p[K.tuiKeys] ?: d.tuiKeys,
         )
     }
 
@@ -86,6 +90,7 @@ class SettingsStore(context: Context) {
     suspend fun setBackgroundWatch(v: Boolean) = store.edit { it[K.backgroundWatch] = v }
     suspend fun setFocusMode(v: Boolean) = store.edit { it[K.focusMode] = v }
     suspend fun setRichText(v: Boolean) = store.edit { it[K.richText] = v }
+    suspend fun setTuiKeys(v: Boolean) = store.edit { it[K.tuiKeys] = v }
 
     suspend fun setProcessView(sessionId: String, on: Boolean) = store.edit { p ->
         val current = p[K.processViewSessions] ?: emptySet()

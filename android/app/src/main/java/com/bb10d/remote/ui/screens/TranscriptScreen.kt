@@ -139,26 +139,35 @@ fun TranscriptScreen(
             conn = conn,
         ) }
         if (!sheet) {
-            body()
+            // A window of its own now (over the list): Back closes it.
+            androidx.activity.compose.BackHandler { onBack() }
+            Box(Modifier.fillMaxSize()) {
+                body()
+                // The page runs to the top of the screen under a translucent
+                // status bar.
+                StatusBarScrim()
+            }
         } else {
             val tabs by vm.repository.tabStore.tabs.collectAsStateWithLifecycle()
             val ref by vm.ref.collectAsStateWithLifecycle()
             val working by vm.repository.workingKeys.collectAsStateWithLifecycle()
             val blocked by vm.repository.blockedKeys.collectAsStateWithLifecycle()
+            val connAll by vm.repository.conn.collectAsStateWithLifecycle()
             SessionSheetFrame(
                 tabs = tabs,
                 current = ref,
                 working = working,
                 blocked = blocked,
+                conn = connAll,
                 onHome = onBack,
                 onOpen = onOpenTab,
                 onClose = { tab ->
                     val next = vm.repository.tabStore.close(tab.ref)
-                    if (tab.ref.key == ref.key) {
-                        // The open one closed: its neighbour comes forward,
-                        // as in a browser; with none left the sheet goes.
-                        if (next != null) onOpenTab(next) else onBack()
-                    }
+                    // The open one closed: its neighbour comes forward, as in
+                    // a browser; with none left the sheet goes.
+                    if (tab.ref.key != ref.key) false
+                    else if (next != null) { onOpenTab(next); false }
+                    else true
                 },
             ) { body() }
         }
@@ -328,6 +337,20 @@ private fun TranscriptScreenBody(
         wasReadingBack[0] = awayFromLatest || behindLatest
         if (!wasReadingBack[0]) unseen = false
     }
+    // Reaching the top asks for the earlier messages by itself, as if the
+    // "Load earlier messages" row had been tapped.
+    // Only once the reader has scrolled: the list also starts at the top
+    // for a moment before it jumps to the newest row.
+    var readerScrolled by remember { mutableStateOf(false) }
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) readerScrolled = true
+    }
+    val atTop by remember {
+        derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.layoutInfo.totalItemsCount > 1 }
+    }
+    LaunchedEffect(atTop, readerScrolled, ui.canLoadOlder, ui.loadingOlder) {
+        if (atTop && readerScrolled && ui.canLoadOlder && !ui.loadingOlder) vm.loadOlder()
+    }
     // Older messages went in above: shift the anchor by exactly as many rows,
     // so the message you were reading stays under your thumb.
     LaunchedEffect(ui.prependTick) {
@@ -349,10 +372,12 @@ private fun TranscriptScreenBody(
             // The live strip is a second, smaller card under it.
             Column(
                 Modifier
-                    // In the sheet the band above it holds the status bar,
-                    // and the sheet's grip sits over the bar's top edge.
-                    .then(if (sheet) Modifier else Modifier.statusBarsPadding())
-                    .padding(start = 10.dp, end = 10.dp, top = if (sheet) 16.dp else 6.dp, bottom = 4.dp),
+                    // In the sheet, below the floating bubbles and the grip.
+                    .statusBarsPadding()
+                    .padding(
+                        start = 10.dp, end = 10.dp, bottom = 4.dp,
+                        top = if (sheet) TAB_STRIP_HEIGHT + 12.dp else 6.dp,
+                    ),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Surface(
@@ -361,6 +386,7 @@ private fun TranscriptScreenBody(
                     border = BorderStroke(1.dp, pal.hairline),
                     shadowElevation = 8.dp,
                 ) {
+                Column {
                 TopAppBar(
                     windowInsets = WindowInsets(0, 0, 0, 0),
                     title = {
@@ -396,14 +422,8 @@ private fun TranscriptScreenBody(
                             }
                         }
                     },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(
-                                Icons.AutoMirrored.Outlined.ArrowBack,
-                                contentDescription = "Back",
-                            )
-                        }
-                    },
+                    // No back arrow: system Back (and, on a phone, the
+                    // tabs' + and the sheet's grip) leave the session.
                     actions = {
                         if (jobState.queued.isNotEmpty()) {
                             IconButton(onClick = { showQueue = true }) {
@@ -501,15 +521,11 @@ private fun TranscriptScreenBody(
                         containerColor = Color.Transparent,
                     ),
                 )
-                }
-                if (jobState.running) Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-                    border = BorderStroke(1.dp, accent.tint.copy(alpha = 0.25f)),
-                    shadowElevation = 6.dp,
-                ) {
+                // The live strip folded into the bar's card, as its bottom
+                // row, while a turn runs.
+                // On a phone the bubbles' dot says it instead.
                 StatusBanner(
-                    running = jobState.running,
+                    running = jobState.running && !sheet,
                     phase = live?.phase.orEmpty(),
                     phaseDetail = live?.phaseDetail.orEmpty(),
                     tool = live?.tool.orEmpty().ifEmpty { jobState.toolLine },
@@ -518,6 +534,24 @@ private fun TranscriptScreenBody(
                     accent = accent.tint,
                     agent = accent.label,
                 )
+                // On the TUI face: whether the terminal is live, in the same
+                // place.
+                if (tuiOn && !sheet) {
+                    val tui by remember(ref.key) { vm.repository.tuiFeeds.flowFor(ref) }
+                        .collectAsStateWithLifecycle()
+                    Text(
+                        text = (if (tui.live) "\u25CF " else "") + tui.status,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (tui.live) pal.ok else pal.dim,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(pal.ok.copy(alpha = if (tui.live) 0.08f else 0f))
+                            .padding(horizontal = 16.dp, vertical = 7.dp),
+                    )
+                }
+                }
                 }
             }
         },
@@ -544,7 +578,9 @@ private fun TranscriptScreenBody(
                             // typed in.
                             line = composerText,
                             onLine = vm::updateComposer,
-                            modifier = Modifier.fillMaxSize().padding(top = topPad),
+                            // Under the floating bar, to the top of the screen.
+                            modifier = Modifier.fillMaxSize(),
+                            topInset = topPad,
                         )
                     }
 

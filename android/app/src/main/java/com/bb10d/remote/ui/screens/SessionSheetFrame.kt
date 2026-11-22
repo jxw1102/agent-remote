@@ -1,6 +1,12 @@
 package com.bb10d.remote.ui.screens
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -21,12 +27,15 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.List
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -71,8 +80,24 @@ internal fun isSheetLayout(): Boolean {
 /**
  * The session page as a sheet over a dimmed band, with the open
  * conversations above it as bubbles, like a browser's tabs: tap one to
- * switch, the list button to go back, the open one's × (or a long press on
- * any) to close it. Dragging the grip down closes the sheet.
+ * switch, + to go to the list for another, the open one's × (or a long
+ * press on any) to close it. Dragging the grip down closes the sheet.
+ */
+/** Hand-over between two session sheets when switching tabs. */
+object SheetMotion {
+    /** Set just before another tab replaces this sheet: it does not slide in. */
+    @Volatile var switching = false
+}
+
+/**
+ * The session page as a sheet over the list, which stays drawn underneath
+ * (the page is a window over it), with the open conversations above it as
+ * bubbles, like a browser's tabs: tap one to switch, + to go to the list for
+ * another, the open one's × (or a long press on any) to close it.
+ *
+ * The sheet slides up when it opens and down when it goes (Back, +, closing
+ * the last tab, or dragging its grip), the bubbles riding with it, and the
+ * dark overlay on the list follows its position.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -81,63 +106,92 @@ internal fun SessionSheetFrame(
     current: SessionRef,
     working: Set<String>,
     blocked: Set<String>,
+    /** Each daemon's connection, for the bubbles' live dot. */
+    conn: Map<String, com.bb10d.remote.data.ConnState>,
     onHome: () -> Unit,
     onOpen: (SessionTab) -> Unit,
-    onClose: (SessionTab) -> Unit,
+    /** Close a tab; true when the sheet should go (no tab left to show). */
+    onClose: (SessionTab) -> Boolean,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    val pal = palette
     val density = LocalDensity.current
-    // How far the sheet has been dragged down by its grip.
-    val drag = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
-    // The band behind the sheet: the app's background, darkened, as a
-    // modal sheet's scrim would leave the page under it.
-    val band = Color.Black.copy(alpha = 0.55f)
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .background(band),
-    ) {
-        TabStrip(tabs, current, working, blocked, onHome, onOpen, onClose)
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val height = with(density) { maxHeight.toPx() }.coerceAtLeast(1f)
+        // How far down the sheet is: the screen's height when hidden, 0 up.
+        val offset = remember { Animatable(if (SheetMotion.switching) 0f else height) }
+        var leaving by remember { mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            SheetMotion.switching = false
+            offset.animateTo(0f, tween(320, easing = FastOutSlowInEasing))
+        }
+        fun dismiss() {
+            if (leaving) return
+            leaving = true
+            scope.launch {
+                offset.animateTo(height, tween(260, easing = FastOutLinearInEasing))
+                onHome()
+            }
+        }
+        BackHandler { dismiss() }
+        val open = (1f - offset.value / height).coerceIn(0f, 1f)
         Box(
             Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .offset { IntOffset(0, drag.value.roundToInt()) }
-                .shadow(18.dp, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
-                .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
-                .background(MaterialTheme.colorScheme.background),
+                .fillMaxSize()
+                // The list shows through, dimmed as much as the sheet is up.
+                .background(Color.Black.copy(alpha = 0.6f * open)),
         ) {
-            content()
-            // The grip: drag down to close.
-            Box(
-                Modifier
-                    .align(Alignment.TopCenter)
-                    .width(120.dp)
-                    .height(18.dp)
-                    .pointerInput(Unit) {
-                        detectVerticalDragGestures(
-                            onDragEnd = {
-                                if (drag.value > with(density) { 110.dp.toPx() }) onHome()
-                                else scope.launch { drag.animateTo(0f) }
-                            },
-                            onDragCancel = { scope.launch { drag.animateTo(0f) } },
-                        ) { _, dy ->
-                            scope.launch { drag.snapTo((drag.value + dy).coerceAtLeast(0f)) }
-                        }
-                    }
-                    .semantics { contentDescription = "Drag down to close" },
-                contentAlignment = Alignment.Center,
-            ) {
+            // The sheet reaches the top of the screen; the bubbles float
+            // over its top, and ride with it.
+            Box(Modifier.fillMaxSize().offset { IntOffset(0, offset.value.roundToInt()) }) {
                 Box(
                     Modifier
-                        .width(36.dp)
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f)),
-                )
+                        .fillMaxSize()
+                        .shadow(18.dp, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                        .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                        .background(MaterialTheme.colorScheme.background),
+                ) {
+                    content()
+                    // The grip: drag down to close.
+                    Box(
+                        Modifier
+                            .align(Alignment.TopCenter)
+                            // Under the floating bubbles, over the session bar.
+                            .statusBarsPadding()
+                            .padding(top = TAB_STRIP_HEIGHT - 6.dp)
+                            .width(120.dp)
+                            .height(18.dp)
+                            .pointerInput(Unit) {
+                                detectVerticalDragGestures(
+                                    onDragEnd = {
+                                        if (offset.value > with(density) { 110.dp.toPx() }) dismiss()
+                                        else scope.launch { offset.animateTo(0f) }
+                                    },
+                                    onDragCancel = { scope.launch { offset.animateTo(0f) } },
+                                ) { _, dy ->
+                                    if (!leaving) scope.launch {
+                                        offset.snapTo((offset.value + dy).coerceAtLeast(0f))
+                                    }
+                                }
+                            }
+                            .semantics { contentDescription = "Drag down to close" },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            Modifier
+                                .width(36.dp)
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f)),
+                        )
+                    }
+                }
+                // The system status bar over the sheet's top: translucent, so
+                // the conversation shows through it as it scrolls under.
+                StatusBarScrim()
+                TabStrip(tabs, current, working, blocked, conn, ::dismiss, onOpen) { tab ->
+                    if (onClose(tab)) dismiss()
+                }
             }
         }
     }
@@ -150,6 +204,7 @@ private fun TabStrip(
     current: SessionRef,
     working: Set<String>,
     blocked: Set<String>,
+    conn: Map<String, com.bb10d.remote.data.ConnState>,
     onHome: () -> Unit,
     onOpen: (SessionTab) -> Unit,
     onClose: (SessionTab) -> Unit,
@@ -165,7 +220,7 @@ private fun TabStrip(
         Modifier
             .fillMaxWidth()
             .statusBarsPadding()
-            .height(66.dp)
+            .height(TAB_STRIP_HEIGHT)
             .horizontalScroll(scroll)
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -176,10 +231,12 @@ private fun TabStrip(
             shape = CircleShape,
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             shadowElevation = 4.dp,
-            modifier = Modifier.size(44.dp).semantics { contentDescription = "All sessions" },
+            // +, like a browser's new tab: it goes to the list, where the
+            // next conversation is picked or begun.
+            modifier = Modifier.size(44.dp).semantics { contentDescription = "Open another session" },
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(Icons.AutoMirrored.Outlined.List, contentDescription = null)
+                Icon(Icons.Outlined.Add, contentDescription = null)
             }
         }
         tabs.forEach { tab ->
@@ -214,6 +271,11 @@ private fun TabStrip(
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                 }
+                // The live status, as a dot on the bubble: green while its
+                // daemon is live, breathing while the agent works, "?" when it
+                // waits on you, grey while the daemon is out of reach. It
+                // replaces the live strip under the session bar.
+                val live = conn[tab.profileId] == com.bb10d.remote.data.ConnState.LIVE
                 when {
                     tab.ref.key in blocked -> Box(
                         Modifier
@@ -223,9 +285,24 @@ private fun TabStrip(
                             .background(pal.warn),
                         contentAlignment = Alignment.Center,
                     ) { Text("?", fontSize = 11.sp, fontWeight = FontWeight.Black, color = Color.Black) }
+                    !live -> Box(
+                        Modifier
+                            .align(Alignment.TopEnd)
+                            .size(12.dp)
+                            .clip(CircleShape)
+                            .background(pal.dim),
+                    )
                     tab.ref.key in working -> WorkingPulse(
-                        tint,
+                        pal.ok,
                         Modifier.align(Alignment.TopEnd),
+                        size = 12,
+                    )
+                    else -> Box(
+                        Modifier
+                            .align(Alignment.TopEnd)
+                            .size(12.dp)
+                            .clip(CircleShape)
+                            .background(pal.ok),
                     )
                 }
                 if (active) {
@@ -257,4 +334,33 @@ internal fun tabInitials(title: String): String {
     val first = words[0].first()
     val second = if (words.size > 1) words[1].first() else words[0].getOrNull(1)
     return (first.toString() + (second?.toString() ?: "")).uppercase()
+}
+
+/** Height of the floating bubbles over the sheet's top (below the status bar). */
+internal val TAB_STRIP_HEIGHT = 62.dp
+
+/**
+ * A translucent band the height of the system status bar, so the page can
+ * run to the top of the screen under it and still keep the clock and icons
+ * readable. It also sets the icons light or dark for the page behind them.
+ */
+@Composable
+internal fun StatusBarScrim() {
+    val bg = MaterialTheme.colorScheme.background
+    val view = androidx.compose.ui.platform.LocalView.current
+    val light = bg.luminance() > 0.5f
+    androidx.compose.runtime.SideEffect {
+        val window = (view.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
+            ?: (view.context as? android.app.Activity)?.window
+        if (window != null) {
+            androidx.core.view.WindowCompat.getInsetsController(window, view)
+                .isAppearanceLightStatusBars = light
+        }
+    }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .windowInsetsTopHeight(androidx.compose.foundation.layout.WindowInsets.statusBars)
+            .background(bg.copy(alpha = 0.72f)),
+    )
 }

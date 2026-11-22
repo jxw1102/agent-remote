@@ -28,6 +28,11 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.foundation.layout.size
+import kotlinx.coroutines.launch
+import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.foundation.layout.ime
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.collectAsState
@@ -66,6 +71,17 @@ import kotlinx.coroutines.isActive
  * session window in place of the chat (TranscriptScreen), not on a screen
  * of its own.
  */
+/** The terminal's scrollback as fetched so far. */
+private data class TuiHistory(
+    val text: String = "",
+    val lines: Int = 0,
+    val total: Int = 0,
+    val more: Boolean = true,
+    val loading: Boolean = false,
+    /** Just prepended: the next size change shifts the scroll to match. */
+    val anchor: Boolean = false,
+)
+
 @Composable
 fun LiveTuiPane(
     repo: AgentRepository,
@@ -74,6 +90,8 @@ fun LiveTuiPane(
     line: String,
     onLine: (String) -> Unit,
     modifier: Modifier = Modifier,
+    /** The floating bar over the top: the terminal runs under it, its text starts below. */
+    topInset: androidx.compose.ui.unit.Dp = 0.dp,
 ) {
     val pal = palette
     // The stream and what it last showed are held by the app (TuiFeeds), so
@@ -104,6 +122,46 @@ fun LiveTuiPane(
     }
     LaunchedEffect(scroll.maxValue, text, stick) {
         if (stick) scroll.scrollTo(scroll.maxValue)
+    }
+    // Scrollback: scrolling the terminal to its top asks the daemon for the
+    // lines above the screen, 200 more each time, while there are more.
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var history by remember(ref.key) { mutableStateOf(TuiHistory()) }
+    val historyHeight = remember(ref.key) { intArrayOf(0) }
+    val canHistory = repo.profile(ref.profileId)?.caps?.tuiHistory == true
+    fun loadHistory(lines: Int, anchor: Boolean, keep: Int = 0) {
+        if (history.loading) return
+        history = history.copy(loading = true)
+        scope.launch {
+            val client = repo.client(ref.profileId)
+            val got = client?.let { runCatching { it.tuiHistory(ref.sessionId, lines) }.getOrNull() }
+            history = if (got == null || !got.attached) history.copy(loading = false, more = false)
+            else {
+                // A refresh keeps exactly what was shown plus what has
+                // scrolled off since, so nothing above moves.
+                val rows = got.text.split('\n')
+                val wanted = if (keep > 0) (keep + (got.history - history.total)).coerceIn(0, rows.size) else rows.size
+                TuiHistory(
+                    text = rows.takeLast(wanted).joinToString("\n"),
+                    lines = wanted,
+                    total = got.history,
+                    more = wanted < got.history,
+                    anchor = anchor,
+                )
+            }
+        }
+    }
+    val atTop by remember { androidx.compose.runtime.derivedStateOf { scroll.value <= 4 } }
+    LaunchedEffect(atTop, seq, canHistory) {
+        if (atTop && canHistory && seq > 0L && history.more && !history.loading) {
+            loadHistory(history.lines + 200, anchor = true)
+        }
+    }
+    // While scrollback is shown, new output scrolling off the screen joins it.
+    LaunchedEffect(seq) {
+        if (history.lines == 0 || !canHistory) return@LaunchedEffect
+        delay(1200)
+        loadHistory(minOf(history.lines + 400, 5000), anchor = false, keep = history.lines)
     }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val imeBottom = androidx.compose.foundation.layout.WindowInsets.ime.getBottom(density)
@@ -147,28 +205,8 @@ fun LiveTuiPane(
             // the text line below carry the controls' surface themselves.
             .background(MaterialTheme.colorScheme.background),
     ) {
-        // Whether the pane is live, as a small floating card under the
-        // session bar: the same look as the chat's live strip.
-        androidx.compose.material3.Surface(
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-            border = androidx.compose.foundation.BorderStroke(1.dp, pal.hairline),
-            shadowElevation = 6.dp,
-            modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 2.dp, bottom = 6.dp),
-        ) {
-            Text(
-                text = buildString {
-                    append(if (live) "\u25CF " else "")
-                    append(status)
-                },
-                style = MaterialTheme.typography.labelMedium,
-                color = if (live) pal.ok else pal.dim,
-                maxLines = 1,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-            )
-        }
+        // Whether the pane is live is shown in the session bar's card
+        // (TranscriptScreen), folded in like the chat's live strip.
         // weight must sit on a Column direct child — AnsiText wraps Text
         // in SelectionContainer, so weight on its modifier was ignored and
         // the pane grew to full content height, pushing the input off-screen.
@@ -194,21 +232,44 @@ fun LiveTuiPane(
                     text,
                     color = pal.dim,
                     style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = topInset + 14.dp),
                 )
-            } else AnsiText(
-                text = text,
-                modifier = Modifier
+            } else Column(
+                Modifier
                     .fillMaxSize()
                     .verticalScroll(scroll)
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                defaultColor = tuiFg,
-                light = tuiLight,
-                fontFamily = FontFamily.Monospace,
-                fontSize = size,
-                lineHeight = size * 1.3f,
-            )
+                    .padding(start = 8.dp, end = 8.dp, top = topInset + 6.dp, bottom = 6.dp),
+            ) {
+                // What scrolled off the top of the terminal, fetched when the
+                // reader scrolls up to the top (newest just above the screen).
+                if (history.text.isNotEmpty()) AnsiText(
+                    text = history.text,
+                    modifier = Modifier.onSizeChanged { size ->
+                        val grew = size.height - historyHeight[0]
+                        historyHeight[0] = size.height
+                        // Older lines went in above: keep the reader's line
+                        // under their thumb.
+                        if (history.anchor && grew > 0) {
+                            history = history.copy(anchor = false)
+                            scope.launch { scroll.scrollTo(scroll.value + grew) }
+                        }
+                    },
+                    defaultColor = tuiFg,
+                    light = tuiLight,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = size,
+                    lineHeight = size * 1.3f,
+                )
+                AnsiText(
+                    text = text,
+                    defaultColor = tuiFg,
+                    light = tuiLight,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = size,
+                    lineHeight = size * 1.3f,
+                )
+            }
         }
         if (error != null) {
             Text(
@@ -224,8 +285,11 @@ fun LiveTuiPane(
         // Soft keys, under the terminal and above the text line, within
         // reach of the thumbs. Real chrome buttons (surface + border) so
         // they stay readable beside the near-black pane. All eight share
-        // the row: none is ever scrolled out of sight.
-        Row(
+        // the row: none is ever scrolled out of sight. The keyboard button
+        // in the text line puts the row away or brings it back.
+        val settings by repo.settings.collectAsState()
+        val keysShown = settings.tuiKeys
+        if (keysShown) Row(
             Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surface)
@@ -264,6 +328,16 @@ fun LiveTuiPane(
                 .padding(horizontal = 8.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            androidx.compose.material3.IconToggleButton(
+                checked = keysShown,
+                onCheckedChange = { on -> scope.launch { repo.settingsStore.setTuiKeys(on) } },
+            ) {
+                androidx.compose.material3.Icon(
+                    androidx.compose.material.icons.Icons.Outlined.Keyboard,
+                    contentDescription = if (keysShown) "Hide terminal keys" else "Show terminal keys",
+                    tint = if (keysShown) MaterialTheme.colorScheme.primary else pal.dim,
+                )
+            }
             OutlinedTextField(
                 value = line,
                 onValueChange = onLine,
@@ -288,7 +362,17 @@ fun LiveTuiPane(
                 ),
             )
             Spacer(Modifier.width(8.dp))
-            Button(onClick = { submitLine() }) { Text("Send") }
+            // An icon, as in the chat's message box.
+            androidx.compose.material3.FilledIconButton(
+                onClick = { submitLine() },
+                enabled = line.isNotBlank(),
+                modifier = Modifier.size(48.dp),
+            ) {
+                androidx.compose.material3.Icon(
+                    androidx.compose.material.icons.Icons.AutoMirrored.Outlined.Send,
+                    contentDescription = "Send the line",
+                )
+            }
         }
     }
 }

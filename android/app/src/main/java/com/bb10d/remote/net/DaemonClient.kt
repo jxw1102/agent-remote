@@ -23,6 +23,7 @@ import com.bb10d.remote.data.ShareDto
 import com.bb10d.remote.data.ShellResultDto
 import com.bb10d.remote.data.TitleDto
 import com.bb10d.remote.data.TuiFrameDto
+import com.bb10d.remote.data.TuiHistoryDto
 import com.bb10d.remote.data.UsageDto
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -549,6 +550,18 @@ class DaemonClient(
      * Live TUI pane capture for a session.
      * [ansi] requests coloured SGR (web/Android). Default plain is for BB.
      */
+    /** The newest [lines] of the pane's scrollback (agentremoted ≥ 2.29). */
+    suspend fun tuiHistory(sessionId: String, lines: Int, ansi: Boolean = true): TuiHistoryDto = call(
+        request(
+            url(
+                "api/sessions/$sessionId/tui/history",
+                mapOf("lines" to lines.toString()) + (if (ansi) mapOf("ansi" to "1") else emptyMap()),
+            ),
+        ).get().build(),
+        TuiHistoryDto.serializer(),
+        timeoutSeconds = 20,
+    )
+
     suspend fun tui(sessionId: String, ansi: Boolean = true): TuiFrameDto = call(
         request(
             url(
