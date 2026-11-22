@@ -19,6 +19,17 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.30.1** Fixes from a code review. A job that only carries a question
+from an idle terminal reports `mode: "interactive"` and refuses `/queue`
+(it never drains one, so a message left there was lost). The Bypass
+Permissions consent screen is recognized only as the dialog at the foot of
+the pane, not when a resumed transcript quotes it. A question is no longer
+withdrawn from the phone while its panel is on another page (typing an
+answer, the review page), and a follow-up question's hook payload is not
+wiped by the previous question's cleanup. Web and Android 1.9.62: a line
+sent from the TUI view starts a terminal only when the daemon says there is
+none (not while merely connecting), also after a terminal has ended.
+
 **2.30.0** The daemon picks how a message runs. `permission_mode: "auto"`
 on `POST /api/sessions/<id>/continue` types the message into the session's
 terminal when it has a live one (a tmux TUI on this harness), and runs a

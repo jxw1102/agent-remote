@@ -23,6 +23,8 @@ data class TuiView(
     val error: String? = null,
     /** Frame number; 0 = no frame yet. */
     val seq: Long = 0L,
+    /** The daemon said the session has no terminal (not merely "not yet heard"). */
+    val detached: Boolean = false,
     /** The host pane's width in columns (the daemon says; 120 before it does). */
     val cols: Int = 120,
 )
@@ -160,6 +162,7 @@ class TuiFeeds(private val repo: AgentRepository, private val scope: CoroutineSc
                     !frame.attached -> v.copy(
                         error = null,
                         live = false,
+                        detached = true,
                         status = frame.error.ifBlank { "No host TUI attached" },
                         text = if (v.seq == 0L) {
                             if (repo.profile(ref.profileId)?.caps?.autoExec == true)
@@ -174,10 +177,11 @@ class TuiFeeds(private val repo: AgentRepository, private val scope: CoroutineSc
                         seq = frame.seq,
                         cols = if (frame.cols > 0) frame.cols else v.cols,
                         live = true,
+                        detached = false,
                         status = if (frame.jobId.isNotBlank()) "Live · job ${frame.jobId.take(8)}" else "Live",
                         text = frame.text.ifBlank { "(empty pane)" },
                     )
-                    else -> v.copy(error = null, live = true)
+                    else -> v.copy(error = null, live = true, detached = false)
                 }
             }
             // Daemon ≥ 2.22 pushes a frame when the pane changes; the echo of

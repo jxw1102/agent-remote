@@ -273,6 +273,29 @@ private data class SheetRoute(
     }
 }
 
+/** The session pages' view model stores, kept across activity recreation. */
+internal class SheetStores : androidx.lifecycle.ViewModel() {
+    private val stores = HashMap<String, androidx.lifecycle.ViewModelStore>()
+
+    fun storeFor(key: String): androidx.lifecycle.ViewModelStore =
+        stores.getOrPut(key) { androidx.lifecycle.ViewModelStore() }
+
+    fun drop(key: String) {
+        stores.remove(key)?.clear()
+    }
+
+    override fun onCleared() {
+        stores.values.forEach { it.clear() }
+        stores.clear()
+    }
+}
+
+private tailrec fun android.content.Context.findActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is android.content.ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 /**
  * One session page, with view models of its own that are cleared when the
  * page goes (it is not a navigation destination, so nothing else would).
@@ -284,12 +307,21 @@ private fun SessionSheetHost(
     onBack: () -> Unit,
     onOpenTab: (com.bb10d.remote.data.SessionTab) -> Unit,
 ) {
-    val owner = remember {
+    // The page's store lives in the activity's own (retained) view model, so
+    // a rotation-like recreation keeps the page's state, as a navigation
+    // entry would. It is cleared when the page really goes.
+    val stores: SheetStores = viewModel()
+    val activity = androidx.compose.ui.platform.LocalContext.current.findActivity()
+    val owner = remember(route.key) {
         object : androidx.lifecycle.ViewModelStoreOwner {
-            override val viewModelStore = androidx.lifecycle.ViewModelStore()
+            override val viewModelStore = stores.storeFor(route.key)
         }
     }
-    DisposableEffect(owner) { onDispose { owner.viewModelStore.clear() } }
+    DisposableEffect(route.key) {
+        onDispose {
+            if (activity?.isChangingConfigurations != true) stores.drop(route.key)
+        }
+    }
     val ref = SessionRef(route.profileId, route.sessionId)
     val factory = remember {
         viewModelFactory {

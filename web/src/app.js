@@ -849,6 +849,16 @@ function scheduleDraftSave() {
   draftTimer = setTimeout(flushDraft, 300);
 }
 
+/** The open session's id changed (a placeholder got its real id, a headless
+    resume forked): the text in the box follows it to the new key. */
+function rekeyDraft() {
+  const key = openDraftKey();
+  if (!draftFor || !key || key === draftFor) return;
+  writeDraft(draftFor, "");
+  draftFor = key;
+  writeDraft(key, $("prompt").value);
+}
+
 /** Put the open session's draft (or nothing) in the box. */
 function restoreDraft() {
   const prompt = $("prompt");
@@ -1819,6 +1829,7 @@ function finalizeSessionRows(collected) {
       if (!sid || isJobPlaceholder(sid)) continue;
       if (String(row.session.job_id || "") === jid) {
         state.open.sessionId = sid;
+        rekeyDraft();
         state.open.session = { ...state.open.session, ...row.session, id: sid };
         if (state.job && sessionIsJobPlaceholder(state.job.sessionId, jid)) {
           state.job.sessionId = sid;
@@ -5313,7 +5324,9 @@ async function send(text, { mode = "" } = {}) {
     // journal itself (≥ 2.5) — so it is exempt from the interactive-only
     // rule. The advertised-list check below still gates it (old daemons
     // don't list it).
-    if (!interactive && cmd !== "/rewind") {
+    // A line sent from the TUI face to start a terminal is interactive by
+    // definition, whatever the session has now.
+    if (!interactive && mode !== "interactive" && cmd !== "/rewind") {
       composerNote(profile.autoExec
         ? `${cmd} needs the session's terminal: send a line from TUI to start one`
         : `${cmd} needs interactive execution — headless turns cannot run commands`, true);
@@ -5325,10 +5338,13 @@ async function send(text, { mode = "" } = {}) {
     // command that harness would not understand.
     const known = slashOf(profile, sessionProvider(state.open && state.open.session, profile));
     if (!known.includes(cmd)) {
-      composerNote(known.length
+      const why = known.length
         ? `${cmd} is not available here — try: ${known.slice(0, 6).join(" ")}`
-        : "This daemon does not advertise any slash commands", true);
-      return;
+        : "This daemon does not advertise any slash commands";
+      composerNote(why, true);
+      // From the TUI face the composer's note is out of sight.
+      if (mode === "interactive") toast(why);
+      return false;
     }
   }
 
@@ -5373,6 +5389,9 @@ async function send(text, { mode = "" } = {}) {
     if (res && res.job_id && isOpenStill(openGen, openProfileId, openSessionId)) {
       noteSendMode(res.mode);
       attachJob(res.job_id, openSessionId);
+      // Known before the first poll, so a follow-up sent at once goes the
+      // same way as the turn it follows.
+      if (res.mode && state.job && state.job.id === res.job_id) state.job.mode = res.mode;
     }
   } catch (e) {
     appendLive({ role: "notice", text: e.message, severity: "error" }, paint);
@@ -5759,6 +5778,7 @@ async function pollJob() {
         || sessionIsJobPlaceholder(state.open.sessionId, job.id)
         || !job.sessionId)) {
     state.open.sessionId = snap.new_session_id;
+    rekeyDraft();
     if (state.open.session) state.open.session.id = snap.new_session_id;
     job.sessionId = snap.new_session_id;
     paintCtx.sessionId = snap.new_session_id;
@@ -8189,15 +8209,17 @@ function wire() {
     e.preventDefault();
     sendLiveTuiKeys(null, text);
   });
-  $("btn-live-tui-send")?.addEventListener("click", () => {
+  $("btn-live-tui-send")?.addEventListener("click", async () => {
     const input = $("live-tui-input");
     const text = (input?.value || "").trim();
     if (!text) return;
     const prof = state.open && profileById(state.open.profileId);
-    if (prof && prof.autoExec && !$("live-tui-status").classList.contains("live")) {
-      // No terminal for this session yet: the first line sent from here
-      // starts one (an interactive turn), and Chat shares it from then on.
-      send(text, { mode: "interactive" });
+    if (prof && prof.autoExec && state.open.hasTui === false) {
+      // The daemon says the session has no terminal (none yet, or gone):
+      // the line sent from here starts one (an interactive turn), and Chat
+      // shares it from then on. Merely not connected yet is not that.
+      const sent = await send(text, { mode: "interactive" });
+      if (sent === false) return;      // refused: the line stays to be fixed
     } else {
       // Full line into TUI (Enter included) via key path: text + Enter.
       sendLiveTuiKeys(["Enter"], text);

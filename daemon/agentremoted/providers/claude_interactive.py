@@ -221,8 +221,14 @@ def _bypass_warning(text: str) -> bool:
     with "No, exit" selected. It says "you accept all responsibility", so
     the daemon does not key past it: that answer is the host owner's.
     """
-    return bool(text) and "Bypass Permissions mode" in text \
-        and "Yes, I accept" in text
+    if not text:
+        return False
+    # The dialog itself, at the foot of the pane: both of its options and
+    # its title in the last screenful. A resumed transcript that merely
+    # quotes the screen scrolls by above an input box, and is not it.
+    tail = "\n".join([l for l in text.splitlines() if l.strip()][-24:])
+    return "Bypass Permissions mode" in tail and "Yes, I accept" in tail \
+        and "No, exit" in tail and not _claude_pane_ready(text)
 
 
 _BYPASS_WARNING_HELP = (
@@ -1729,6 +1735,7 @@ class InteractiveManager:
 
     def _run_watch(self, job, tui: _Tui, panel: dict, kind: str) -> None:
         """Answer the published panel from the phone, then close the job."""
+        mine = tui.hook_ask
         try:
             if kind == "ask" and panel.get("questions"):
                 self._answer_questions(job, tui, panel["questions"])
@@ -1750,8 +1757,10 @@ class InteractiveManager:
             if kind == "ask":
                 # Answered (on the phone or on the host) or cancelled: the
                 # hook's copy of it is history, and must not be published
-                # again for the next panel in this turn.
-                tui.hook_ask = None
+                # again for the next panel in this turn. Only this panel's,
+                # though: the hook may already have stored the next question.
+                if tui.hook_ask is mine:
+                    tui.hook_ask = None
             with job.lock:
                 job.status = "done"
             job.add_event("result", is_error=False, duration_ms=0, cost_usd=0)
@@ -1847,6 +1856,15 @@ class InteractiveManager:
             if live:
                 seen[0] = True
                 misses[0] = 0
+                return False
+            # The panel's other pages (typing an answer, the review page)
+            # have a different footer and are still the question: it is gone
+            # only once the input box is back under it.
+            try:
+                if not _claude_pane_ready(self._pane_text(tui.name)):
+                    misses[0] = 0
+                    return False
+            except Exception:
                 return False
             # Three readings in a row (about a second): one repaint between
             # two frames must not withdraw a question that is still open.

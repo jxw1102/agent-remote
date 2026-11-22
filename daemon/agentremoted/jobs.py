@@ -265,7 +265,7 @@ class Job:
                 "new_session_id": self.new_session_id,
                 "status": self.status,
                 # How this turn runs: in the session's terminal, or headless.
-                "mode": "interactive" if (self.permission_mode or "") == "interactive"
+                "mode": "interactive" if (self.watch or (self.permission_mode or "") == "interactive")
                 else "headless",
                 "error": self.error,
                 "result_text": self.result_text if self.status in ("done", "error") else "",
@@ -715,6 +715,10 @@ class JobManager:
         """
         job = self._chain_head(job_id)
         if job is None:
+            return None, "job not running"
+        if job.watch:
+            # A watch job only carries a question from an idle terminal; it
+            # never drains a queue, so a message left here would be lost.
             return None, "job not running"
         with job.lock:
             if job.status not in ("starting", "running"):

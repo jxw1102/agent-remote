@@ -312,8 +312,10 @@ fun LiveTuiPane(
         fun submitLine() {
             val t = line.trim()
             if (t.isEmpty()) return
-            // No terminal for the session yet: start one with this line.
-            if (onStartTerminal != null && !live && seq == 0L) onStartTerminal(t)
+            // The daemon says the session has no terminal (none yet, or the
+            // one it had is gone): start one with this line. Merely not
+            // connected yet is not that; then the line is keys, as ever.
+            if (onStartTerminal != null && view.detached) onStartTerminal(t)
             else sendKeys(listOf("Enter"), t)
             onLine("")
         }

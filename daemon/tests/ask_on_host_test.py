@@ -51,7 +51,8 @@ def manager(live):
     m._await_pane = lambda tui, needle, timeout: True
     m._ask_panel_live = lambda name: live()
     m._tmux = lambda *a, **k: m.keys.append(a[-1])
-    m._pane_text = lambda name: ""          # the panel closes after the pick
+    # The panel closes after the pick, and the input box is back under it.
+    m._pane_text = lambda name: "> \n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
     return m
 
 
@@ -128,6 +129,25 @@ state["live"] = False
 job.resolve_question(rid, [["B"]])
 t.join(5)
 check("a late answer to a closed panel types nothing", m.keys == [], m.keys)
+
+# 5. The panel's other pages (typing an answer, the review page) have another
+#    footer: the question is still open while the input box is not back.
+state = {"live": True}
+m = manager(lambda: state["live"])
+m._pane_text = lambda name: "  Type something\n  enter to submit\n"
+job = Job("j5", "s1", "", "/tmp")
+t = run(m, job)
+wait_pending(job, True)
+time.sleep(0.5)
+state["live"] = False
+time.sleep(2.0)
+check("another page of the panel does not withdraw the question",
+      bool(job.pending_question))
+rid = job.pending_question["request_id"] if job.pending_question else ""
+state["live"] = True
+if rid:
+    job.resolve_question(rid, None)
+t.join(5)
 
 print("FAILED: %d" % failed if failed else "all passed")
 sys.exit(1 if failed else 0)

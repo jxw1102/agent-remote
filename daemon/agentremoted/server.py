@@ -3709,6 +3709,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _job_mode(job) -> str:
+        if getattr(job, "watch", False):
+            return "interactive"    # a question from the session's terminal
         return "interactive" if (getattr(job, "permission_mode", "") or "") \
             == "interactive" else "headless"
 
