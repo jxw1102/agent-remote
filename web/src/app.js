@@ -2800,6 +2800,15 @@ document.addEventListener("click", (e) => {
 const BAR_COLLAPSE_MS = 5000;
 let barTimer = null;
 
+/** Does the session bar fold itself away here? On a phone, yes. Not in a
+    wide window, and not in an upright one with room to spare (at least
+    480 x 720): the open bar costs nothing there. */
+function barFolds() {
+  if (!isCompact()) return false;
+  const w = window.innerWidth, h = window.innerHeight;
+  return !(h > w && w >= 480 && h >= 720);
+}
+
 function expandBar() {
   const float = $("chat-float");
   if (!float) return;
@@ -2812,8 +2821,8 @@ function collapseBar() {
   const float = $("chat-float");
   if (!float || !state.open) return;
   // Phones only: a wide window has the room, and folding there would only
-  // take the title and the buttons away.
-  if (!isCompact()) return;
+  // take the title and the buttons away. So does a roomy upright one.
+  if (!barFolds()) return;
   if ($("chat-more")?.classList.contains("open") || float.matches(":hover")) {
     scheduleBarCollapse();
     return;
@@ -2873,7 +2882,11 @@ function wireBarCollapse() {
   $("live-tui-pane")?.addEventListener("scroll", onScroll, { passive: true });
   // A window made wide again has its bar back.
   compactQuery.addEventListener("change", () => { if (!isCompact()) expandBar(); });
-  window.addEventListener("resize", syncBarPieces);
+  window.addEventListener("resize", () => {
+    // Grown roomy while folded: the bar comes back.
+    if (!barFolds() && $("chat-float")?.classList.contains("collapsed")) expandBar();
+    else syncBarPieces();
+  });
   if (typeof ResizeObserver !== "undefined") {
     new ResizeObserver(syncBarPieces).observe(float.querySelector(".chat-actions"));
   }

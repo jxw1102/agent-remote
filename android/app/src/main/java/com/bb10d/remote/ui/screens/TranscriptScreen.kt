@@ -405,14 +405,21 @@ private fun TranscriptScreenBody(
     var barTick by remember { mutableIntStateOf(0) }
     // Phones only (the sheet): a tablet or a phone held sideways has the
     // room, and folding there would only take the title and buttons away.
-    LaunchedEffect(barOpen, barTick, menuOpen, sheet) {
-        if (barOpen && !menuOpen && sheet) {
+    // Nor does it fold on an upright screen with room to spare (at least
+    // 480 x 720 dp): the open bar costs nothing there.
+    val cfg = androidx.compose.ui.platform.LocalConfiguration.current
+    val roomy = cfg.screenHeightDp > cfg.screenWidthDp &&
+        cfg.screenWidthDp >= 480 && cfg.screenHeightDp >= 720
+    val folds = sheet && !roomy
+    LaunchedEffect(folds) { if (!folds) barOpen = true }
+    LaunchedEffect(barOpen, barTick, menuOpen, folds) {
+        if (barOpen && !menuOpen && folds) {
             delay(5000)
             barOpen = false
         }
     }
     val dragged by listState.interactionSource.collectIsDraggedAsState()
-    LaunchedEffect(dragged) { if (dragged && !menuOpen && sheet) barOpen = false }
+    LaunchedEffect(dragged) { if (dragged && !menuOpen && folds) barOpen = false }
 
     Scaffold(
         topBar = {
