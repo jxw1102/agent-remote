@@ -63,6 +63,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import uuid
@@ -134,6 +135,10 @@ _OLD_PREFIXES = ("cld-", "bb10i-")
 # The AskUserQuestion panel's footer, i.e. "the panel is still up". Used to
 # tell "submitted, panel gone" from "still waiting" after the last pick.
 _ASK_PANEL_MARKER = "to navigate"
+_ASK_PREVIEW_CAP = 4000
+# An option that has a preview is painted beside a box holding it, so its
+# row reads "1. Label        ┌────┐": everything from the gap on is the box.
+_ASK_SIDE_BOX_RE = re.compile(r"\s{2,}[\u2502\u250c\u2514\u256d\u2570\u2500].*$")
 
 # A permission dialog in the pane. bypassPermissions does NOT suppress these:
 # the static Bash guards (cd-compound-read/write/redirect, and commands whose
@@ -1559,7 +1564,7 @@ class InteractiveManager:
             num = int(m.group(1))
             if expect is not None and num != expect:
                 continue        # not this panel's sequence
-            found[num] = m.group(2).strip()
+            found[num] = _ASK_SIDE_BOX_RE.sub("", m.group(2)).strip()
             expect = num - 1
             top = i
             if num == 1:
@@ -1567,12 +1572,13 @@ class InteractiveManager:
         if len(found) < 2:
             return {}
         options = [found[n] for n in sorted(found)
-                   if found[n].lower() != "type something"]
+                   if found[n] and found[n].lower() != "type something"]
         if len(options) < 2:
             return {}
         # The tab strip above the question ("\u2190  \u2610 Header  \u2714 Submit  \u2192")
         # is chrome, not part of the ask.
-        context = [r for r in rows[max(0, top - 6):top]
+        context = [r for r in (_ASK_SIDE_BOX_RE.sub("", x)
+                              for x in rows[max(0, top - 6):top])
                    if r.strip()
                    and not r.startswith(("\u25cf", "\u2234", "\u2514", "\u2500"))
                    and not any(mark in r for mark in ("\u2610", "\u2714",
@@ -1631,6 +1637,17 @@ class InteractiveManager:
                 continue
             panel = self._ask_panel(pane)
             kind = "ask"
+            # The hook handed over the questions as the agent wrote them:
+            # every question, whole, with descriptions. What can be read
+            # back off the pane is a poor copy (the last two lines of the
+            # question, labels cut at 60, and a preview box drawn beside
+            # the options lands inside them), so it is only the fallback
+            # for a harness with no hook.
+            asked = self._ask_payload(tui.hook_ask) \
+                if tui.hook_ask and (panel or self._ask_panel_live(tui.name)) \
+                else []
+            if asked:
+                panel = {"questions": asked}
             if not panel:
                 panel = self._permission_panel(pane)
                 kind = "permission"
@@ -1653,7 +1670,9 @@ class InteractiveManager:
     def _run_watch(self, job, tui: _Tui, panel: dict, kind: str) -> None:
         """Answer the published panel from the phone, then close the job."""
         try:
-            if kind == "ask":
+            if kind == "ask" and panel.get("questions"):
+                self._answer_questions(job, tui, panel["questions"])
+            elif kind == "ask":
                 _qtext = panel.get("question") or ""
                 questions = [{
                     "question": _qtext,
@@ -1675,22 +1694,28 @@ class InteractiveManager:
                 if self._watched.get(tui.name) == job.id:
                     self._watched.pop(tui.name, None)
 
-    def _ask_seen(self, job, tool_input: dict, state: dict):
-        """Record an AskUserQuestion the transcript (or PreToolUse hook) showed.
-
-        Hook fires while the panel is open; the JSONL tool_use line is often
-        written only *after* the user answers. Without dedupe, that late
-        transcript line re-queues the same panel on the phone even though
-        Live TUI already applied the picks.
-        """
+    @staticmethod
+    def _ask_payload(raw) -> list:
+        """AskUserQuestion's own `questions` input as the clients' payload."""
         questions = []
-        for q in tool_input.get("questions") or []:
+        for q in raw or []:
             if not isinstance(q, dict):
                 continue
-            options = [{"label": str(o.get("label")),
-                        "description": str(o.get("description") or "")}
-                       for o in q.get("options") or []
-                       if isinstance(o, dict) and o.get("label")]
+            options = []
+            for o in q.get("options") or []:
+                if not isinstance(o, dict) or not o.get("label"):
+                    continue
+                row = {"label": str(o.get("label")),
+                       "description": str(o.get("description") or "")}
+                # A mock-up the agent drew for this option (plain text, laid
+                # out in a fixed-width font). Capped: it rides every poll.
+                # The shared left margin goes: on a phone it only pushes the
+                # drawing off the right edge.
+                preview = textwrap.dedent(
+                    str(o.get("preview") or "").expandtabs(4)).strip("\n").rstrip()
+                if preview.strip():
+                    row["preview"] = preview[:_ASK_PREVIEW_CAP]
+                options.append(row)
             if not options:
                 continue
             _qtext = str(q.get("question") or "")
@@ -1704,6 +1729,17 @@ class InteractiveManager:
                 "options": options,
                 "multi_select": bool(q.get("multiSelect") or q.get("multi_select")),
             })
+        return questions
+
+    def _ask_seen(self, job, tool_input: dict, state: dict):
+        """Record an AskUserQuestion the transcript (or PreToolUse hook) showed.
+
+        Hook fires while the panel is open; the JSONL tool_use line is often
+        written only *after* the user answers. Without dedupe, that late
+        transcript line re-queues the same panel on the phone even though
+        Live TUI already applied the picks.
+        """
+        questions = self._ask_payload(tool_input.get("questions"))
         if not questions:
             return
         fp = self._ask_fingerprint(questions)
@@ -1731,8 +1767,38 @@ class InteractiveManager:
         secs = float(getattr(self.config, "question_timeout", 0) or 0)
         timeout = secs if secs > 0 else None
         self._await_pane(tui, "Esc to cancel", 15.0)
-        answers = job.request_question(questions, timeout)
+        # The panel can be answered where it is, in the terminal or the
+        # Live TUI. Then the card on the phone is for nothing, and its keys
+        # would land in whatever the pane is doing by then: an Escape there
+        # interrupts a running turn, Down and Enter send a half-typed line.
+        seen = [False]
+        misses = [0]
+
+        def gone() -> bool:
+            try:
+                live = self._ask_panel_live(tui.name)
+            except Exception:
+                return False
+            if live:
+                seen[0] = True
+                misses[0] = 0
+                return False
+            # Three readings in a row (about a second): one repaint between
+            # two frames must not withdraw a question that is still open.
+            misses[0] += 1
+            return seen[0] and misses[0] >= 3
+
+        gone()
+        answers = job.request_question(questions, timeout, abort_when=gone)
         try:
+            # Checked more than once for the same reason as above: here a
+            # wrong "gone" would throw away the answer just given.
+            if seen[0] and not any(
+                    self._ask_panel_live(tui.name) or time.sleep(0.25)
+                    for _ in range(3)):
+                job.add_event("tool", name="AskUserQuestion",
+                              detail="answered on the host")
+                return
             if answers is None:
                 # Escape cancels the panel: the tool returns "cancelled" and
                 # the model carries on rather than blocking the TUI forever.

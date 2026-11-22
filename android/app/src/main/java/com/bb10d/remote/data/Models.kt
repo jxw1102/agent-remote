@@ -370,6 +370,8 @@ data class PendingPermissionDto(
 data class QuestionOptionDto(
     val label: String = "",
     val description: String = "",
+    /** A plain-text mock-up the agent drew for this option; fixed-width. */
+    val preview: String = "",
 )
 
 @Serializable

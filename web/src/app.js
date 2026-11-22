@@ -6344,9 +6344,10 @@ function renderGate({ focus = false } = {}) {
         b.setAttribute("aria-pressed", String(active));
         b.appendChild(el("span", "qmark",
           q.multi_select ? (active ? "[x]" : "[ ]") : (active ? "(o)" : "( )")));
-        const col = el("div");
+        const col = el("div", "qcol");
         col.appendChild(el("div", null, opt.label));
         if (opt.description) col.appendChild(el("div", "qdesc", opt.description));
+        if (opt.preview) col.appendChild(el("div", "qprev", opt.preview));
         b.appendChild(col);
         b.addEventListener("click", () => {
           if (q.multi_select) {
@@ -6491,9 +6492,10 @@ function showPlanModal(pending) {
           b.setAttribute("aria-pressed", String(active));
           b.appendChild(el("span", "qmark",
             q.multi_select ? (active ? "[x]" : "[ ]") : (active ? "(o)" : "( )")));
-          const col = el("div");
+          const col = el("div", "qcol");
           col.appendChild(el("div", null, opt.label));
           if (opt.description) col.appendChild(el("div", "qdesc", opt.description));
+          if (opt.preview) col.appendChild(el("div", "qprev", opt.preview));
           b.appendChild(col);
           b.addEventListener("click", () => {
             if (q.multi_select) {

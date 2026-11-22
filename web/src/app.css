@@ -1718,6 +1718,22 @@ button.pop-opt[aria-selected="true"] .pop-main::after { content: " ✓"; color: 
 .q-opt[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
 .q-opt .qmark { color: var(--accent); font-family: var(--mono); flex: none; }
 .q-opt .qdesc { color: var(--dim); font-size: 12px; }
+.q-opt .qcol { flex: 1 1 auto; min-width: 0; }
+/* A mock-up the agent drew for the option: fixed-width, spacing kept, and it
+   scrolls sideways by itself, never the card. */
+.q-opt .qprev {
+  margin-top: 6px;
+  padding: 6px 8px;
+  white-space: pre;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
 
 .toast {
   position: fixed;
