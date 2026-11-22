@@ -7,6 +7,8 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -326,4 +328,41 @@ fun connTint(state: com.bb10d.remote.data.ConnState?): Color = when (state) {
     com.bb10d.remote.data.ConnState.OFFLINE -> palette.danger
     com.bb10d.remote.data.ConnState.RECONNECTING -> palette.warn
     else -> palette.dim
+}
+
+
+/**
+ * A round button whose ripple is the button: it starts at the touch and
+ * fills the whole disc, to its edge. (Material's IconButton draws its own
+ * smaller state layer inside whatever background it is given.)
+ */
+@Composable
+fun CircleButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: androidx.compose.ui.unit.Dp = 40.dp,
+    enabled: Boolean = true,
+    color: Color = Color.Transparent,
+    selected: Boolean? = null,
+    content: @Composable () -> Unit,
+) {
+    androidx.compose.foundation.layout.Box(
+        modifier
+            .size(size)
+            .clip(androidx.compose.foundation.shape.CircleShape)
+            .background(color)
+            .then(
+                if (selected != null) Modifier.toggleable(
+                    value = selected,
+                    enabled = enabled,
+                    role = androidx.compose.ui.semantics.Role.Switch,
+                    onValueChange = { onClick() },
+                ) else Modifier.clickable(
+                    enabled = enabled,
+                    role = androidx.compose.ui.semantics.Role.Button,
+                    onClick = onClick,
+                ),
+            ),
+        contentAlignment = Alignment.Center,
+    ) { content() }
 }

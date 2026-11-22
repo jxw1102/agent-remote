@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.clickable
@@ -31,6 +32,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bb10d.remote.data.Time
 import com.bb10d.remote.ui.components.WorkingPulse
+import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
@@ -135,8 +137,9 @@ internal fun JumpToLatest(
     Row(
         modifier
             .heightIn(min = 40.dp)
+            .shadow(6.dp, shape)
             .clip(shape)
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .background(MaterialTheme.colorScheme.surface)
             .border(1.dp, if (unseen) accent else palette.hairline, shape)
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 16.dp),
@@ -196,11 +199,10 @@ private fun FaceSide(
     Box(
         Modifier
             .clip(shape)
-            .background(if (selected) accent.copy(alpha = 0.18f) else Color.Transparent)
+            .background(if (selected) accent.copy(alpha = 0.16f) else Color.Transparent)
             .selectable(selected = selected, role = Role.Tab, onClick = onClick)
             .semantics { contentDescription = label }
-            .heightIn(min = 36.dp)
-            .width(40.dp),
+            .size(40.dp),
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, contentDescription = null, tint = if (selected) accent else pal.dim,
@@ -244,9 +246,14 @@ internal fun BarCard(
     val split = 56.dp
     val outer = lerp(18.dp, 28.dp)
     val inner = lerp(0.dp, 28.dp)
-    Box(modifier.padding(vertical = lerp(0.dp, 4.dp))) {
+    androidx.compose.foundation.layout.BoxWithConstraints(modifier.padding(vertical = lerp(0.dp, 4.dp))) {
+        // Folded, Back's piece is the 48 dp circle of its button, so the
+        // button's ripple fills it.
         androidx.compose.material3.Surface(
-            modifier = Modifier.align(Alignment.CenterStart).width(split).fillMaxHeight(),
+            modifier = Modifier.align(Alignment.CenterStart)
+                .padding(start = lerp(0.dp, 4.dp))
+                .width(lerp(split, 48.dp))
+                .height(lerp(maxHeight, 48.dp)),
             shape = RoundedCornerShape(topStart = outer, bottomStart = outer, topEnd = inner, bottomEnd = inner),
             color = color,
             border = edge,

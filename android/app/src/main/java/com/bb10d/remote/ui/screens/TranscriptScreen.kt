@@ -95,6 +95,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import com.bb10d.remote.ui.components.connLabel
 import com.bb10d.remote.ui.components.connTint
+import com.bb10d.remote.ui.components.CircleButton
+import com.bb10d.remote.ui.components.stateTint
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -411,15 +413,6 @@ private fun TranscriptScreenBody(
     }
     val dragged by listState.interactionSource.collectIsDraggedAsState()
     LaunchedEffect(dragged) { if (dragged && !menuOpen && sheet) barOpen = false }
-    // Which session this is, said for a moment as its bar folds away.
-    var titleFlash by remember { mutableStateOf(false) }
-    LaunchedEffect(barOpen) {
-        if (!barOpen) {
-            titleFlash = true
-            delay(1800)
-        }
-        titleFlash = false
-    }
 
     Scaffold(
         topBar = {
@@ -432,7 +425,7 @@ private fun TranscriptScreenBody(
                     .statusBarsPadding()
                     .padding(
                         start = 10.dp, end = 10.dp, bottom = 4.dp,
-                        top = 6.dp,
+                        top = 8.dp,
                     ),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
@@ -440,20 +433,6 @@ private fun TranscriptScreenBody(
                 // its end (where the pill sits) and the pill's content fades
                 // in, and back.
                 Box(Modifier.fillMaxWidth()) {
-                androidx.compose.animation.AnimatedVisibility(
-                    visible = titleFlash,
-                    enter = fadeIn(tween(260)),
-                    exit = fadeOut(tween(260)),
-                    modifier = Modifier.align(Alignment.CenterStart).padding(start = 58.dp, end = 170.dp),
-                ) {
-                    Text(
-                        text = session?.title?.ifBlank { null } ?: "Session",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
                 // One bar in both states; only its card changes shape, and
                 // that change is animated. Open, the card is one rounded
                 // rectangle. Folded, it is two pieces: a circle round Back and
@@ -490,7 +469,9 @@ private fun TranscriptScreenBody(
                 TopAppBar(
                     windowInsets = WindowInsets(0, 0, 0, 0),
                     title = {
-                        Column(Modifier.alpha(1f - fold)) {
+                        // Gone the moment the bar starts to fold; it only fades
+                        // on the way back.
+                        Column(Modifier.alpha(if (barOpen) 1f - fold else 0f)) {
                             Text(
                                 text = session?.title?.ifBlank { null } ?: "Session",
                                 fontWeight = FontWeight.SemiBold,
@@ -524,7 +505,9 @@ private fun TranscriptScreenBody(
                     },
                     // Back to the list, at the start of the bar.
                     navigationIcon = {
-                        IconButton(onClick = onBack) {
+                        // 48 dp, the folded bar's circle exactly: the ripple
+                        // fills it.
+                        CircleButton(onClick = onBack, size = 48.dp) {
                             Icon(
                                 Icons.AutoMirrored.Outlined.ArrowBack,
                                 contentDescription = "Back to sessions",
@@ -663,12 +646,12 @@ private fun TranscriptScreenBody(
                     Text(
                         text = (if (tui.live) "\u25CF " else "") + tui.status,
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (tui.live) pal.ok else pal.dim,
+                        color = if (tui.live) stateTint("working") else pal.dim,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(pal.ok.copy(alpha = if (tui.live) 0.08f else 0f))
+                            .background(stateTint("working").copy(alpha = if (tui.live) 0.10f else 0f))
                             .padding(horizontal = 16.dp, vertical = 7.dp),
                     )
                 }
@@ -727,6 +710,8 @@ private fun TranscriptScreenBody(
                             onStop = vm::stop,
                             // No terminal yet: the first line sent starts one.
                             onStartTerminal = if (profile?.caps?.autoExec == true) vm::startTerminal else null,
+                            accentColor = accent.tint,
+                            onAccentColor = accent.onTint,
                             onTerminal = vm::terminalSeen,
                             topInset = topPad,
                         )
@@ -751,12 +736,18 @@ private fun TranscriptScreenBody(
 
                     else -> CompositionLocalProvider(
                         LocalHostLinkHandler provides vm::openHostFile,
-                    ) { LazyColumn(
+                    ) {
+                    val readSide = ((androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp - 840.dp) / 2)
+                        .coerceAtLeast(14.dp)
+                    LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
+                        // On a wide window (tablet, unfolded, a phone held
+                        // sideways) the text keeps a readable measure: the
+                        // column is 840 dp at most, centred.
                         contentPadding = PaddingValues(
-                            start = 14.dp,
-                            end = 14.dp,
+                            start = readSide,
+                            end = readSide,
                             top = topPad + 10.dp,
                             // 48 dp of air between the last row and the bar.
                             bottom = bottomPad + 48.dp,
@@ -805,7 +796,7 @@ private fun TranscriptScreenBody(
                         accent = accent.tint,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
-                            .padding(bottom = bottomPad + 10.dp),
+                            .padding(bottom = bottomPad + 8.dp),
                     ) {
                         scope.launch {
                             // Far away: go straight there. A smooth scroll

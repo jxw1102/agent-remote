@@ -1,5 +1,6 @@
 package com.bb10d.remote.ui.screens
 
+import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -105,8 +106,13 @@ fun LiveTuiPane(
     onStartTerminal: ((String) -> Unit)? = null,
     /** The terminal is there (true once a live frame has come). */
     onTerminal: (Boolean) -> Unit = {},
+    /** The session's accent, as on the chat's Send. */
+    accentColor: Color? = null,
+    onAccentColor: Color? = null,
 ) {
     val pal = palette
+    val accent = accentColor ?: pal.accent
+    val onAccent = onAccentColor ?: pal.onAccent
     // The stream and what it last showed are held by the app (TuiFeeds), so
     // leaving this page and coming back finds the pane already there.
     val feed = remember(ref.key) { repo.tuiFeeds.flowFor(ref) }
@@ -327,7 +333,7 @@ fun LiveTuiPane(
             if (keysShown) Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(start = 10.dp, end = 10.dp, top = 8.dp),
+                    .padding(start = 8.dp, end = 8.dp, top = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
@@ -356,22 +362,17 @@ fun LiveTuiPane(
             ) {
                 // The terminal keys toggle, at the start of the bar where the
                 // chat has its + (the same round button in the same place).
-                androidx.compose.material3.IconToggleButton(
-                    checked = keysShown,
-                    onCheckedChange = { on -> scope.launch { repo.settingsStore.setTuiKeys(on) } },
-                    modifier = Modifier
-                        .padding(bottom = 8.dp)
-                        .size(40.dp)
-                        .clip(androidx.compose.foundation.shape.CircleShape)
-                        .background(
-                            if (keysShown) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
-                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f),
-                        ),
+                com.bb10d.remote.ui.components.CircleButton(
+                    selected = keysShown,
+                    onClick = { scope.launch { repo.settingsStore.setTuiKeys(!keysShown) } },
+                    modifier = Modifier.padding(bottom = 8.dp),
+                    color = if (keysShown) accent.copy(alpha = 0.16f)
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f),
                 ) {
                     androidx.compose.material3.Icon(
                         androidx.compose.material.icons.Icons.Outlined.Keyboard,
                         contentDescription = if (keysShown) "Hide terminal keys" else "Show terminal keys",
-                        tint = if (keysShown) MaterialTheme.colorScheme.primary else pal.dim,
+                        tint = if (keysShown) accent else pal.dim,
                     )
                 }
                 // The chat's own field: no frame (the card is the frame),
@@ -396,10 +397,11 @@ fun LiveTuiPane(
                 )
                 // Stop keeps its slot, as in the chat's box, so Send never
                 // slides when a turn starts.
-                androidx.compose.material3.IconButton(
+                com.bb10d.remote.ui.components.CircleButton(
                     onClick = onStop,
                     enabled = running,
-                    modifier = Modifier.padding(bottom = 4.dp),   // level with Send
+                    modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 8.dp),   // level with Send
+                    color = if (running) pal.danger.copy(alpha = 0.10f) else Color.Transparent,
                 ) {
                     androidx.compose.material3.Icon(
                         androidx.compose.material.icons.Icons.Outlined.Stop,
@@ -408,22 +410,17 @@ fun LiveTuiPane(
                     )
                 }
                 val canSend = line.isNotBlank()
-                androidx.compose.material3.IconButton(
+                com.bb10d.remote.ui.components.CircleButton(
                     onClick = { submitLine() },
                     enabled = canSend,
-                    modifier = Modifier
-                        .padding(bottom = 7.dp)
-                        .size(42.dp)
-                        .clip(androidx.compose.foundation.shape.CircleShape)
-                        .background(
-                            if (canSend) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f),
-                        ),
+                    modifier = Modifier.padding(bottom = 8.dp),
+                    color = if (canSend) accent
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f),
                 ) {
                     androidx.compose.material3.Icon(
-                        androidx.compose.material.icons.Icons.AutoMirrored.Outlined.Send,
+                        androidx.compose.material.icons.Icons.Outlined.ArrowUpward,
                         contentDescription = "Send the line",
-                        tint = if (canSend) MaterialTheme.colorScheme.onPrimary else pal.dim,
+                        tint = if (canSend) onAccent else pal.dim,
                     )
                 }
             }

@@ -84,6 +84,7 @@ import com.bb10d.remote.data.SessionRef
 import com.bb10d.remote.data.SessionTab
 import com.bb10d.remote.ui.components.WorkingPulse
 import com.bb10d.remote.ui.components.stateTint
+import com.bb10d.remote.ui.components.connTint
 import com.bb10d.remote.ui.theme.Accent
 import com.bb10d.remote.ui.theme.palette
 import kotlin.math.roundToInt
@@ -277,9 +278,10 @@ private fun TabStrip(
                 else Modifier,
             )
             .verticalScroll(scroll, reverseScrolling = true)
-            // End padding: the bubbles' centres sit over Send's (the bar's
-            // 10 dp inset, its row's 8 dp, half of Send's 42 dp).
-            .padding(start = 16.dp, top = 20.dp, end = 14.dp, bottom = 32.dp),
+            // End padding: the bubbles' centres sit over Send's and More's
+            // (the bar's 10 dp inset, its row's 8 dp, half of Send's 40 dp:
+            // 38 dp from the edge, less half the open bubble's 50 dp).
+            .padding(start = 16.dp, top = 20.dp, end = 13.dp, bottom = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -326,7 +328,7 @@ private fun TabBubble(
             Box(
                 Modifier
                     .size(size)
-                    .shadow(if (active) 8.dp else 4.dp, CircleShape)
+                    .shadow(if (active) 6.dp else 4.dp, CircleShape)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.surfaceContainerHigh)
                     .background(tint.copy(alpha = if (active) 0.32f else 0.16f))
@@ -345,7 +347,7 @@ private fun TabBubble(
             ) {
                 Text(
                     tabInitials(tab.title),
-                    fontSize = 14.sp,
+                    style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
@@ -356,20 +358,25 @@ private fun TabBubble(
             // replaces the live strip under the session bar.
             val live = conn[tab.profileId] == com.bb10d.remote.data.ConnState.LIVE
             when {
-                tab.ref.key in blocked -> Box(
+                tab.ref.key in blocked -> { val needs = stateTint("needs_answer"); Box(
                     Modifier
                         .align(Alignment.TopEnd)
                         .size(17.dp)
                         .clip(CircleShape)
-                        .background(stateTint("needs_answer")),
+                        .background(needs),
                     contentAlignment = Alignment.Center,
-                ) { Text("?", fontSize = 11.sp, fontWeight = FontWeight.Black, color = Color.Black) }
+                ) {
+                    // Readable on either theme's amber.
+                    Text("?", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Black,
+                        color = if (needs.luminance() > 0.5f) Color.Black else Color.White)
+                } }
                 !live -> Box(
                     Modifier
                         .align(Alignment.TopEnd)
                         .size(12.dp)
                         .clip(CircleShape)
-                        .background(pal.dim),
+                        // Offline and reconnecting read apart, as in the bar.
+                        .background(connTint(conn[tab.profileId])),
                 )
                 tab.ref.key in working -> WorkingPulse(
                     stateTint("working"),
@@ -392,7 +399,7 @@ private fun TabBubble(
                     .background(MaterialTheme.colorScheme.surfaceContainerHighest)
                     .padding(horizontal = 6.dp, vertical = 1.dp),
             ) {
-                Text(count.toString(), fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                Text(count.toString(), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface)
             }
             if (active && showClose) {

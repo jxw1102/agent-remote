@@ -2799,7 +2799,6 @@ function collapseBar() {
   }
   float.classList.add("collapsed");
   syncBarPieces();
-  flashTitle();
 }
 
 /**
@@ -2827,17 +2826,6 @@ function syncBarPieces() {
   const left = first && first.offsetWidth ? first.getBoundingClientRect().left : ar.left;
   head.style.setProperty("--al", Math.max(0, left - hr.left - pad - 2) + "px");
   head.style.setProperty("--ar", Math.max(0, hr.right - ar.right - pad) + "px");
-}
-
-/** Which session this is, said for a moment as its bar folds away. */
-let titleFlashTimer = null;
-function flashTitle() {
-  const box = $("title-flash");
-  if (!box || !state.open) return;
-  box.textContent = $("chat-title").textContent || "";
-  box.classList.add("show");
-  clearTimeout(titleFlashTimer);
-  titleFlashTimer = setTimeout(() => box.classList.remove("show"), 1800);
 }
 
 function scheduleBarCollapse() {
@@ -5243,7 +5231,7 @@ function slashKeydown(e) {
   return true;
 }
 
-const SEND_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l16-8-6 16-2.5-6.5z"/><path d="M11.5 13.5L20 4"/></svg>';
+const SEND_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>';
 const SEND_ICON_QUEUE = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h11M4 12h11M4 18h7"/><path d="M17 15l3 3-3 3"/><path d="M14 18h6"/></svg>';
 
 /** Send says what it will do: a headless turn in progress queues the message. */

@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -310,7 +311,7 @@ fun NewSessionScreen(
                     if (starting) {
                         CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                     } else {
-                        Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = null)
+                        Icon(Icons.Outlined.ArrowUpward, contentDescription = null)
                     }
                     Spacer(Modifier.width(8.dp))
                     Text("Start")

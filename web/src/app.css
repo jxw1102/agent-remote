@@ -2579,7 +2579,8 @@ button.tui-keys-toggle svg { width: 20px; height: 20px; }
   .chat-float.collapsed .back-btn,
   .chat-float.collapsed .chat-actions { pointer-events: auto; }
 }
-.chat-float.collapsed .chat-title { opacity: 0; pointer-events: none; }
+/* Gone the moment the bar starts to fold; it only fades on the way back. */
+.chat-float.collapsed .chat-title { opacity: 0; pointer-events: none; transition: none; }
 .chat-float.collapsed .banner,
 .chat-float.collapsed .chat-more:not(.open),
 .chat-float.collapsed .icon-btn.icon-idle { display: none !important; }
@@ -2635,27 +2636,6 @@ button.tui-keys-toggle svg { width: 20px; height: 20px; }
 
 .chat-float.collapsed .face-switch.icon-idle { display: none !important; }
 
-/* Which session this is, for a moment as its bar folds: under the pill's
-   line, centred, then gone. */
-.title-flash {
-  position: absolute;
-  top: calc(env(safe-area-inset-top, 0px) + 22px);
-  left: 66px;        /* between the back button and the pill */
-  right: 170px;
-  z-index: 6;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-  text-shadow: 0 1px 6px var(--bg), 0 0 12px var(--bg);
-  opacity: 0;
-  transform: translateY(-4px);
-  transition: opacity 260ms ease, transform 260ms ease;
-  pointer-events: none;
-}
-.title-flash.show { opacity: 1; transform: none; }
 
 /* Soft fades where the page runs under the floating pieces, so the text
    does not collide with them: the top of the page under the bar (shorter
@@ -2810,7 +2790,6 @@ button.stop-btn.icon-idle { display: none !important; }
   .app.show-chat > .tabstrip { pointer-events: none; }
   .app.show-chat > .tabstrip > * { pointer-events: auto; }
 }
-}
 
 /* The tab bubble is translucent while it is not in use, so the text under
    it shows through; fanned out, touched, hovered or focused it is solid.
@@ -2837,3 +2816,156 @@ button.stop-btn.icon-idle { display: none !important; }
    the pill is the frame. */
 .chips-pill .cchip { background: none; border-color: transparent; }
 .chips-pill .cchip:hover:not(:disabled) { border-color: transparent; background: color-mix(in srgb, var(--text) 7%, transparent); }
+
+/* ---- One look for the session page's floating pieces -------------------
+   Sizes, corners, fills, rings, shadows and press feedback had drifted as
+   the pieces were added one by one. These are the shared values. */
+:root {
+  --float-radius: 18px;
+  --float-bg: color-mix(in srgb, var(--surface) 82%, transparent);
+  --float-ring: color-mix(in srgb, var(--line) 80%, transparent);
+  --float-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  --float-shadow-sm: 0 6px 20px rgba(0, 0, 0, 0.35);
+  --float-blur: blur(16px) saturate(1.3);
+}
+
+/* Round buttons in the bottom bar: 40 px, whichever face is showing. Stop
+   was 40 x 44 on touch, so the card grew when a turn started. */
+.composer #btn-attach,
+.live-tui-line button.tui-keys-toggle,
+button.stop-btn {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+}
+button.stop-btn,
+button.stop-btn.icon-btn.danger {
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.live-tui-line { gap: 6px; }
+
+/* The terminal's text line is typed in like the message box: 16 px on
+   touch (smaller, and iOS zooms the page on focus). */
+@media (pointer: coarse) {
+  .live-tui-line input { font-size: 16px; line-height: 1.4; }
+}
+
+/* Cards: the same corner, fill, ring and shadow. */
+.gate { border-radius: var(--float-radius); }
+.gate {
+  border-color: color-mix(in srgb, var(--st-needs) 55%, transparent);
+  background: color-mix(in srgb, var(--st-needs) 9%, var(--surface));
+}
+.pulse-ask { color: var(--st-needs); }
+.live-tui-status.live::before { color: var(--st-working); }
+.chips-pill { background: color-mix(in srgb, var(--surface) 86%, transparent); box-shadow: var(--float-shadow-sm); }
+@media (max-width: 720px), (max-height: 520px) {
+  .chat-head::before,
+  .chat-head::after {
+    background: var(--float-bg);
+    box-shadow: 0 0 0 1px var(--float-ring), var(--float-shadow);
+  }
+  .chat-head::before { border-radius: var(--float-radius) 0 0 var(--float-radius); }
+  .chat-head::after { border-radius: 0 var(--float-radius) var(--float-radius) 0; }
+  .chat-float.collapsed .chat-head::before,
+  .chat-float.collapsed .chat-head::after { border-radius: 26px; }
+  .live-tui::before {
+    -webkit-backdrop-filter: var(--float-blur);
+    backdrop-filter: var(--float-blur);
+  }
+  .live-tui-status {
+    left: calc(8px + env(safe-area-inset-left, 0px));
+    border-color: var(--float-ring);
+    background: var(--float-bg);
+    -webkit-backdrop-filter: var(--float-blur);
+    backdrop-filter: var(--float-blur);
+  }
+  /* Chat and TUI put their controls on the same pixels: the composer has a
+     1 px border the terminal's line does not. */
+  .live-tui-line { padding: 2px 11px 9px; }
+  /* A phone held sideways: the floating bars keep clear of the notch, as
+     the terminal's card and the tabs already do. */
+  .chat-float {
+    right: calc(8px + env(safe-area-inset-right, 0px));
+    width: calc(100% - 16px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+  }
+  .chat-bottom {
+    left: calc(8px + env(safe-area-inset-left, 0px));
+    right: calc(8px + env(safe-area-inset-right, 0px));
+  }
+}
+
+/* The Chat | TUI switch in the bar: no frame of its own (the bar is the
+   frame), and as tall a target as its neighbours. */
+.chat-head .face-switch {
+  border: 0;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+@media (pointer: coarse) {
+  .chat-head .face-switch button { min-width: 40px; min-height: 40px; }
+}
+
+/* The open chip in the pill says so (its outline is gone). */
+.chips-pill .cchip[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent); }
+
+/* A tab keeps its own colour under the pointer. */
+button.tab-bubble:hover:not(:disabled) { border-color: color-mix(in srgb, var(--tab) 55%, transparent); }
+button.tab-bubble[aria-current="true"]:hover:not(:disabled) { border-color: var(--tab); }
+.tab-ask { color: var(--bg); }
+
+/* Press feedback: the same on every control of the page, in place of the
+   browser's grey tap flash. */
+.chat-head .icon-btn,
+.face-switch button,
+.composer #btn-attach,
+.tui-keys-toggle,
+.send-btn,
+.stop-btn,
+.live-tui-keys button,
+.tui-capture,
+.cchip,
+.tab-bubble,
+.tab-close,
+.jump-latest {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  transition: background-color 120ms ease, color 120ms ease, transform 120ms ease, filter 120ms ease;
+}
+.chat-head .icon-btn:active:not(:disabled),
+.face-switch button:active:not(:disabled),
+.composer #btn-attach:active:not(:disabled),
+.tui-keys-toggle:active:not(:disabled),
+.live-tui-keys button:active:not(:disabled),
+.tui-capture:active:not(:disabled),
+.cchip:active:not(:disabled) {
+  transform: scale(0.94);
+  background-color: color-mix(in srgb, var(--text) 12%, transparent);
+}
+.send-btn:active:not(:disabled),
+.stop-btn:active:not(:disabled),
+.tab-bubble:active:not(:disabled),
+.tab-close:active:not(:disabled),
+.jump-latest:active:not(:disabled) {
+  transform: scale(0.94);
+  filter: brightness(0.9);
+}
+.chat-head .icon-btn:focus-visible,
+.face-switch button:focus-visible,
+.composer #btn-attach:focus-visible,
+.tui-keys-toggle:focus-visible,
+.send-btn:focus-visible,
+.stop-btn:focus-visible,
+.live-tui-keys button:focus-visible,
+.cchip:focus-visible,
+.tab-bubble:focus-visible,
+.tab-close:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 2px;
+}
+/* A hover that sticks after a tap is not a hover. */
+@media (hover: none) {
+  .composer #btn-attach:hover,
+  .tui-keys-toggle:hover { color: inherit; }
+}

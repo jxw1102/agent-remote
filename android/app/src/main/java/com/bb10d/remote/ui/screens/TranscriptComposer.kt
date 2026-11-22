@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Add
@@ -34,6 +35,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import com.bb10d.remote.ui.components.CircleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
@@ -164,13 +166,10 @@ internal fun Composer(
             Modifier.padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 4.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
-            IconButton(
+            CircleButton(
                 onClick = onAttach,
-                modifier = Modifier
-                    .padding(bottom = 8.dp)
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f)),
+                modifier = Modifier.padding(bottom = 8.dp),
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f),
             ) {
                 Icon(Icons.Outlined.Add, contentDescription = "Attach a file", tint = pal.dim)
             }
@@ -210,10 +209,11 @@ internal fun Composer(
             )
             // Always reserve the Stop slot so Send never slides when a turn
             // starts — same mis-click class as web Live TUI vs Stop.
-            IconButton(
+            CircleButton(
                 onClick = onStop,
                 enabled = running,
-                modifier = Modifier.padding(bottom = 4.dp),   // level with Send
+                modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 8.dp),   // level with Send
+                color = if (running) pal.danger.copy(alpha = 0.10f) else Color.Transparent,
             ) {
                 Icon(
                     Icons.Outlined.Stop,
@@ -221,20 +221,17 @@ internal fun Composer(
                     tint = if (running) pal.danger else Color.Transparent,
                 )
             }
-            IconButton(
+            CircleButton(
                 onClick = onSend,
                 enabled = canSend,
-                modifier = Modifier
-                    .padding(bottom = 7.dp)
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(if (canSend) accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f)),
+                modifier = Modifier.padding(bottom = 8.dp),
+                color = if (canSend) accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f),
             ) {
                 // Says what it will do: while a headless turn runs, the
                 // message waits its turn on the daemon.
                 Icon(
                     if (queues) Icons.AutoMirrored.Outlined.PlaylistAdd
-                    else Icons.AutoMirrored.Outlined.Send,
+                    else Icons.Outlined.ArrowUpward,
                     contentDescription = if (queues) "Queue after this turn" else "Send",
                     tint = if (canSend) onAccent else pal.dim,
                 )
