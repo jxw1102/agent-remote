@@ -1065,6 +1065,16 @@ function stamp(ms) {
   }
   return d.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
 }
+/** How long ago, for the session list: "just now", "5m ago", "2h ago"
+    within the last 24 hours; the date beyond. */
+function agoStamp(ms) {
+  if (!ms) return "";
+  const mins = Math.floor((Date.now() - ms) / 60000);
+  if (mins < 0 || mins >= 24 * 60) return stamp(ms);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m ago";
+  return Math.floor(mins / 60) + "h ago";
+}
 function dayLabel(ms) {
   if (!ms) return "Older";
   const d = new Date(ms), now = new Date();
@@ -2460,8 +2470,8 @@ function renderSessions() {
       btn.appendChild(done);
     }
 
-    // Four lines: how it is and when (state, time), what it is (the title),
-    // what was last said, and where it runs (folder, branch, daemon).
+    // Four lines: how it is, when and on which daemon, what it is (the
+    // title), what was last said, and where it runs (folder, branch).
     const meta = el("div", "row-meta");
     // Host chip in this session's harness colour (Mbp+Grok → cyan, not multi purple).
     // No separate Grok/Claude/Codex tag — host colour already implies harness.
@@ -2495,7 +2505,9 @@ function renderSessions() {
         + (unread ? " — you have not opened it since" : "");
       meta.appendChild(tag);
     }
-    meta.appendChild(el("span", "row-when", stamp(row.sortKey)));
+    // When, right after the state; which daemon, at the line's end.
+    meta.appendChild(el("span", "row-when", agoStamp(row.sortKey)));
+    meta.appendChild(hostTag);
     btn.appendChild(meta);
     btn.appendChild(el("div", "row-title", listTitle(row.session)));
 
@@ -2514,8 +2526,7 @@ function renderSessions() {
       btn.appendChild(box);
     }
 
-    // The last line: where it runs. Folder and branch, with the daemon's
-    // label at the end.
+    // The last line: where it runs, folder and branch.
     const place = el("div", "row-place");
     const folder = String(row.session.cwd || "").replace(/\/+$/, "").split("/").pop();
     if (folder) {
@@ -2528,7 +2539,6 @@ function renderSessions() {
       br.title = "Branch " + row.session.git_branch;
       place.appendChild(br);
     }
-    place.appendChild(hostTag);
     btn.appendChild(place);
 
     btn.addEventListener("click", () => openSession(btn._row));

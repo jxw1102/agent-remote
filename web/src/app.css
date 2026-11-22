@@ -2969,3 +2969,8 @@ button.tab-bubble[aria-current="true"]:hover:not(:disabled) { border-color: var(
   .composer #btn-attach:hover,
   .tui-keys-toggle:hover { color: inherit; }
 }
+
+/* The session row: state, then the time, with the daemon's label at the
+   line's end; the last line is the folder and branch. */
+.row-meta > .tag.host { margin-left: auto; max-width: 40%; }
+.row-meta > .row-when { margin-left: 0; }

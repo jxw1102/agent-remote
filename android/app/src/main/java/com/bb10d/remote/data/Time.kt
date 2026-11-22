@@ -43,6 +43,22 @@ object Time {
         }
     }
 
+    /**
+     * How long ago, for the session list: "just now", "5m ago", "2h ago"
+     * within the last 24 hours; the date beyond ("28 Jul").
+     */
+    fun agoStamp(epochMs: Long, nowMs: Long = System.currentTimeMillis()): String {
+        if (epochMs <= 0) return ""
+        val mins = (nowMs - epochMs) / 60_000
+        return when {
+            mins < 0 -> relativeStamp(epochMs, nowMs)
+            mins < 1 -> "just now"
+            mins < 60 -> "${mins}m ago"
+            mins < 24 * 60 -> "${mins / 60}h ago"
+            else -> relativeStamp(epochMs, nowMs)
+        }
+    }
+
     fun fullStamp(epochMs: Long): String =
         if (epochMs <= 0) "" else Instant.ofEpochMilli(epochMs).atZone(zone).format(fullFmt)
 

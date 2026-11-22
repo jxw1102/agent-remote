@@ -925,9 +925,9 @@ private fun SessionCard(
             }
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
-        // Four lines, as on the web: how it is and when (state, time), what it
-        // is (the title), what was last said, and where it runs (folder,
-        // branch, daemon). The session id is not shown; long-press the row
+        // Four lines, as on the web: how it is, when and on which daemon,
+        // what it is (the title), what was last said, and where it runs
+        // (folder, branch). The session id is not shown; long-press the row
         // to copy it.
         Row(verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
@@ -952,14 +952,21 @@ private fun SessionCard(
                             row.session.focusState == "working",
                     )
                 }
+                // When, right after the state (or first, with no state).
+                if (blocked || working || (showFocusState && focusState.isNotEmpty())) {
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    text = Time.agoStamp(row.sortKey),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = pal.dim,
+                    maxLines = 1,
+                )
             }
             Spacer(Modifier.width(8.dp))
-            Text(
-                text = Time.relativeStamp(row.sortKey),
-                style = MaterialTheme.typography.labelSmall,
-                color = pal.dim,
-                maxLines = 1,
-            )
+            // Which daemon, at the line's end. No dot in it: the state has
+            // the row's only dot.
+            ProviderChip(row.provider, row.profileName, Modifier.widthIn(max = 132.dp), dot = false)
         }
 
         Spacer(Modifier.height(4.dp))
@@ -987,8 +994,7 @@ private fun SessionCard(
             )
         }
 
-        // The last line: where it runs. Folder and branch, with the daemon's
-        // label at the end.
+        // The last line: where it runs, folder and branch.
         Spacer(Modifier.height(5.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
@@ -1016,9 +1022,6 @@ private fun SessionCard(
                 )
             }
             }
-            Spacer(Modifier.width(8.dp))
-            // No dot in it: the state has the row's only dot.
-            ProviderChip(row.provider, row.profileName, Modifier.widthIn(max = 132.dp), dot = false)
         }
     }
 }
