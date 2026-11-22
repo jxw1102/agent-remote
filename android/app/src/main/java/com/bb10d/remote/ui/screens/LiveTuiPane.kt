@@ -82,7 +82,11 @@ private const val HISTORY_MAX = 20000
 private data class TuiHistory(
     val text: String = "",
     val lines: Int = 0,
+    /** The history size up to which the bottom of [text] is complete. */
     val total: Int = 0,
+    /** The daemon's cursor for the next older page (`before`, `at`). */
+    val next: Int = 0,
+    val at: Int = 0,
     val more: Boolean = true,
     val loading: Boolean = false,
     /** Just prepended: the next size change shifts the scroll to match. */
@@ -157,76 +161,127 @@ fun LiveTuiPane(
     // One request carries one page, never the whole history again. `older`
     // asks for the page before what is shown and puts it on top; otherwise
     // it asks for what has scrolled off the screen since, and joins it below.
+    // [0]: a refresh met a page in flight and is owed.
+    val histOwed = remember(ref.key) { booleanArrayOf(false) }
+    // [0]: when the history was last found empty (asked again, not at once).
+    val histEmptyAt = remember(ref.key) { longArrayOf(0L) }
     fun loadHistory(older: Boolean) {
-        if (history.loading) return
+        if (history.loading) {
+            if (!older) histOwed[0] = true
+            return
+        }
         val had = history
         history = had.copy(loading = true)
         scope.launch {
             val client = repo.client(ref.profileId)
             val got = client?.let {
                 runCatching {
-                    if (older && had.lines > 0) it.tuiHistory(ref.sessionId, HISTORY_PAGE, had.lines, had.total)
+                    if (older && had.lines > 0) it.tuiHistory(ref.sessionId, HISTORY_PAGE, had.next, had.at)
                     else it.tuiHistory(ref.sessionId, HISTORY_PAGE)
                 }.getOrNull()
             }
-            history = if (got == null || !got.attached) history.copy(loading = false, more = false)
-            else {
-                val rows = if (got.text.isEmpty()) emptyList() else got.text.split('\n')
-                if (older) {
-                    // What scrolled in since the last reply sits between this
-                    // page and the screen (the daemon skipped it); the
-                    // refresh fetches it.
-                    val lines = had.lines + rows.size
-                    had.copy(
-                        text = when {
-                            rows.isEmpty() -> had.text
-                            had.text.isEmpty() -> rows.joinToString("\n")
-                            else -> rows.joinToString("\n") + "\n" + had.text
-                        },
-                        lines = lines,
-                        total = if (had.total == 0) got.history else had.total,
-                        more = got.more && lines < HISTORY_MAX,
-                        loading = false,
-                        anchor = rows.isNotEmpty(),
+            var again = false
+            history = when {
+                // A request that failed says nothing about the history: the
+                // next trip to the top asks again.
+                got == null -> had.copy(loading = false, anchor = false)
+                !got.attached -> had.copy(loading = false, more = false, anchor = false)
+                else -> {
+                    val rows = if (got.text.isEmpty()) emptyList() else got.text.split('\n')
+                    // The newest page is all there is to trust: older pages
+                    // load again on demand.
+                    fun startOver() = TuiHistory(
+                        text = rows.joinToString("\n"),
+                        lines = rows.size,
+                        total = got.history,
+                        next = if (got.next > 0) got.next else rows.size,
+                        at = got.history,
+                        more = got.more,
                     )
-                } else {
-                    val grown = got.history - had.total
                     when {
-                        grown in 1..rows.size -> {
-                            val add = rows.takeLast(grown)
+                        older && had.lines == 0 -> {
+                            // Nothing has scrolled off yet: not the end of
+                            // it, just not begun.
+                            if (got.history == 0) {
+                                histEmptyAt[0] = System.currentTimeMillis()
+                                startOver().copy(more = true)
+                            } else startOver().copy(anchor = rows.isNotEmpty())
+                        }
+                        // History got shorter (tmux trimmed it, or it was
+                        // cleared): what is shown no longer lines up.
+                        older && (got.reset || got.history < had.at) -> startOver()
+                        older -> {
+                            // What scrolled in since the last refresh sits
+                            // between this page and the screen (the daemon
+                            // skipped it); the refresh fetches it.
+                            val lines = had.lines + rows.size
+                            again = got.history > had.total
                             had.copy(
-                                text = if (had.text.isEmpty()) add.joinToString("\n")
-                                else had.text + "\n" + add.joinToString("\n"),
-                                lines = had.lines + add.size,
-                                total = got.history,
+                                text = when {
+                                    rows.isEmpty() -> had.text
+                                    had.text.isEmpty() -> rows.joinToString("\n")
+                                    else -> rows.joinToString("\n") + "\n" + had.text
+                                },
+                                lines = lines,
+                                next = got.next,
+                                at = got.history,
+                                more = got.more && lines < HISTORY_MAX,
                                 loading = false,
-                                anchor = false,
+                                anchor = rows.isNotEmpty(),
                             )
                         }
-                        // More than a page scrolled off at once: start again
-                        // from this newest page rather than show a gap.
-                        grown > rows.size -> TuiHistory(
-                            text = rows.joinToString("\n"),
-                            lines = rows.size,
-                            total = got.history,
-                            more = got.more,
-                        )
-                        else -> had.copy(total = got.history, loading = false, anchor = false)
+                        else -> {
+                            val grown = got.history - had.total
+                            when {
+                                // Shorter than it was, or more than a page
+                                // scrolled off at once: start again rather
+                                // than show a gap.
+                                grown < 0 || grown > rows.size -> startOver()
+                                grown > 0 -> {
+                                    val add = rows.takeLast(grown)
+                                    var text = if (had.text.isEmpty()) add.joinToString("\n")
+                                    else had.text + "\n" + add.joinToString("\n")
+                                    var lines = had.lines + add.size
+                                    var more = had.more
+                                    if (lines > HISTORY_MAX) {
+                                        // Kept to its bound: the oldest go.
+                                        text = text.split('\n').takeLast(HISTORY_MAX).joinToString("\n")
+                                        lines = HISTORY_MAX
+                                        more = false
+                                    }
+                                    had.copy(text = text, lines = lines, total = got.history,
+                                        more = more, loading = false, anchor = false)
+                                }
+                                else -> had.copy(loading = false, anchor = false)
+                            }
+                        }
                     }
                 }
+            }
+            if ((again || histOwed[0]) && history.lines > 0) {
+                histOwed[0] = false
+                loadHistory(older = false)
             }
         }
     }
     val atTop by remember { androidx.compose.runtime.derivedStateOf { scroll.value <= 4 } }
     LaunchedEffect(atTop, seq, canHistory) {
-        if (atTop && canHistory && seq > 0L && history.more && !history.loading) {
+        // An empty history is asked about again, but not on every frame.
+        val waitEmpty = history.lines == 0 &&
+            System.currentTimeMillis() - histEmptyAt[0] < 3000
+        if (atTop && canHistory && seq > 0L && history.more && !history.loading && !waitEmpty) {
             loadHistory(older = true)
         }
     }
     // While scrollback is shown, new output scrolling off the screen joins it.
+    // Once in 1.2 s at most, and not put off by each new frame: a terminal
+    // that keeps printing would otherwise never be refreshed at all.
+    val histRefreshedAt = remember(ref.key) { longArrayOf(0L) }
     LaunchedEffect(seq) {
         if (history.lines == 0 || !canHistory) return@LaunchedEffect
-        delay(1200)
+        val since = System.currentTimeMillis() - histRefreshedAt[0]
+        if (since < 1200) delay(1200 - since)
+        histRefreshedAt[0] = System.currentTimeMillis()
         loadHistory(older = false)
     }
     val density = androidx.compose.ui.platform.LocalDensity.current

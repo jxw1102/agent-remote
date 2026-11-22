@@ -551,6 +551,10 @@ data class TuiHistoryDto(
     /** All the scrollback tmux holds for the pane. */
     val history: Int = 0,
     val more: Boolean = false,
+    /** The `before` for the page after this one. */
+    val next: Int = 0,
+    /** The history got shorter than `at`: this is the newest page; start over. */
+    val reset: Boolean = false,
 )
 
 @Serializable

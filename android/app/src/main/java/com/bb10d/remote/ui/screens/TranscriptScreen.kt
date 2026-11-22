@@ -429,6 +429,9 @@ private fun TranscriptScreenBody(
             listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
         }.collect { cur ->
             val by = when {
+                // Earlier messages put on top move the index by a page at
+                // once: that is not the reader's scrolling.
+                kotlin.math.abs(cur.first - prev.first) > 3 -> 0
                 cur.first != prev.first -> (cur.first - prev.first) * 1000
                 else -> cur.second - prev.second
             }

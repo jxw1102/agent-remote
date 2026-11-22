@@ -89,17 +89,23 @@ try:
     past = history_session(mgr, "s1", lines=50, before=100000)
     check("a page past the start is empty", past["lines"] == 0 and past["more"] is False, past)
     # Lines that scroll in while the reader pages do not shift the next page.
-    end = time.time() + 10
+    end = time.time() + 15
     while time.time() < end:
-        if history_session(mgr, "s1", lines=1)["history"] > h["history"]:
+        if history_session(mgr, "s1", lines=1)["history"] >= h["history"] + 20:
             break
         time.sleep(0.2)
-    grown = history_session(mgr, "s1", lines=1)["history"] - h["history"]
     p2b = history_session(mgr, "s1", lines=50, before=h["next"], at=h["history"])
+    grown = p2b["history"] - h["history"]
     check("20 more lines scrolled in", grown == 20, grown)
     check("page 2 is the same after they did",
           [int(x) for x in p2b["text"].splitlines()] == list(range(top - 100, top - 50))
-          and p2b["before"] == 50 + grown, p2b["before"])
+          and p2b["before"] == 50 + grown and p2b["reset"] is False, p2b["before"])
+    # History shorter than the client last heard: the newest page, and reset.
+    shr = history_session(mgr, "s1", lines=50, before=100, at=p2b["history"] + 500)
+    srows = shr["text"].splitlines()
+    check("a shrunken history starts the client over",
+          shr["reset"] is True and shr["before"] == 0 and shr["next"] == 50
+          and int(srows[-1]) == top + 20 - 1, (shr["reset"], shr["before"], srows[-1:]))
     gone = history_session(mgr, "nope", lines=10)
     check("no TUI: not attached", gone["attached"] is False and gone["text"] == "")
 finally:

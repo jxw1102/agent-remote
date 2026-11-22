@@ -2802,12 +2802,23 @@ document.addEventListener("click", (e) => {
 const BAR_COLLAPSE_MS = 5000;
 let barTimer = null;
 
+/** Where each scrolling box last was, for the direction of a scroll. Code
+    that moves a box itself (a page put on top) records the new place here,
+    so the move is not read as the reader's. */
+const barLastTop = new WeakMap();
+/** The tallest this window has been at its width: the on-screen keyboard
+    takes height away, and must not make a roomy screen "small". */
+let barRoom = { w: 0, h: 0 };
+
 /** Does the session bar fold itself away here? On a phone, yes. Not in a
     wide window, and not in an upright one with room to spare (at least
     480 x 720): the open bar costs nothing there. */
 function barFolds() {
   if (!isCompact()) return false;
-  const w = window.innerWidth, h = window.innerHeight;
+  const w = window.innerWidth;
+  barRoom = w === barRoom.w
+    ? { w, h: Math.max(barRoom.h, window.innerHeight) } : { w, h: window.innerHeight };
+  const h = barRoom.h;
   return !(h > w && w >= 480 && h >= 720);
 }
 
@@ -2876,12 +2887,11 @@ function wireBarCollapse() {
   }, true);
   // The reader's own scrolling: down (toward the latest) folds the bar
   // away, up (back through the conversation) brings it out again.
-  const lastTop = new WeakMap();
   const onScroll = (e) => {
     const box = e.currentTarget;
-    const was = lastTop.has(box) ? lastTop.get(box) : box.scrollTop;
+    const was = barLastTop.has(box) ? barLastTop.get(box) : box.scrollTop;
     const by = box.scrollTop - was;
-    lastTop.set(box, box.scrollTop);
+    barLastTop.set(box, box.scrollTop);
     if (!readerScrolling() || Math.abs(by) < 4) return;
     const folded = float.classList.contains("collapsed");
     if (by > 0 && !folded) {
@@ -4065,6 +4075,7 @@ let tuiHistTimer = null;
 
 function resetTuiHistory() {
   clearTimeout(tuiHistTimer);
+  tuiHistTimer = null;
   tuiHist = { text: "", lines: 0, total: 0, more: true, loading: false, gen: tuiHist.gen + 1 };
   const h = $("live-tui-history");
   if (h) h.textContent = "";
@@ -4080,17 +4091,27 @@ const TUI_HIST_MAX = 20000;     // lines kept in the page; older are not asked f
  * and puts it on top; otherwise it asks for what has scrolled off the
  * screen since, and joins it below. Either way one request carries one
  * page, never the whole history again.
+ *
+ * Two anchors: `next`/`at` are the daemon's cursor for the next older page;
+ * `total` is the history size up to which the bottom of the block is
+ * complete, so the refresh knows how much has scrolled off since.
  */
 async function loadTuiHistory({ older = true } = {}) {
   const open = state.open;
   const profile = open && profileById(open.profileId);
-  if (!profile || !profile.tuiHistory || tuiHist.loading || !state.liveTui) return;
+  if (!profile || !profile.tuiHistory || !state.liveTui) return;
+  if (tuiHist.loading) {
+    // A refresh that met a page in flight is owed, not dropped.
+    if (!older) tuiHist.owed = true;
+    return;
+  }
   const gen = tuiHist.gen;
   tuiHist.loading = true;
   if (older) $("live-tui-more").textContent = "Loading earlier lines…";
+  let again = false;
   try {
     const q = older && tuiHist.lines
-      ? `&before=${tuiHist.lines}&at=${tuiHist.total}` : "";
+      ? `&before=${tuiHist.next}&at=${tuiHist.at}` : "";
     const got = await call(profile,
       `/api/sessions/${encodeURIComponent(open.sessionId)}/tui/history?ansi=1&lines=${TUI_HIST_PAGE}${q}`,
       { timeout: 20000 });
@@ -4101,34 +4122,66 @@ async function loadTuiHistory({ older = true } = {}) {
     const before = pane.scrollHeight;
     const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
     const total = got.history || 0;
-    if (older) {
-      // What scrolled in since the last reply is between this page and the
-      // screen, not in it: the daemon skipped it (`at`). It is fetched by
-      // the refresh below; here only the older page is added.
-      if (rows.length) {
-        tuiHist.text = tuiHist.text ? rows.join("\n") + "\n" + tuiHist.text : rows.join("\n");
-        tuiHist.lines += rows.length;
+    const was = tuiHist.text;
+    const startOver = () => {
+      // The newest page is all there is to trust: older pages load again
+      // on demand.
+      tuiHist.text = rows.join("\n");
+      tuiHist.lines = rows.length;
+      tuiHist.total = total;
+      tuiHist.next = got.next || rows.length;
+      tuiHist.at = total;
+      tuiHist.more = !!got.more;
+    };
+    if (older && !tuiHist.lines) {
+      startOver();
+      // Nothing has scrolled off yet: not the end of it, just not begun.
+      if (!total) { tuiHist.more = true; tuiHist.emptyAt = Date.now(); }
+    } else if (older) {
+      if (got.reset || total < tuiHist.at) {
+        // History got shorter (tmux trimmed it, or it was cleared): what is
+        // shown no longer lines up with it.
+        startOver();
+      } else {
+        // What scrolled in since the last refresh sits between this page
+        // and the screen, not in it (the daemon skipped it); the refresh
+        // below fetches it.
+        if (rows.length) {
+          tuiHist.text = tuiHist.text ? rows.join("\n") + "\n" + tuiHist.text : rows.join("\n");
+          tuiHist.lines += rows.length;
+        }
+        tuiHist.next = got.next;
+        tuiHist.at = total;
+        tuiHist.more = !!got.more && tuiHist.lines < TUI_HIST_MAX;
+        if (total > tuiHist.total) again = true;
       }
-      if (!tuiHist.total) tuiHist.total = total;
-      tuiHist.more = !!got.more && tuiHist.lines < TUI_HIST_MAX;
     } else {
       const grown = total - tuiHist.total;
-      if (grown > 0 && grown <= rows.length) {
+      if (grown < 0 || grown > rows.length) {
+        // Shorter than it was, or more than a page scrolled off at once:
+        // start again from this newest page rather than show a gap.
+        startOver();
+      } else if (grown > 0) {
         const add = rows.slice(rows.length - grown);
-        tuiHist.text = tuiHist.text ? tuiHist.text + "\n" + add.join("\n") : add.join("\n");
+        let text = tuiHist.text ? tuiHist.text + "\n" + add.join("\n") : add.join("\n");
         tuiHist.lines += add.length;
-      } else if (grown > rows.length) {
-        // More than a page scrolled off at once: start again from this
-        // newest page rather than show a gap. Older pages load on demand.
-        tuiHist.text = rows.join("\n");
-        tuiHist.lines = rows.length;
-        tuiHist.more = !!got.more;
+        tuiHist.total = total;
+        if (tuiHist.lines > TUI_HIST_MAX) {
+          // Kept to its bound: the oldest lines go, and are not asked for.
+          text = text.split("\n").slice(tuiHist.lines - TUI_HIST_MAX).join("\n");
+          tuiHist.lines = TUI_HIST_MAX;
+          tuiHist.more = false;
+        }
+        tuiHist.text = text;
       }
-      tuiHist.total = total;
     }
-    $("live-tui-history").innerHTML = tuiHist.text ? ansiToHtml(tuiHist.text, paneIsLight()) : "";
-    if (older) pane.scrollTop += pane.scrollHeight - before;   // keep the reader's line
-    else if (atBottom) pane.scrollTop = pane.scrollHeight;
+    if (tuiHist.text !== was) {
+      $("live-tui-history").innerHTML = tuiHist.text ? ansiToHtml(tuiHist.text, paneIsLight()) : "";
+      if (older) pane.scrollTop += pane.scrollHeight - before;   // keep the reader's line
+      else if (atBottom) pane.scrollTop = pane.scrollHeight;
+      // Not the reader's scrolling: the session bar takes no cue from it.
+      barLastTop.set(pane, pane.scrollTop);
+    }
   } catch { /* the next scroll to the top asks again */ }
   finally {
     if (gen === tuiHist.gen) {
@@ -4136,6 +4189,10 @@ async function loadTuiHistory({ older = true } = {}) {
       $("live-tui-more").textContent = tuiHist.lines && !tuiHist.more
         ? (tuiHist.lines >= TUI_HIST_MAX ? "Earlier lines are not shown"
           : "Start of the terminal's history") : "";
+      if (again || tuiHist.owed) {
+        tuiHist.owed = false;
+        if (tuiHist.lines) loadTuiHistory({ older: false });
+      }
     }
   }
 }
@@ -4143,13 +4200,19 @@ async function loadTuiHistory({ older = true } = {}) {
 function maybeLoadTuiHistory() {
   const pane = $("live-tui-pane");
   if (!state.liveTui || !pane || pane.scrollTop > 24 || !state.liveTuiSeq) return;
+  // An empty history is asked about again, but not on every scroll event.
+  if (!tuiHist.lines && tuiHist.emptyAt && Date.now() - tuiHist.emptyAt < 3000) return;
   if (tuiHist.more && !tuiHist.loading) loadTuiHistory({ older: true });
 }
 
 function refreshTuiHistorySoon() {
-  if (!tuiHist.lines) return;
-  clearTimeout(tuiHistTimer);
-  tuiHistTimer = setTimeout(() => loadTuiHistory({ older: false }), 1200);
+  // Once in 1.2 s at most, and not put off by each new frame: a terminal
+  // that keeps printing would otherwise never be refreshed at all.
+  if (!tuiHist.lines || tuiHistTimer) return;
+  tuiHistTimer = setTimeout(() => {
+    tuiHistTimer = null;
+    loadTuiHistory({ older: false });
+  }, 1200);
 }
 
 /** Is the TUI pane drawn on a light background (the app's theme)? */
@@ -4550,6 +4613,8 @@ async function loadOlder(btn) {
     state.items = expandMessages(page.messages || [], page.offset || 0).concat(state.items);
     renderTranscript(false);
     view.scrollTop = view.scrollHeight - before;
+    // Not the reader's scrolling: the session bar takes no cue from it.
+    barLastTop.set(view, view.scrollTop);
   } catch (e) {
     if (!isOpenStill(gen, profileId, sessionId)) return;
     toast(e.message);

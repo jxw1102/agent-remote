@@ -19,6 +19,16 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.31.2** Fixes from a code review of scrollback paging. A history that
+got shorter than the client last heard (tmux trimmed it, or the program
+cleared it) answers with the newest page and `reset: true`, so the client
+starts over instead of showing gaps or repeats. The daemon's tmux keeps
+20000 lines per pane (it kept tmux's default 2000, trimmed a tenth at a
+time). Web and Android 1.9.66 follow the daemon's `next` cursor, reload
+after a reset, pick up lines that scrolled off while a page was loading,
+keep asking when the history was empty at first, and do not fold the top
+bar when a loaded page moves the scroll position.
+
 **2.31.1** Claude's terminals have scrollback. Claude Code's fullscreen
 renderer (the default on newer accounts) draws on the alternate screen, so
 tmux held none of the conversation and the Live TUI had nothing to page

@@ -386,7 +386,7 @@ def history_session(mgr, session_id: str, *, lines: int = 200,
     if tui is None or tmux is None:
         return {"session_id": session_id, "attached": False, "text": "",
                 "lines": 0, "history": 0, "more": False, "ansi": bool(ansi),
-                "before": 0, "next": 0}
+                "before": 0, "next": 0, "reset": False}
     lines = max(1, min(int(lines or 200), HISTORY_MAX_LINES))
     try:
         out = tmux("display-message", "-p", "-t", tui.name,
@@ -396,7 +396,13 @@ def history_session(mgr, session_id: str, *, lines: int = 200,
         total = 0
     skip = max(0, int(before or 0))
     at = max(0, int(at or 0))
-    if skip and at and total > at:
+    # History got shorter than the client last heard (tmux trimmed it at its
+    # limit, or the program cleared it): the client's count no longer means
+    # anything. It gets the newest page and `reset`, and starts over.
+    reset = bool(skip and at and total < at)
+    if reset:
+        skip = 0
+    elif skip and at and total > at:
         skip += total - at
     skip = min(skip, total)
     take = min(lines, total - skip)
@@ -419,7 +425,8 @@ def history_session(mgr, session_id: str, *, lines: int = 200,
     count = text.count("\n") + 1 if text else 0
     return {"session_id": session_id, "attached": True, "text": text,
             "lines": count, "history": total, "more": skip + take < total,
-            "ansi": bool(ansi), "before": skip, "next": skip + take}
+            "ansi": bool(ansi), "before": skip, "next": skip + take,
+            "reset": reset}
 
 
 # ---- frame stream ---------------------------------------------------------
