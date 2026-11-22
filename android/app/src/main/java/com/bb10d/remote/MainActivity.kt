@@ -29,7 +29,6 @@ import com.bb10d.remote.data.SessionRef
 import com.bb10d.remote.service.JobWatchService
 import com.bb10d.remote.ui.screens.DropScreen
 import com.bb10d.remote.ui.screens.DropViewModel
-import com.bb10d.remote.ui.screens.LiveTuiScreen
 import com.bb10d.remote.ui.screens.NewSessionScreen
 import com.bb10d.remote.ui.screens.NewSessionViewModel
 import com.bb10d.remote.ui.screens.ProfileEditorScreen
@@ -99,7 +98,6 @@ private object Routes {
     const val DROP = "drop"
     const val NEW_SESSION = "new-session"
     const val TRANSCRIPT = "transcript"
-    const val LIVE_TUI = "live-tui"
 
     fun transcript(
         profileId: String,
@@ -109,9 +107,6 @@ private object Routes {
     ) =
         "$TRANSCRIPT/$profileId/${sessionId.ifEmpty { NONE }}" +
             "?job=${jobId}&provider=${provider}"
-
-    fun liveTui(profileId: String, sessionId: String) =
-        "$LIVE_TUI/$profileId/${sessionId.ifEmpty { NONE }}"
 
     const val NONE = "-"
 }
@@ -253,28 +248,6 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
             // (nav provider is the initial hint for multi hosts).
             TranscriptScreen(
                 vm = viewModel(key = ref.key + jobId + provider, factory = transcriptFactory),
-                onBack = { nav.popBackStack() },
-                onLiveTui = {
-                    if (sessionId.isNotEmpty()) {
-                        nav.navigate(Routes.liveTui(profileId, sessionId))
-                    }
-                },
-            )
-        }
-
-        composable(
-            route = "${Routes.LIVE_TUI}/{profileId}/{sessionId}",
-            arguments = listOf(
-                navArgument("profileId") { type = NavType.StringType },
-                navArgument("sessionId") { type = NavType.StringType },
-            ),
-        ) { entry ->
-            val profileId = entry.arguments?.getString("profileId").orEmpty()
-            val rawSession = entry.arguments?.getString("sessionId").orEmpty()
-            val sessionId = if (rawSession == Routes.NONE) "" else rawSession
-            LiveTuiScreen(
-                repo = repo,
-                ref = SessionRef(profileId, sessionId),
                 onBack = { nav.popBackStack() },
             )
         }

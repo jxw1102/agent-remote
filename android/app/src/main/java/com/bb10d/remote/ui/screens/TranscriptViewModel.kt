@@ -179,6 +179,33 @@ class TranscriptViewModel(
     )
 
     /**
+     * Which face of the session window shows: false = Chat, true = the host
+     * terminal (TUI). Remembered per session, so a session opens on the face
+     * it was left on.
+     */
+    val tuiView: StateFlow<Boolean> = combine(repo.settings, _ref) { s, ref ->
+        ref.sessionId.isNotEmpty() && tuiFaceKey(ref) in s.tuiViewSessions
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.Eagerly,
+        initialRef.sessionId.isNotEmpty() &&
+            tuiFaceKey(initialRef) in repo.settings.value.tuiViewSessions,
+    )
+
+    fun setTuiView(on: Boolean) {
+        val ref = _ref.value
+        if (ref.sessionId.isEmpty()) return
+        viewModelScope.launch { repo.settingsStore.setTuiView(tuiFaceKey(ref), on) }
+    }
+
+    // Profile and session, as the web client keys it: two profiles that
+    // front the same daemon see the same session ids.
+    private fun tuiFaceKey(ref: SessionRef) = "${ref.profileId}:${ref.sessionId}"
+
+    /** For the TUI face, which talks to the daemon on its own. */
+    val repository: AgentRepository get() = repo
+
+    /**
      * The Codex goal on this thread, if it has one. Null until the options
      * sheet asks for it: a session list does not need the round trip.
      */

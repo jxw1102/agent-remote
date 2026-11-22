@@ -138,7 +138,9 @@ _ASK_PANEL_MARKER = "to navigate"
 _ASK_PREVIEW_CAP = 4000
 # An option that has a preview is painted beside a box holding it, so its
 # row reads "1. Label        ┌────┐": everything from the gap on is the box.
-_ASK_SIDE_BOX_RE = re.compile(r"\s{2,}[\u2502\u250c\u2514\u256d\u2570\u2500].*$")
+# A box edge opens it (┌ ╭ top, │ side, └ ╰ bottom); a bare "─" does not, as
+# a label may use one as a dash ("Fast  ─ recommended").
+_ASK_SIDE_BOX_RE = re.compile(r"\s{2,}[\u2502\u250c\u2514\u256d\u2570].*$")
 
 # A permission dialog in the pane. bypassPermissions does NOT suppress these:
 # the static Bash guards (cd-compound-read/write/redirect, and commands whose
@@ -1575,6 +1577,7 @@ class InteractiveManager:
         found = {}
         expect = None          # options form a descending run 5,4,3,2,1
         top = footer
+        box_col = None         # where the preview box starts on the option rows
         for i in range(footer - 1, max(-1, footer - 80), -1):
             m = _PERM_OPT_RE.match(rows[i])
             if not m:
@@ -1582,6 +1585,10 @@ class InteractiveManager:
             num = int(m.group(1))
             if expect is not None and num != expect:
                 continue        # not this panel's sequence
+            side = _ASK_SIDE_BOX_RE.search(rows[i])
+            if side:
+                box_col = side.start() if box_col is None \
+                    else min(box_col, side.start())
             found[num] = _ASK_SIDE_BOX_RE.sub("", m.group(2)).strip()
             expect = num - 1
             top = i
@@ -1595,8 +1602,17 @@ class InteractiveManager:
             return {}
         # The tab strip above the question ("\u2190  \u2610 Header  \u2714 Submit  \u2192")
         # is chrome, not part of the ask.
-        context = [r for r in (_ASK_SIDE_BOX_RE.sub("", x)
-                              for x in rows[max(0, top - 6):top])
+        def unside(row):
+            # The box beside the options can reach up into the question's
+            # rows. Cut it there only from the column it starts at on the
+            # option rows: a question line of its own that holds a table or
+            # a tree ("  │ a │ b │") must survive.
+            if box_col is None:
+                return row
+            m = _ASK_SIDE_BOX_RE.search(row)
+            return row[:m.start()] if m and m.start() >= box_col else row
+
+        context = [r for r in (unside(x) for x in rows[max(0, top - 6):top])
                    if r.strip()
                    and not r.startswith(("\u25cf", "\u2234", "\u2514", "\u2500"))
                    and not any(mark in r for mark in ("\u2610", "\u2714",
@@ -1655,14 +1671,23 @@ class InteractiveManager:
                 continue
             panel = self._ask_panel(pane)
             kind = "ask"
+            # The footer of a panel already answered stays in the scrollback,
+            # and so would its options: publish an ask only while one is
+            # actually up, or an answered question comes back as a new card.
+            live = bool(panel or tui.hook_ask) and self._ask_panel_live(tui.name)
+            if panel and not live:
+                panel = {}
             # The hook handed over the questions as the agent wrote them:
             # every question, whole, with descriptions. What can be read
             # back off the pane is a poor copy (the last two lines of the
             # question, labels cut at 60, and a preview box drawn beside
             # the options lands inside them), so it is only the fallback
             # for a harness with no hook.
+            # Only while it is the panel on screen: a hook payload left over
+            # from an earlier question must not stand in for a later one.
             asked = self._ask_payload(tui.hook_ask) \
-                if tui.hook_ask and (panel or self._ask_panel_live(tui.name)) \
+                if tui.hook_ask and live \
+                and (not panel or self._hook_matches(tui.hook_ask, panel)) \
                 else []
             if asked:
                 panel = {"questions": asked}
@@ -1685,6 +1710,23 @@ class InteractiveManager:
                 target=self._run_watch, args=(job, tui, panel, kind),
                 daemon=True, name="tui-watch-%s" % tui.name).start()
 
+    @classmethod
+    def _hook_matches(cls, raw, panel: dict) -> bool:
+        """Do the hook's questions describe the panel read off the screen?
+
+        The screen shows one question at a time with labels cut at 60, so
+        every label on screen must start some option label of the hook's.
+        """
+        hook = [o["label"] for q in cls._ask_payload(raw) for o in q["options"]]
+        shown = [str(o.get("label") or "") for o in panel.get("options") or []]
+        if not hook or not shown:
+            return False
+        for label in shown:
+            stem = label[:-3] if label.endswith("...") else label
+            if not any(h.startswith(stem) or stem.startswith(h) for h in hook):
+                return False
+        return True
+
     def _run_watch(self, job, tui: _Tui, panel: dict, kind: str) -> None:
         """Answer the published panel from the phone, then close the job."""
         try:
@@ -1705,6 +1747,11 @@ class InteractiveManager:
         except Exception:
             log.exception("watched panel failed")
         finally:
+            if kind == "ask":
+                # Answered (on the phone or on the host) or cancelled: the
+                # hook's copy of it is history, and must not be published
+                # again for the next panel in this turn.
+                tui.hook_ask = None
             with job.lock:
                 job.status = "done"
             job.add_event("result", is_error=False, duration_ms=0, cost_usd=0)
@@ -1810,10 +1857,14 @@ class InteractiveManager:
         answers = job.request_question(questions, timeout, abort_when=gone)
         try:
             # Checked more than once for the same reason as above: here a
-            # wrong "gone" would throw away the answer just given.
+            # wrong "gone" would throw away the answer just given, so with an
+            # answer in hand the panel has to stay gone for two seconds (a
+            # repaint, or a footer that reads differently for a moment, is
+            # far shorter) before the pick is dropped.
+            checks = 3 if answers is None else 8
             if seen[0] and not any(
                     self._ask_panel_live(tui.name) or time.sleep(0.25)
-                    for _ in range(3)):
+                    for _ in range(checks)):
                 job.add_event("tool", name="AskUserQuestion",
                               detail="answered on the host")
                 return

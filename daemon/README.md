@@ -19,6 +19,23 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.28.3** The question watcher publishes only the panel that is on
+screen. A question already answered left its footer and options in the
+scrollback, and the watcher published them again as a new card; it now needs
+the panel to be live. The hook's copy of a question is used only while its
+labels match the panel on screen, and is dropped once that question is
+answered or cancelled, so it can no longer stand in for a later panel in the
+same turn (or for a permission dialog under the old footer, where a pick
+from the phone would have chosen a permission option). An answer given on
+the phone is thrown away as "answered on the host" only after the panel has
+stayed gone for two seconds, not three quick readings. The preview box beside
+the options is cut from the question's rows only from the column it starts
+at, so a table in the question survives, and a "─" in a label is kept.
+Web and Android 1.9.3: a session's Chat/TUI face is restored when the
+daemon's capabilities arrive after the session opened (web); Android keys
+the remembered face by profile and session like the web, and keys the TUI
+pane on the session; both keep at most 300 remembered faces.
+
 **2.28.2** The first interactive turn on a new host says what it is
 waiting for. The first time Claude Code is started with
 `--dangerously-skip-permissions` on a machine it stops on a consent screen
@@ -124,6 +141,13 @@ were dimmed as file names); Web: a git command's output is not shown under
 another session. Changes is on Web and Android; BlackBerry 10 and the pager
 do not show it (deferred: neither has a view that fits a diff, and neither
 is built in this tree's CI).
+
+Clients, no daemon change: on Web and Android 1.9.2 the Live TUI is no
+longer a layer over the session but one of the session window's two faces,
+Chat and TUI, picked with a switch in the session bar and remembered per
+session. BlackBerry 10 and iOS still open it as a sheet over the session
+(deferred: neither is built on this machine, so the change could not be
+checked there).
 
 **2.24.1** A long transcript no longer stalls the daemon. Finding a
 session's title source re-read the whole transcript whenever the file had

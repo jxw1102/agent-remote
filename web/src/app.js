@@ -727,6 +727,28 @@ function setProcessView(sessionId, on) {
   store.save();
 }
 
+// The session window has two faces, the chat and the host terminal (TUI).
+// Which one a session shows is remembered per session, like process view.
+function tuiFaceOn(profileId, sessionId) {
+  const map = state.settings.tuiFace || {};
+  return !!map[`${profileId}:${sessionId}`];
+}
+
+const TUI_FACES_MAX = 300;
+
+function setTuiFace(profileId, sessionId, on) {
+  const map = state.settings.tuiFace || {};
+  const key = `${profileId}:${sessionId}`;
+  delete map[key];
+  if (on) map[key] = true;    // re-added, so it is the newest key
+  // Only sessions left on TUI are stored, and a session deleted on the host
+  // is never removed: past the cap the oldest go (they reopen on Chat).
+  const keys = Object.keys(map);
+  for (let i = 0; i < keys.length - TUI_FACES_MAX; i++) delete map[keys[i]];
+  state.settings.tuiFace = map;
+  store.save();
+}
+
 function setSoundCues(on) {
   state.settings.soundCues = !!on;
   store.save();
@@ -2513,7 +2535,7 @@ async function openSession(row) {
   if (side.open) { side.data = null; side.out = ""; side.form = false; loadChanges(); }
   $("chat-title").textContent = row.session.title || "Session";
   renderChatSub();
-  updateLiveTuiButton();
+  updateLiveTuiButton({ restore: true });   // back on the face it was left on
   renderSessions();
   // Opening it is the only honest signal the output was read — dims the tag.
   markSeen(profileById(row.profileId), sessionId);
@@ -2543,7 +2565,7 @@ async function openSession(row) {
     // unanswered AskUserQuestion (Stop + panel race) — recover via /api/jobs.
     recoverPendingGate(row.profileId, sessionId, gen);
   }
-  updateLiveTuiButton();
+  updateLiveTuiButton({ restore: true });
 }
 
 /**
@@ -3279,26 +3301,44 @@ function setIconIdle(btn, idle) {
   btn.tabIndex = idle ? -1 : 0;
 }
 
-function updateLiveTuiButton() {
-  const btn = $("btn-live-tui");
-  if (!btn) return;
+function openSessionHasTui() {
   const open = state.open;
-  if (!open || !open.sessionId) {
-    setIconIdle(btn, true);
-    return;
-  }
+  if (!open || !open.sessionId) return false;
   const profile = profileById(open.profileId);
-  const harness = sessionProvider(open.session, profile);
-  if (!profileSupportsLiveTui(profile, harness)) {
-    setIconIdle(btn, true);
+  return profileSupportsLiveTui(profile, sessionProvider(open.session, profile));
+}
+
+function updateLiveTuiButton({ restore = false } = {}) {
+  const box = $("btn-live-tui");
+  if (!box) return;
+  const can = openSessionHasTui();
+  // The face this session was left on, once TUI is known to be possible:
+  // the daemon's capabilities can arrive after the session has opened.
+  // Only from openSession: closing the TUI also lands here, and must not
+  // reopen it.
+  if (restore && can && !state.liveTui
+      && tuiFaceOn(state.open.profileId, state.open.sessionId)) {
+    openLiveTui();
     return;
   }
-  // Always keep the slot; only the idle flag changes — never display:none.
-  setIconIdle(btn, false);
-  btn.setAttribute("aria-pressed", state.liveTui ? "true" : "false");
-  btn.title = state.liveTui
-    ? "Back to transcript"
-    : "Live TUI — host terminal for this session";
+  // Always keep the slot on a wide window; only the idle flag changes.
+  box.classList.toggle("icon-idle", !can);
+  box.setAttribute("aria-hidden", can ? "false" : "true");
+  box.querySelectorAll("[data-face]").forEach((b) => {
+    const on = (b.dataset.face === "tui") === !!state.liveTui;
+    b.setAttribute("aria-selected", on ? "true" : "false");
+    b.tabIndex = can ? (on ? 0 : -1) : -1;
+  });
+}
+
+/** The face the reader picked: switch to it and remember it for this session. */
+function pickFace(tui) {
+  const open = state.open;
+  if (!open || !open.sessionId) return;
+  if (tui && !openSessionHasTui()) return;
+  setTuiFace(open.profileId, open.sessionId, tui);
+  if (tui && !state.liveTui) openLiveTui();
+  else if (!tui && state.liveTui) closeLiveTui();
 }
 
 function openLiveTui() {
@@ -3402,6 +3442,9 @@ function closeLiveTui() {
   if (tr) tr.classList.remove("hidden");
   if (state.open) {
     $("composer")?.classList.remove("hidden");
+    // Back on the chat: a reader who was following lands on the newest row
+    // (the transcript kept filling while it was out of sight).
+    if (tr && state.stick) jumpBottom(tr);
   }
   updateLiveTuiCapture();
   updateLiveTuiButton();
@@ -7398,16 +7441,21 @@ function wire() {
       renderBanner();
     }
   });
-  $("btn-live-tui")?.addEventListener("click", () => {
-    if (state.liveTui) closeLiveTui();
-    else openLiveTui();
+  $("btn-live-tui")?.querySelectorAll("[data-face]").forEach((b) => {
+    b.addEventListener("click", () => pickFace(b.dataset.face === "tui"));
+    // Arrow keys move between the two tabs, as in any tab list.
+    b.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      pickFace(!state.liveTui);
+      $("btn-live-tui").querySelector('[aria-selected="true"]')?.focus();
+    });
   });
   // A resized window changes how many glyphs fit, never how many the host
   // draws — so the pane rescales instead of reflowing.
   window.addEventListener("resize", () => {
     if (state.liveTui) fitLiveTuiPane();
   });
-  $("btn-live-tui-close")?.addEventListener("click", () => closeLiveTui());
   $("live-tui")?.querySelectorAll("[data-tui-key]").forEach((btn) => {
     // mousedown, not click: a plain click would blur the pane first and the
     // next typed character would land in the page instead of the terminal.

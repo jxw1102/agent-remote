@@ -30,6 +30,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bb10d.remote.data.Time
 import com.bb10d.remote.ui.components.WorkingPulse
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material3.Icon
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.foundation.layout.Box
 import com.bb10d.remote.ui.theme.MonoStyle
 import com.bb10d.remote.ui.theme.palette
 import kotlinx.coroutines.delay
@@ -138,5 +146,52 @@ internal fun JumpToLatest(
             style = MaterialTheme.typography.labelLarge,
             color = if (unseen) accent else MaterialTheme.colorScheme.onSurface,
         )
+    }
+}
+
+/**
+ * The session window's two faces, Chat and TUI, as one switch in the bar.
+ * The TUI used to be a screen of its own on top of the session; now it is
+ * the same window showing the host terminal instead of the chat.
+ */
+@Composable
+internal fun FaceSwitch(tui: Boolean, accent: Color, onPick: (Boolean) -> Unit) {
+    val pal = palette
+    val shape = RoundedCornerShape(50)
+    Row(
+        Modifier
+            .padding(horizontal = 4.dp)
+            .clip(shape)
+            .border(1.dp, pal.hairline, shape)
+            .padding(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        FaceSide(Icons.Outlined.ChatBubbleOutline, "Chat", !tui, accent) { if (tui) onPick(false) }
+        FaceSide(Icons.Outlined.Terminal, "TUI", tui, accent) { if (!tui) onPick(true) }
+    }
+}
+
+@Composable
+private fun FaceSide(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    selected: Boolean,
+    accent: Color,
+    onClick: () -> Unit,
+) {
+    val pal = palette
+    val shape = RoundedCornerShape(50)
+    Box(
+        Modifier
+            .clip(shape)
+            .background(if (selected) accent.copy(alpha = 0.18f) else Color.Transparent)
+            .selectable(selected = selected, role = Role.Tab, onClick = onClick)
+            .semantics { contentDescription = label }
+            .heightIn(min = 36.dp)
+            .width(40.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = null, tint = if (selected) accent else pal.dim,
+            modifier = Modifier.size(20.dp))
     }
 }

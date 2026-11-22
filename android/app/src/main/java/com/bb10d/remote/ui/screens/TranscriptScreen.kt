@@ -33,7 +33,6 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Tag
 import androidx.compose.material.icons.outlined.Timeline
-import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -58,6 +57,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.derivedStateOf
 import com.bb10d.remote.ui.components.MetaPill
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import com.bb10d.remote.ui.components.connLabel
 import com.bb10d.remote.ui.components.connTint
 import androidx.compose.runtime.mutableStateOf
@@ -95,7 +95,6 @@ import kotlinx.coroutines.withContext
 fun TranscriptScreen(
     vm: TranscriptViewModel,
     onBack: () -> Unit,
-    onLiveTui: () -> Unit = {},
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val jobState by vm.job.collectAsStateWithLifecycle()
@@ -118,7 +117,6 @@ fun TranscriptScreen(
         TranscriptScreenBody(
             vm = vm,
             onBack = onBack,
-            onLiveTui = onLiveTui,
             ui = ui,
             jobState = jobState,
             live = live,
@@ -137,7 +135,6 @@ fun TranscriptScreen(
 private fun TranscriptScreenBody(
     vm: TranscriptViewModel,
     onBack: () -> Unit,
-    onLiveTui: () -> Unit,
     ui: TranscriptUi,
     jobState: com.bb10d.remote.data.JobState,
     live: com.bb10d.remote.data.ActiveJobDto?,
@@ -152,6 +149,10 @@ private fun TranscriptScreenBody(
     val ref by vm.ref.collectAsStateWithLifecycle()
     val showLiveTui = ref.sessionId.isNotEmpty()
         && (profile?.caps?.liveTuiFor(harness.ifBlank { null }) == true)
+    // The session window's two faces: the chat, or the host terminal. Each
+    // session reopens on the face it was left on.
+    val tuiView by vm.tuiView.collectAsStateWithLifecycle()
+    val tuiOn = showLiveTui && tuiView
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val clipboard = rememberClip()
@@ -356,9 +357,11 @@ private fun TranscriptScreenBody(
                             Icon(Icons.Outlined.Tune, contentDescription = "Session options")
                         }
                         if (showLiveTui) {
-                            IconButton(onClick = onLiveTui) {
-                                Icon(Icons.Outlined.Terminal, contentDescription = "Live TUI")
-                            }
+                            FaceSwitch(
+                                tui = tuiOn,
+                                accent = accent.tint,
+                                onPick = vm::setTuiView,
+                            )
                         }
                         Box {
                             IconButton(onClick = { menuOpen = true }) {
@@ -453,6 +456,17 @@ private fun TranscriptScreenBody(
         ) {
             Box(Modifier.weight(1f)) {
                 when {
+                    // Keyed on the session: the pane's own state (last
+                    // frame, its number, the column count) belongs to one
+                    // session and must not carry over if the ref rebinds.
+                    tuiOn -> key(ref.key) {
+                        LiveTuiPane(
+                            repo = vm.repository,
+                            ref = ref,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+
                     ui.loading && ui.items.isEmpty() -> Box(
                         Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center,
@@ -516,7 +530,7 @@ private fun TranscriptScreenBody(
                         }
                     } }
                 }
-                if ((awayFromLatest || unseen) && ui.items.isNotEmpty()) {
+                if (!tuiOn && (awayFromLatest || unseen) && ui.items.isNotEmpty()) {
                     JumpToLatest(
                         unseen = unseen,
                         accent = accent.tint,
@@ -562,6 +576,9 @@ private fun TranscriptScreenBody(
                 )
             }
 
+            // The TUI face types straight into the host terminal, so the
+            // chat's composer and its chips step aside.
+            if (!tuiOn) {
             AnimatedVisibility(ui.status.isNotBlank()) {
                 Row(
                     Modifier
@@ -616,6 +633,7 @@ private fun TranscriptScreenBody(
                 onStop = vm::stop,
                 onAttach = { picker.launch(arrayOf("*/*")) },
             )
+            }
         }
     }
 

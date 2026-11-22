@@ -166,20 +166,32 @@
           </svg>
         </button>
         </div>
-        <!-- Order: Options · Refresh · Live TUI · Stop.
+        <!-- Order: Options · Chat|TUI · Stop.
              Stop always keeps its slot (icon-idle = invisible, not removed)
              so nothing slides into that space when a job is not running. -->
-        <button id="btn-live-tui" class="icon-btn icon-idle" type="button"
-                title="Live TUI — host terminal for this session" aria-label="Live TUI"
-                aria-pressed="false" aria-hidden="true" tabindex="-1">
-          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
-               stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
-               stroke-linejoin="round">
-            <rect x="3" y="4" width="18" height="14" rx="2"/>
-            <path d="M8 20h8M12 18v2"/>
-            <path d="M7 9h.01M10 9h7"/>
-          </svg>
-        </button>
+        <!-- The session window's two faces: the chat, or the host terminal.
+             Each session reopens on the face it was left on. -->
+        <div id="btn-live-tui" class="face-switch icon-idle" role="tablist"
+             aria-label="Session view" aria-hidden="true">
+          <button type="button" role="tab" data-face="chat" aria-selected="true"
+                  title="Chat" aria-label="Chat" tabindex="-1">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+                 stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+                 stroke-linejoin="round">
+              <path d="M4 5h16v11H9l-5 4z"/>
+            </svg>
+          </button>
+          <button type="button" role="tab" data-face="tui" aria-selected="false"
+                  title="TUI — the host terminal for this session" aria-label="TUI"
+                  tabindex="-1">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"
+                 stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+                 stroke-linejoin="round">
+              <rect x="3" y="4" width="18" height="16" rx="2"/>
+              <path d="M7 9l3 3-3 3M12 15h5"/>
+            </svg>
+          </button>
+        </div>
         <button id="btn-stop" class="icon-btn danger icon-idle" type="button"
                 title="Stop" aria-label="Stop" aria-hidden="true" tabindex="-1">
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -225,7 +237,6 @@
           <span id="live-tui-hint" class="live-tui-hint">
             Click the pane to send keys
           </span>
-          <button id="btn-live-tui-close" type="button" class="ghost">Transcript</button>
         </div>
         <!-- Soft keys: fixed-size buttons on their own row so layout never
              shifts. This row is deliberately the original eight — everything
