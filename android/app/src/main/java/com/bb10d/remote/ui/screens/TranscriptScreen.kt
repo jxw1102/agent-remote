@@ -419,7 +419,25 @@ private fun TranscriptScreenBody(
         }
     }
     val dragged by listState.interactionSource.collectIsDraggedAsState()
-    LaunchedEffect(dragged) { if (dragged && !menuOpen && folds) barOpen = false }
+    // The reader's own scrolling: down (toward the latest) folds the bar
+    // away, up (back through the conversation) brings it out again. Only
+    // while a finger is on the list, so new output arriving does neither.
+    val scrollGate = androidx.compose.runtime.rememberUpdatedState(dragged && !menuOpen && folds)
+    LaunchedEffect(listState) {
+        var prev = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        androidx.compose.runtime.snapshotFlow {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        }.collect { cur ->
+            val by = when {
+                cur.first != prev.first -> (cur.first - prev.first) * 1000
+                else -> cur.second - prev.second
+            }
+            prev = cur
+            if (!scrollGate.value || kotlin.math.abs(by) < 6) return@collect
+            if (by > 0) barOpen = false
+            else if (!barOpen) { barOpen = true; barTick++ }
+        }
+    }
 
     Scaffold(
         topBar = {

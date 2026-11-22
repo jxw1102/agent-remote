@@ -2872,10 +2872,21 @@ function wireBarCollapse() {
     if (!float.classList.contains("collapsed")) { scheduleBarCollapse(); return; }
     if (e.target.closest("#btn-more")) expandBar();
   }, true);
-  const onScroll = () => {
-    if (!float.classList.contains("collapsed") && readerScrolling()) {
+  // The reader's own scrolling: down (toward the latest) folds the bar
+  // away, up (back through the conversation) brings it out again.
+  const lastTop = new WeakMap();
+  const onScroll = (e) => {
+    const box = e.currentTarget;
+    const was = lastTop.has(box) ? lastTop.get(box) : box.scrollTop;
+    const by = box.scrollTop - was;
+    lastTop.set(box, box.scrollTop);
+    if (!readerScrolling() || Math.abs(by) < 4) return;
+    const folded = float.classList.contains("collapsed");
+    if (by > 0 && !folded) {
       clearTimeout(barTimer);
       collapseBar();
+    } else if (by < 0 && folded && barFolds()) {
+      expandBar();
     }
   };
   $("transcript")?.addEventListener("scroll", onScroll, { passive: true });
