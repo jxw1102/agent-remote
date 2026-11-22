@@ -59,7 +59,7 @@ mgr = Mgr()
 try:
     # 300 numbered lines in a 40-row pane: about 260 scroll into history.
     subprocess.run([TMUX, "-L", SOCK, "new-session", "-d", "-s", PANE, "-x", "80", "-y", "40",
-                    "sh", "-c", "seq 1 300; sleep 30"], check=True)
+                    "sh", "-c", "seq 1 300; sleep 4; seq 301 320; sleep 30"], check=True)
     time.sleep(0.8)
     screen = capture_session(mgr, "s1")["text"].strip().splitlines()
     top = int(screen[0])
@@ -75,6 +75,31 @@ try:
     check("asking for more than there is gives all of it",
           allh["lines"] == top - 1 and allh["more"] is False, (allh["lines"], top))
     check("starting at line 1", allh["text"].splitlines()[0] == "1")
+    # Paging: the next page, older, joins the first with no gap or overlap.
+    p2 = history_session(mgr, "s1", lines=50, before=h["next"], at=h["history"])
+    rows2 = p2["text"].splitlines()
+    check("page 2 is the 50 before page 1",
+          [int(x) for x in rows2] == list(range(top - 100, top - 50)), rows2[:2])
+    check("page 2 says where page 3 starts", p2["before"] == 50 and p2["next"] == 100, p2)
+    last = history_session(mgr, "s1", lines=5000, before=p2["next"], at=p2["history"])
+    lrows = last["text"].splitlines()
+    check("the last page ends the history",
+          last["more"] is False and lrows[0] == "1" and int(lrows[-1]) == top - 101,
+          (last["more"], lrows[:1], lrows[-1:]))
+    past = history_session(mgr, "s1", lines=50, before=100000)
+    check("a page past the start is empty", past["lines"] == 0 and past["more"] is False, past)
+    # Lines that scroll in while the reader pages do not shift the next page.
+    end = time.time() + 10
+    while time.time() < end:
+        if history_session(mgr, "s1", lines=1)["history"] > h["history"]:
+            break
+        time.sleep(0.2)
+    grown = history_session(mgr, "s1", lines=1)["history"] - h["history"]
+    p2b = history_session(mgr, "s1", lines=50, before=h["next"], at=h["history"])
+    check("20 more lines scrolled in", grown == 20, grown)
+    check("page 2 is the same after they did",
+          [int(x) for x in p2b["text"].splitlines()] == list(range(top - 100, top - 50))
+          and p2b["before"] == 50 + grown, p2b["before"])
     gone = history_session(mgr, "nope", lines=10)
     check("no TUI: not attached", gone["attached"] is False and gone["text"] == "")
 finally:

@@ -1326,8 +1326,10 @@ async function pingProfile(profile) {
     profile.sessionOptions = !!ping.session_options;
     // Live TUI frames pushed over SSE + ordered key batches (agentremoted ≥ 2.22).
     profile.tuiStream = !!ping.tui_stream;
-    // GET …/tui/history: the terminal's scrollback (agentremoted ≥ 2.29).
-    profile.tuiHistory = !!ping.tui_history || !!(ping.caps && ping.caps.tui_history);
+    // GET …/tui/history, a page at a time: the terminal's scrollback
+    // (agentremoted ≥ 2.31).
+    profile.tuiHistory = !!ping.tui_history_paged
+      || !!(ping.caps && ping.caps.tui_history_paged);
     // The daemon picks how each message runs (agentremoted ≥ 2.30): into the
     // session's terminal when it has a live one, headless when it does not.
     profile.autoExec = !!ping.auto_exec || !!(ping.caps && ping.caps.auto_exec);
@@ -4055,7 +4057,7 @@ async function pollLiveTui(force) {
 /** Draw one frame, however it arrived (pushed or polled). */
 // ---- terminal scrollback ---------------------------------------------------
 // Scrolling the terminal to its top asks the daemon for what scrolled off it,
-// 200 lines more each time while there are more. While it is shown, new
+// a page of 200 lines each time while there are more. While it is shown, new
 // output that scrolls off the screen joins it, so the two stay joined.
 
 let tuiHist = { text: "", lines: 0, total: 0, more: true, loading: false, gen: 0 };
@@ -4070,42 +4072,70 @@ function resetTuiHistory() {
   if (m) m.textContent = "";
 }
 
-async function loadTuiHistory(lines, { anchor = false, keep = 0 } = {}) {
+const TUI_HIST_PAGE = 200;
+const TUI_HIST_MAX = 20000;     // lines kept in the page; older are not asked for
+
+/**
+ * One page of scrollback. `older` asks for the page before what is shown
+ * and puts it on top; otherwise it asks for what has scrolled off the
+ * screen since, and joins it below. Either way one request carries one
+ * page, never the whole history again.
+ */
+async function loadTuiHistory({ older = true } = {}) {
   const open = state.open;
   const profile = open && profileById(open.profileId);
   if (!profile || !profile.tuiHistory || tuiHist.loading || !state.liveTui) return;
   const gen = tuiHist.gen;
   tuiHist.loading = true;
-  if (anchor) $("live-tui-more").textContent = "Loading earlier lines…";
+  if (older) $("live-tui-more").textContent = "Loading earlier lines…";
   try {
+    const q = older && tuiHist.lines
+      ? `&before=${tuiHist.lines}&at=${tuiHist.total}` : "";
     const got = await call(profile,
-      `/api/sessions/${encodeURIComponent(open.sessionId)}/tui/history?ansi=1&lines=${lines}`,
+      `/api/sessions/${encodeURIComponent(open.sessionId)}/tui/history?ansi=1&lines=${TUI_HIST_PAGE}${q}`,
       { timeout: 20000 });
     if (gen !== tuiHist.gen) return;
     if (!got || !got.attached) { tuiHist.more = false; return; }
-    const rows = String(got.text || "").split("\n");
-    // A refresh keeps exactly what was shown plus what has scrolled off
-    // since, so nothing above the reader moves.
-    const wanted = keep > 0
-      ? Math.max(0, Math.min(rows.length, keep + (got.history - tuiHist.total)))
-      : rows.length;
-    const text = got.text ? rows.slice(rows.length - wanted).join("\n") : "";
+    const rows = got.text ? String(got.text).split("\n") : [];
     const pane = $("live-tui-pane");
     const before = pane.scrollHeight;
     const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
-    tuiHist.text = text;
-    tuiHist.lines = text ? wanted : 0;
-    tuiHist.total = got.history || 0;
-    tuiHist.more = tuiHist.lines < tuiHist.total;
-    $("live-tui-history").innerHTML = text ? ansiToHtml(text, paneIsLight()) : "";
-    if (anchor) pane.scrollTop += pane.scrollHeight - before;   // keep the reader's line
+    const total = got.history || 0;
+    if (older) {
+      // What scrolled in since the last reply is between this page and the
+      // screen, not in it: the daemon skipped it (`at`). It is fetched by
+      // the refresh below; here only the older page is added.
+      if (rows.length) {
+        tuiHist.text = tuiHist.text ? rows.join("\n") + "\n" + tuiHist.text : rows.join("\n");
+        tuiHist.lines += rows.length;
+      }
+      if (!tuiHist.total) tuiHist.total = total;
+      tuiHist.more = !!got.more && tuiHist.lines < TUI_HIST_MAX;
+    } else {
+      const grown = total - tuiHist.total;
+      if (grown > 0 && grown <= rows.length) {
+        const add = rows.slice(rows.length - grown);
+        tuiHist.text = tuiHist.text ? tuiHist.text + "\n" + add.join("\n") : add.join("\n");
+        tuiHist.lines += add.length;
+      } else if (grown > rows.length) {
+        // More than a page scrolled off at once: start again from this
+        // newest page rather than show a gap. Older pages load on demand.
+        tuiHist.text = rows.join("\n");
+        tuiHist.lines = rows.length;
+        tuiHist.more = !!got.more;
+      }
+      tuiHist.total = total;
+    }
+    $("live-tui-history").innerHTML = tuiHist.text ? ansiToHtml(tuiHist.text, paneIsLight()) : "";
+    if (older) pane.scrollTop += pane.scrollHeight - before;   // keep the reader's line
     else if (atBottom) pane.scrollTop = pane.scrollHeight;
   } catch { /* the next scroll to the top asks again */ }
   finally {
     if (gen === tuiHist.gen) {
       tuiHist.loading = false;
       $("live-tui-more").textContent = tuiHist.lines && !tuiHist.more
-        ? "Start of the terminal's history" : "";
+        ? (tuiHist.lines >= TUI_HIST_MAX ? "Earlier lines are not shown"
+          : "Start of the terminal's history") : "";
     }
   }
 }
@@ -4113,15 +4143,13 @@ async function loadTuiHistory(lines, { anchor = false, keep = 0 } = {}) {
 function maybeLoadTuiHistory() {
   const pane = $("live-tui-pane");
   if (!state.liveTui || !pane || pane.scrollTop > 24 || !state.liveTuiSeq) return;
-  if (tuiHist.more && !tuiHist.loading) loadTuiHistory(tuiHist.lines + 200, { anchor: true });
+  if (tuiHist.more && !tuiHist.loading) loadTuiHistory({ older: true });
 }
 
 function refreshTuiHistorySoon() {
   if (!tuiHist.lines) return;
   clearTimeout(tuiHistTimer);
-  tuiHistTimer = setTimeout(() => {
-    loadTuiHistory(Math.min(tuiHist.lines + 400, 5000), { keep: tuiHist.lines });
-  }, 1200);
+  tuiHistTimer = setTimeout(() => loadTuiHistory({ older: false }), 1200);
 }
 
 /** Is the TUI pane drawn on a light background (the app's theme)? */

@@ -1900,6 +1900,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         payload["tui_stream"] = 1
         # 1: GET …/tui/history?lines=N returns the pane's scrollback.
         payload["tui_history"] = 1
+        payload["tui_history_paged"] = 1
         # 1: permission_mode "auto" on /continue (the session's terminal
         # when it has a live one, headless otherwise), `mode` on the reply
         # and on job snapshots, and GET …/tui?state=1.
@@ -1912,6 +1913,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             caps["tui_keys"] = 2
             caps["tui_stream"] = 1
             caps["tui_history"] = 1
+            caps["tui_history_paged"] = 1
             caps["auto_exec"] = 1
             payload["caps"] = caps
 
@@ -3728,11 +3730,13 @@ class ApiHandler(BaseHTTPRequestHandler):
         return False
 
     def _handle_tui_history(self, session_id: str, query=None):
-        """GET /api/sessions/<id>/tui/history?lines=N[&ansi=1] — scrollback.
+        """GET /api/sessions/<id>/tui/history?lines=N[&before=K&at=H][&ansi=1].
 
-        The newest N lines that scrolled off the top of the pane (oldest
-        first), so a client can show them above the screen when the reader
-        scrolls the terminal to its top. `more` says whether there is older.
+        Scrollback, a page at a time: N lines that scrolled off the top of
+        the pane (oldest first), skipping the newest K the client already
+        has. `at` is the `history` size from the client's last reply, so
+        lines that scrolled in since do not shift the page. `more` says
+        whether there is older; `next` is the `before` for the next page.
         """
         if not self._tui_in_scope(session_id):
             self._error(404, "session not found")
@@ -3745,12 +3749,22 @@ class ApiHandler(BaseHTTPRequestHandler):
             lines = int(raw or 200)
         except (TypeError, ValueError):
             lines = 200
+
+        def _num(name):
+            v = q.get(name)
+            v = v[0] if isinstance(v, list) else v
+            try:
+                return max(0, int(v or 0))
+            except (TypeError, ValueError):
+                return 0
+        before, at = _num("before"), _num("at")
         ansi = self._flag(q, "ansi")
         last = None
         for r in self._tui_runners():
             mgr = r._interactive_mgr() if hasattr(r, "_interactive_mgr") else r
             try:
-                out = history_session(mgr, session_id, lines=lines, ansi=ansi)
+                out = history_session(mgr, session_id, lines=lines,
+                                      before=before, at=at, ansi=ansi)
             except Exception:  # one harness failing must not hide another
                 log.exception("tui history failed")
                 continue
@@ -3760,7 +3774,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
         self._send_json(last or {"session_id": session_id, "attached": False,
                                  "text": "", "lines": 0, "history": 0,
-                                 "more": False, "ansi": ansi})
+                                 "more": False, "ansi": ansi,
+                                 "before": 0, "next": 0})
 
     def _handle_tui_events(self, session_id, events):
         if not isinstance(events, list) or not events or len(events) > 256:

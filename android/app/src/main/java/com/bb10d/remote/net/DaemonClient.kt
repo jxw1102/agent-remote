@@ -564,12 +564,24 @@ class DaemonClient(
      * Live TUI pane capture for a session.
      * [ansi] requests coloured SGR (web/Android). Default plain is for BB.
      */
-    /** The newest [lines] of the pane's scrollback (agentremoted ≥ 2.29). */
-    suspend fun tuiHistory(sessionId: String, lines: Int, ansi: Boolean = true): TuiHistoryDto = call(
+    /**
+     * One page of the pane's scrollback (agentremoted ≥ 2.31): [lines] lines,
+     * skipping the newest [before] (already held). [at] is the history size
+     * from the last reply, so lines that scrolled in since do not shift it.
+     */
+    suspend fun tuiHistory(
+        sessionId: String,
+        lines: Int,
+        before: Int = 0,
+        at: Int = 0,
+        ansi: Boolean = true,
+    ): TuiHistoryDto = call(
         request(
             url(
                 "api/sessions/$sessionId/tui/history",
-                mapOf("lines" to lines.toString()) + (if (ansi) mapOf("ansi" to "1") else emptyMap()),
+                mapOf("lines" to lines.toString()) +
+                    (if (before > 0) mapOf("before" to before.toString(), "at" to at.toString()) else emptyMap()) +
+                    (if (ansi) mapOf("ansi" to "1") else emptyMap()),
             ),
         ).get().build(),
         TuiHistoryDto.serializer(),

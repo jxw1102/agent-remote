@@ -19,6 +19,18 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.31.0** Terminal scrollback is read a page at a time.
+`GET /api/sessions/<id>/tui/history` takes `before` (skip the newest K
+history lines, the ones the client already has) and `at` (the `history`
+size from the client's last reply, so lines that scroll in while it reads
+do not shift the page), and answers with `next`, the `before` for the page
+after. Clients used to ask for a larger window each time and got all of it
+again; now each request carries one page, and the scrollback a client can
+reach is no longer capped at 5000 lines. Advertised as
+`tui_history_paged` (ping and `caps`). Web and Android 1.9.65 page by 200
+lines as the reader reaches the top; they need this flag for scrollback.
+BlackBerry 10, iOS and the pager do not show scrollback.
+
 **2.30.1** Fixes from a code review. A job that only carries a question
 from an idle terminal reports `mode: "interactive"` and refuses `/queue`
 (it never drains one, so a message left there was lost). The Bypass

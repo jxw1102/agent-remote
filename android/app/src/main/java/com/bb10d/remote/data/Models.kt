@@ -181,6 +181,8 @@ data class PingDto(
     @SerialName("tui_stream") val tuiStream: Int = 0,
     /** 1: GET …/tui/history returns the pane's scrollback (agentremoted ≥ 2.29). */
     @SerialName("tui_history") val tuiHistory: Int = 0,
+    /** 1: that route pages (`before`, `at`, `next`; agentremoted ≥ 2.31). */
+    @SerialName("tui_history_paged") val tuiHistoryPaged: Int = 0,
     /** 1: permission_mode "auto" on /continue (agentremoted ≥ 2.30). */
     @SerialName("auto_exec") val autoExec: Int = 0,
     /** Chunked POST /api/attachments (agentremoted ≥ 2.8.6). */
@@ -540,7 +542,7 @@ data class StartedTurn(val jobId: String, val mode: String = "")
 data class TuiStateDto(val attached: Boolean = false)
 
 /** GET /api/sessions/<id>/tui — host tmux pane frame. */
-/** GET …/tui/history: the newest [lines] of scrollback, oldest first. */
+/** GET …/tui/history: one page of scrollback, oldest first. */
 @Serializable
 data class TuiHistoryDto(
     val attached: Boolean = false,
@@ -871,7 +873,8 @@ data class Caps(
             changesTurn = ping.changesTurn,
             sessionOptions = ping.sessionOptions,
             tuiStream = ping.tuiStream > 0 || ping.caps["tui_stream"] == true,
-            tuiHistory = ping.tuiHistory > 0 || ping.caps["tui_history"] == true,
+            // Scrollback is read a page at a time, which needs the paged route.
+            tuiHistory = ping.tuiHistoryPaged > 0 || ping.caps["tui_history_paged"] == true,
             autoExec = ping.autoExec > 0 || ping.caps["auto_exec"] == true,
             chunkedUpload = ping.chunkedUpload || ping.caps["chunked_upload"] == true,
             maxUploadMb = ping.maxUploadMb.takeIf { it > 0 } ?: 16,

@@ -370,13 +370,23 @@ HISTORY_MAX_LINES = 5000
 
 
 def history_session(mgr, session_id: str, *, lines: int = 200,
-                    ansi: bool = False) -> dict:
-    """The newest `lines` of the pane's scrollback (oldest first)."""
+                    before: int = 0, at: int = 0, ansi: bool = False) -> dict:
+    """One page of the pane's scrollback (oldest first).
+
+    `lines` is the page size. `before` skips that many of the newest history
+    lines (the ones the client already has), so pages are fetched one at a
+    time going back. History keeps growing while the client reads, which
+    would shift the count: `at` is the history size the client last heard
+    (`history` in a reply), and what has scrolled in since is skipped too,
+    so the next page starts exactly where the last one ended. The reply's
+    `next` is the `before` for the page after this one.
+    """
     tui = _find_tui(mgr, session_id)
     tmux = getattr(mgr, "_tmux", None)
     if tui is None or tmux is None:
         return {"session_id": session_id, "attached": False, "text": "",
-                "lines": 0, "history": 0, "more": False, "ansi": bool(ansi)}
+                "lines": 0, "history": 0, "more": False, "ansi": bool(ansi),
+                "before": 0, "next": 0}
     lines = max(1, min(int(lines or 200), HISTORY_MAX_LINES))
     try:
         out = tmux("display-message", "-p", "-t", tui.name,
@@ -384,14 +394,19 @@ def history_session(mgr, session_id: str, *, lines: int = 200,
         total = int(out.stdout.decode("ascii", "replace").strip() or 0)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         total = 0
-    take = min(lines, total)
+    skip = max(0, int(before or 0))
+    at = max(0, int(at or 0))
+    if skip and at and total > at:
+        skip += total - at
+    skip = min(skip, total)
+    take = min(lines, total - skip)
     text = ""
     if take > 0:
         # History lines are numbered -1 (just above the screen) to -total.
         args = ["capture-pane", "-p"]
         if ansi:
             args.append("-e")
-        args += ["-S", str(-take), "-E", "-1", "-t", tui.name]
+        args += ["-S", str(-(skip + take)), "-E", str(-(skip + 1)), "-t", tui.name]
         try:
             out = tmux(*args, capture=True)
             text = out.stdout.decode("utf-8", errors="replace")
@@ -403,8 +418,8 @@ def history_session(mgr, session_id: str, *, lines: int = 200,
             text = plain_tui_text(text)
     count = text.count("\n") + 1 if text else 0
     return {"session_id": session_id, "attached": True, "text": text,
-            "lines": count, "history": total, "more": take < total,
-            "ansi": bool(ansi)}
+            "lines": count, "history": total, "more": skip + take < total,
+            "ansi": bool(ansi), "before": skip, "next": skip + take}
 
 
 # ---- frame stream ---------------------------------------------------------
