@@ -1018,7 +1018,7 @@ def _build_transcript(updates_path: Path, want_steps: bool = False):
                     lang = steps_mod.lang_for_tool_use(title, raw)
                     step_rows.append((ln, steps_mod.tool_use(
                         "gu%d" % ln, _iso(ts), title,
-                        _grok_tool_detail(raw), full, lang=lang)))
+                        _grok_tool_detail(raw), full, lang=lang, raw=raw)))
             elif kind == "turn_completed":
                 close_thought()
                 close_thought_step(ln)

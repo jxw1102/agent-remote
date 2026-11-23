@@ -1175,7 +1175,7 @@ def _steps_of(obj: dict, tool_meta: dict = None) -> list:
             out.append(steps_mod.tool_use(
                 ref, ts, name,
                 tool_detail(raw if isinstance(raw, dict) else {}), full,
-                lang=lang))
+                lang=lang, raw=raw))
         elif kind == "tool_result":
             raw_text = _result_text(b)
             body = steps_mod.format_tool_result(raw_text)

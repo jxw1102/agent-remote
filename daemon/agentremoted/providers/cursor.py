@@ -791,7 +791,7 @@ def _steps_of(obj: dict, tool_meta: dict, pos: int) -> list:
                 tool_meta[str(tid)] = (name, path)
             desc, cmd = _tool_status_parts(raw if isinstance(raw, dict) else {})
             out.append(steps_mod.tool_use(
-                ref, ts, name, cmd or desc, full, lang=lang))
+                ref, ts, name, cmd or desc, full, lang=lang, raw=raw))
         elif kind == "tool_result":
             raw = b.get("content")
             if isinstance(raw, str):

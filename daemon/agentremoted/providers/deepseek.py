@@ -590,7 +590,8 @@ class DeepseekStore:
                             lang = steps_mod.lang_for_tool_use(name, args)
                             step_rows.append((pos, steps_mod.tool_use(
                                 "%s:%d" % (seq, i), ts, name,
-                                _tool_detail(args, name), full, lang=lang)))
+                                _tool_detail(args, name), full, lang=lang,
+                                raw=args)))
                         elif bt == "reasoning":
                             step_rows.append((pos, steps_mod.thinking(
                                 "%s:%d" % (seq, i), ts, b.get("text"))))

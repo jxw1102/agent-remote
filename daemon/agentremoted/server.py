@@ -99,6 +99,7 @@ from . import __version__
 from . import palette
 from . import accounts
 from . import changes
+from . import projects
 from . import shadow
 from . import focus as focus_store
 from . import session_prefs as prefs_store
@@ -3138,14 +3139,50 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not cwd or not os.path.isdir(cwd):
             self._send_json({"ok": True, "repo": False, "cwd": cwd or ""})
             return
+        # The folder a session was started in is often a level above the
+        # project. Measure the project(s) the agent actually wrote in
+        # (projects.py); `?root=` picks one of them.
+        name, bundle, _s = self._find_session(session_id)
+        store = self._store_for_provider(name, bundle) if name else self.store
+        roots = projects.resolve(cwd, self._canonical_session_id(session_id),
+                                 store)
+        want = str(((query or {}).get("root") or [""])[0]).strip()
+        project = roots[0]
+        if want:
+            real = os.path.realpath(want)
+            if real not in roots:
+                self._error(400, "root is not one of this session's projects")
+                return
+            project = real
+        notice = ""
         try:
-            payload = (changes.collect_turn(cwd) if scope == "turn"
-                       else changes.collect(cwd))
+            if scope == "turn":
+                payload = changes.collect_turn(project)
+                if payload.get("available") is False \
+                        and payload.get("no_mark"):
+                    fallback = changes.collect(project)
+                    if fallback.get("repo"):
+                        payload = fallback
+                        notice = (
+                            "No snapshot of this project was taken before "
+                            "the last turn, so this shows everything since "
+                            "the last commit. From the next turn on, This "
+                            "turn is measured here.")
+            else:
+                payload = changes.collect(project)
         except changes.ChangesError as e:
             self._error(504, str(e))
             return
         payload["ok"] = True
         payload["cwd"] = cwd
+        payload["project"] = project
+        payload["projects"] = [
+            {"path": r, "label": "." if r == os.path.realpath(cwd)
+             else os.path.relpath(r, os.path.realpath(cwd))}
+            for r in roots]
+        if notice:
+            payload["notice"] = notice
+        payload.pop("no_mark", None)
         payload.setdefault("scope", "commit")
         self._send_json(payload)
 

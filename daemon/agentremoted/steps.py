@@ -43,13 +43,80 @@ def clip(text: str, cap: int = PREVIEW_B):
     return text[:cap], len(text), True
 
 
-def tool_use(ref, ts, name, detail, full, lang: str = ""):
+def tool_use(ref, ts, name, detail, full, lang: str = "", raw=None):
+    """One tool_use step. `raw` is the tool's input, when the caller has it:
+    the paths it writes ride along as ``writes`` so the Changes view can find
+    the project a session works in (see projects.py)."""
     preview, n, cut = clip(full or "")
     out = {"kind": "tool_use", "ref": ref, "ts": ts or "",
            "name": name or "tool", "detail": detail or "",
            "preview": preview, "bytes": n, "truncated": cut}
     if lang:
         out["lang"] = lang
+    if raw is not None:
+        writes = written_paths(raw)
+        if writes:
+            out["writes"] = writes
+    return out
+
+
+# Keys that carry new file content or a replacement: a tool input with one
+# of these next to a path writes that path. A Read has the path alone.
+_WRITE_KEYS = ("old_string", "oldString", "new_string", "newString",
+               "old_str", "new_str", "oldText", "newText", "content",
+               "contents", "file_text", "code_edit", "streamContent")
+_PATCH_FILE_RE = None
+
+
+def written_paths(raw) -> list:
+    """The paths a tool input writes, in order, without duplicates.
+
+    Recognises edit/write shapes from every harness (Claude Edit/Write/
+    MultiEdit, Grok SearchReplace/Write, Cursor edit_file, Copilot
+    edit/create) and Codex-style ``*** Begin Patch`` bodies. A shell call's
+    ``workdir`` counts too: it does not say which file changed, only which
+    folder the agent was working in, and that is all the caller needs.
+    Reads, searches and listings return nothing.
+    """
+    global _PATCH_FILE_RE
+    out = []
+
+    def add(p):
+        if isinstance(p, str):
+            p = p.strip()
+            if p and p not in out:
+                out.append(p)
+
+    obj = _as_obj(raw)
+    text = raw if isinstance(raw, str) else ""
+    if isinstance(obj, dict):
+        path = _first_str(obj, "file_path", "target_file", "path",
+                          "absolute_path", "filePath")
+        if path and _has_any(obj, *_WRITE_KEYS):
+            add(path)
+        edits = obj.get("edits")
+        if isinstance(edits, list):
+            for e in edits:
+                if isinstance(e, dict) and _has_any(e, *_WRITE_KEYS):
+                    add(_first_str(e, "file_path", "target_file", "path")
+                        or path)
+        add(_first_str(obj, "workdir"))
+        for key in ("input", "patch", "command"):
+            val = obj.get(key)
+            if isinstance(val, str) and "*** Begin Patch" in val:
+                text = val
+            elif isinstance(val, list):
+                joined = "\n".join(v for v in val if isinstance(v, str))
+                if "*** Begin Patch" in joined:
+                    text = joined
+    if text and "*** Begin Patch" in text:
+        if _PATCH_FILE_RE is None:
+            import re
+            _PATCH_FILE_RE = re.compile(
+                r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$",
+                re.M)
+        for m in _PATCH_FILE_RE.finditer(text):
+            add(m.group(1))
     return out
 
 

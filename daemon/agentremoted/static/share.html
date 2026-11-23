@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark">
 <meta name="referrer" content="no-referrer">
 <title>Shared session · Agent Remote</title>
-<!-- built 2026-11-21 08:56 from web/src -->
+<!-- built 2026-11-23 05:49 from web/src -->
 <style>
 /* Agent Remote, browser client.
  *
@@ -1337,6 +1337,10 @@ button.icon-btn.icon-idle {
 .side-foot .help { flex: 1 1 120px; color: var(--dim); font-size: 12px; }
 .side-foot textarea { flex: 1 0 100%; min-height: 60px; resize: vertical; }
 .side-note { color: var(--dim); font-size: 13px; padding: 18px 4px; }
+/* Which folder the Changes pane reads from: full path, wraps rather than cuts. */
+.side-path { display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 2px 4px 10px; }
+.side-path-k { color: var(--dim); flex: none; }
+.side-path-v { font-family: var(--mono, ui-monospace, monospace); overflow-wrap: anywhere; user-select: text; }
 .side-note.err { color: var(--danger); }
 .side-out {
   margin: 0 0 10px;
@@ -1604,6 +1608,8 @@ button.pop-opt[aria-selected="true"] .pop-main::after { content: " ✓"; color: 
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line);
 }
+/* Several projects under one session folder: wrap rather than scroll. */
+.projbar { flex-wrap: wrap; }
 /* --pc is per-button brand (harness chips); falls back to session --accent. */
 .pill[aria-pressed="true"],
 .pill[aria-selected="true"] {

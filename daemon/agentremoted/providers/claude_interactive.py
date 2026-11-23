@@ -70,6 +70,7 @@ import uuid
 from ..config import CONFIG_DIR, ensure_tmux_server, tmux_socket
 from ..live_tui import TUI_COLS, TUI_ROWS, idle_eviction_victim
 from .. import session_prefs
+from .. import projects as _projects
 
 log = logging.getLogger(__name__)
 
@@ -538,9 +539,26 @@ class InteractiveManager:
             tui.transcript = transcript or tui.transcript
             self._save_state()  # keep the on-disk mapping restart-ready
         job = tui.job
-        if event == "SessionStart":
+        if event == "UserPromptSubmit":
+            # A prompt typed straight into the pane: no job of ours started
+            # this turn, so nothing snapshotted the project for the Changes
+            # view's "This turn". Do it now, before the agent runs (the hook
+            # holds the prompt until it returns; curl gives up at 5 s).
+            # A turn the daemon sent was marked when its job started.
+            if job is None and not tui.isolate_root:
+                self._mark_typed_turn(tui, payload)
+        elif event == "SessionStart":
             tui.start_event.set()
         elif event == "Stop":
+            if job is None and not tui.isolate_root:
+                # Same turn, other end: learn where it wrote, off-thread.
+                cwd = str(payload.get("cwd") or tui.cwd or "")
+                if cwd and tui.session_id:
+                    threading.Thread(
+                        target=_projects.learn,
+                        args=(cwd, tui.session_id,
+                              getattr(self, "runner", None)),
+                        daemon=True).start()
             tui.stop_payload = payload
             tui.stop_event.set()
             # AskUserQuestion blocks the turn, so a turn that reached Stop
@@ -569,6 +587,16 @@ class InteractiveManager:
             if job is not None:
                 job.set_phase("compacting", "")
         return True
+
+    def _mark_typed_turn(self, tui, payload: dict):
+        cwd = str(payload.get("cwd") or tui.cwd or "")
+        if not cwd:
+            return
+        try:
+            _projects.mark_turn(cwd, tui.session_id,
+                                getattr(self, "runner", None), budget=4)
+        except Exception:  # noqa: BLE001 — costs the view, never the turn
+            log.debug("typed-turn snapshot failed for %s", cwd, exc_info=True)
 
     def _notification_message(self, payload: dict) -> str:
         """Banner text for a Notification hook, or "" to ignore the event.

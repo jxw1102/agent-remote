@@ -23,7 +23,7 @@ import time
 import uuid
 
 from . import procutil
-from . import shadow
+from . import projects
 from .config import CONFIG_DIR
 from .providers import RunnerError
 
@@ -578,9 +578,12 @@ class JobManager:
         # mark; bounded so a huge folder costs the view, not the turn.
         # Skipped for a confined guest: the snapshot would run as the
         # daemon's user over a tree that is not theirs to read.
+        # The snapshot is of the session's *project*: the folder itself when
+        # it is a repository, else the repositories below it the agent wrote
+        # in (projects.py), so a session started one level up still marks.
         if cwd and not job.isolate_root:
             try:
-                shadow.mark_turn(cwd)
+                projects.mark_turn(cwd, session_id, self.runner)
             except Exception:
                 log.debug("shadow snapshot failed for %s", cwd, exc_info=True)
         thread = threading.Thread(target=self._run, args=(job, permission_mode), daemon=True)
@@ -984,6 +987,20 @@ class JobManager:
         self._flush_active()
         self._dispatch_next(job)
 
+    def _learn_projects(self, job: Job):
+        """After a turn, note which projects it wrote in (off this thread).
+
+        The next turn's snapshot is taken of those folders before the agent
+        starts, which is what makes "This turn" answer for a session started
+        a level above its project.
+        """
+        sid = job.new_session_id or job.session_id
+        if not job.cwd or not sid or job.isolate_root:
+            return
+        threading.Thread(target=projects.learn,
+                         args=(job.cwd, sid, self.runner),
+                         daemon=True).start()
+
     def _fail_early(self, job: Job, message: str):
         with job.lock:
             job.status = "error"
@@ -993,6 +1010,7 @@ class JobManager:
     def _dispatch_next(self, job: Job):
         """Start the next queued prompt as a follow-up job (resume the fork
         this job created), carrying the rest of the queue along."""
+        self._learn_projects(job)
         with job.lock:
             if job.status != "done":
                 # Failed/stopped runs don't dispatch; report the drop.

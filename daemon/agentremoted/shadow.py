@@ -152,6 +152,20 @@ def _too_big_to_be_a_project(cwd):
     return parent == "/" and real != "/"
 
 
+def too_big(cwd):
+    """Home, / or one level under /: never snapshotted (see below)."""
+    return _too_big_to_be_a_project(cwd)
+
+
+def unwalkable(cwd):
+    """Whether a snapshot of `cwd` is refused or recently ran out of time."""
+    if _too_big_to_be_a_project(cwd):
+        return True
+    with _lock:
+        return _blocked.get(cwd, 0.0) > time.time() or \
+            _blocked.get(os.path.realpath(cwd), 0.0) > time.time()
+
+
 def _ensure(cwd):
     """The shadow git dir for `cwd`, created on first use. "" when it can't be."""
     git_dir = _git_dir(cwd)

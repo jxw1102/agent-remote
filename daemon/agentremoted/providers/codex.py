@@ -1797,7 +1797,8 @@ def _codex_step(ev: dict, ln: int, tool_meta: dict = None):
         if tool_meta is not None and cid:
             tool_meta[str(cid)] = (name, path)
         return steps_mod.tool_use("cu%d" % ln, ts, name,
-                                  _codex_call_detail(args), body, lang=lang)
+                                  _codex_call_detail(args), body, lang=lang,
+                                  raw=args)
     if ptype in ("function_call_output", "custom_tool_call_output"):
         out = p.get("output")
         if not isinstance(out, str):

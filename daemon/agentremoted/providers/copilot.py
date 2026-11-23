@@ -285,7 +285,8 @@ def build_transcript(path, want_steps: bool = False):
                                 "cu%d_%d" % (ln, j), ts, name,
                                 tool_detail(name, args),
                                 steps_mod.format_tool_use(name, args),
-                                lang=steps_mod.lang_for_tool_use(name, args))))
+                                lang=steps_mod.lang_for_tool_use(name, args),
+                                raw=args)))
                 elif et == "tool.execution_complete" and want_steps:
                     name = tool_names.get(str(data.get("toolCallId") or ""), "")
                     body = steps_mod.format_tool_result(_result_text(data), name)

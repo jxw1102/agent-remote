@@ -64,7 +64,8 @@ class ShadowTurnTest(unittest.TestCase):
         # rather than showing an empty diff.
         first = changes.collect_turn(work)
         self.assertFalse(first["available"])
-        self.assertIn("No turn has run", first["reason"])
+        self.assertIn("No snapshot of this folder", first["reason"])
+        self.assertTrue(first.get("no_mark"))
 
         shadow.mark_turn(work)
         write(work, "a.txt", "one\ntwo\n")

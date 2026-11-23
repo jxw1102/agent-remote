@@ -384,17 +384,32 @@ def collect_turn(cwd):
     there is no mark to measure from — a folder no turn has run in since the
     daemon started, one too large to snapshot, or a machine without git.
     """
-    def unavailable(reason):
-        return {"repo": False, "scope": "turn", "available": False,
-                "reason": reason, "files": [], "diff": "",
-                "added": 0, "removed": 0, "more_files": 0,
-                "truncated": False, "can_publish": False}
+    def unavailable(reason, no_mark=False):
+        out = {"repo": False, "scope": "turn", "available": False,
+               "reason": reason, "files": [], "diff": "",
+               "added": 0, "removed": 0, "more_files": 0,
+               "truncated": False, "can_publish": False}
+        if no_mark:
+            # The server falls back to "since last commit" on this.
+            out["no_mark"] = True
+        return out
 
     base = shadow.base_for(cwd)
     if base is None:
+        if shadow.too_big(cwd):
+            return unavailable(
+                "This folder is too large to snapshot (your home folder, or "
+                "one level under /), so there is no turn to measure.")
+        if shadow.unwalkable(cwd):
+            return unavailable(
+                "This folder took too long to snapshot when the last turn "
+                "started, so that turn was not measured. Start sessions in "
+                "the project folder itself, or let the agent edit a file "
+                "there so the next turn is measured in its project.")
         return unavailable(
-            "No turn has run in this folder yet. The next one is measured "
-            "from where the folder stands when it starts.")
+            "No snapshot of this folder was taken before a turn yet. The "
+            "next turn is measured from where the folder stands when it "
+            "starts.", no_mark=True)
     head = shadow.snapshot(cwd)
     if not head:
         return unavailable(
