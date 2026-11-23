@@ -19,6 +19,13 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.31.3** The request log no longer carries secrets. The API token and
+the TUI hook secret travel in the URL on a few routes (links a browser
+opens, event streams, the hook a terminal posts to), and the request line
+went into `daemon.log` in clear. `secret=` and `token=` query values are
+now written as `<redacted>`. A log written by an earlier version still
+holds them: scrub or delete it.
+
 **2.31.2** Fixes from a code review of scrollback paging. A history that
 got shorter than the client last heard (tmux trimmed it, or the program
 cleared it) answers with the newest page and `reset: true`, so the client

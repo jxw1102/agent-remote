@@ -300,6 +300,18 @@ def _sanitize(obj):
     return str(obj)
 
 
+# The API token and the TUI hook secret travel in a URL's query on a few
+# routes (links a browser opens, event streams, the hook a terminal posts
+# to). The request line is logged, so they went into daemon.log in clear.
+_SECRET_PARAMS = re.compile(r"([?&](?:secret|token)=)[^&\s\"']+", re.I)
+
+
+def redact_secrets(text: str) -> str:
+    """`text` with the value of any `secret=` / `token=` query parameter
+    replaced, for logging."""
+    return _SECRET_PARAMS.sub(r"\1<redacted>", text or "")
+
+
 class ApiHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "agentremoted/" + __version__
@@ -1006,7 +1018,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             t.join(timeout=0.1)
 
     def log_message(self, fmt, *args):
-        log.info("%s %s", self._caller_ip(), fmt % args)
+        log.info("%s %s", self._caller_ip(), redact_secrets(fmt % args))
 
     def _caller_ip(self):
         """The socket peer, except when it's the loopback of a local
@@ -2064,7 +2076,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             route()
         except Exception:
-            log.exception("unhandled error handling %s %s", self.command, self.path)
+            log.exception("unhandled error handling %s %s", self.command,
+                          redact_secrets(self.path))
             try:
                 self._error(500, "internal server error")
             except OSError:
