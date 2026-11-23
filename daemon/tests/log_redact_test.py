@@ -39,6 +39,15 @@ check("a parameter that only ends with the name is left alone",
       redact_secrets("/x?mytoken=1") == "/x?mytoken=1")
 check("nothing to redact, nothing changed",
       redact_secrets('"GET /api/ping HTTP/1.1" 200 -') == '"GET /api/ping HTTP/1.1" 200 -')
+tok = "AbCdEf0123456789_-AbCdEf01"
+check("a share page's token is gone",
+      redact_secrets('"GET /share/%s HTTP/1.1" 200 -' % tok)
+      == '"GET /share/<redacted> HTTP/1.1" 200 -')
+check("a share API token is gone, the rest of the path stays",
+      redact_secrets("GET /api/share/%s/messages?offset=0" % tok)
+      == "GET /api/share/<redacted>/messages?offset=0")
+check("the share list route is left alone",
+      redact_secrets("GET /api/share HTTP/1.1") == "GET /api/share HTTP/1.1")
 check("empty is empty", redact_secrets("") == "" and redact_secrets(None) == "")
 
 print()

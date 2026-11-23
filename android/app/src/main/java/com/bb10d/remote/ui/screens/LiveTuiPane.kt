@@ -174,6 +174,8 @@ fun LiveTuiPane(
     val shownText = held?.first ?: text
     val shownHistory = held?.second ?: history.text
     val liveNow = androidx.compose.runtime.rememberUpdatedState(text to history.text)
+    // The terminal went away under a hold: the copy is of nothing now.
+    LaunchedEffect(seq == 0L) { if (seq == 0L) held = null }
     // [0]: when the history was last found empty (asked again, not at once).
     val histEmptyAt = remember(ref.key) { longArrayOf(0L) }
     fun loadHistory(older: Boolean) {
@@ -276,6 +278,11 @@ fun LiveTuiPane(
                 loadHistory(older = false)
             }
         }
+    }
+    // Let go: what scrolled off during the hold joins the scrollback, though
+    // an idle terminal sends no frame to prompt it.
+    LaunchedEffect(held == null) {
+        if (held == null && history.lines > 0) loadHistory(older = false)
     }
     val atTop by remember { androidx.compose.runtime.derivedStateOf { scroll.value <= 4 } }
     LaunchedEffect(atTop, seq, canHistory) {

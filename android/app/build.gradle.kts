@@ -13,8 +13,8 @@ android {
         applicationId = "com.bb10d.remote"
         minSdk = 26
         targetSdk = 36
-        versionCode = 101
-        versionName = "1.9.67"
+        versionCode = 102
+        versionName = "1.9.68"
         resourceConfigurations += listOf("en")
     }
 

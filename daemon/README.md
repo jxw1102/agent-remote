@@ -19,6 +19,13 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.31.4** The request log leaves out share tokens too: a share link's
+token is its path (`/share/<token>`, `/api/share/<token>`), and it was
+logged in clear. Web and Android 1.9.68: text in the terminal can be
+selected (the screen is held still while it is), with fixes from a code
+review. BlackBerry 10's terminal view is not changed and was not built;
+the pager has no terminal view.
+
 **2.31.3** The request log no longer carries secrets. The API token and
 the TUI hook secret travel in the URL on a few routes (links a browser
 opens, event streams, the hook a terminal posts to), and the request line

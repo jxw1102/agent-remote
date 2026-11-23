@@ -4074,6 +4074,7 @@ let tuiHist = { text: "", lines: 0, total: 0, more: true, loading: false, gen: 0
 let tuiHistTimer = null;
 
 function resetTuiHistory() {
+  resetTuiHold();
   clearTimeout(tuiHistTimer);
   tuiHistTimer = null;
   tuiHist = { text: "", lines: 0, total: 0, more: true, loading: false, gen: tuiHist.gen + 1 };
@@ -4119,6 +4120,9 @@ async function loadTuiHistory({ older = true } = {}) {
       { timeout: 20000 });
     if (gen !== tuiHist.gen) return;
     if (!got || !got.attached) { tuiHist.more = false; return; }
+    // A selection begun while this was on its way: the page is let go (the
+    // cursor has not moved) and asked for again when the selection ends.
+    if (tuiSelecting()) return;
     const rows = got.text ? String(got.text).split("\n") : [];
     const pane = $("live-tui-pane");
     const before = pane.scrollHeight;
@@ -4247,18 +4251,46 @@ function releaseTuiHold() {
   const pane = $("live-tui-pane");
   if (tuiSelecting()) return;
   if (pane) pane.classList.remove("held");
-  if (tuiHeldFrame && state.liveTui) {
-    const frame = tuiHeldFrame;
-    tuiHeldFrame = null;
-    paintLiveTuiFrame(frame, false);
-  }
+  const frame = tuiHeldFrame;
   tuiHeldFrame = null;
+  if (!state.liveTui) return;
+  if (frame) paintLiveTuiFrame(frame, false);
+  // What was put off under the selection: a page asked for at the top,
+  // and the lines that scrolled off meanwhile.
+  maybeLoadTuiHistory();
+  refreshTuiHistorySoon();
+}
+
+/** Forget any hold: another session's terminal, or this one closed. A frame
+    kept for one session must never be drawn into another. */
+function resetTuiHold() {
+  tuiPointerDown = false;
+  tuiHeldFrame = null;
+  $("live-tui-pane")?.classList.remove("held");
+}
+
+/** The reader is typing into the terminal: a selection left lying in it must
+    not keep the screen from showing what they type. */
+function dropTuiSelection() {
+  if (tuiPointerDown) return;
+  const sel = window.getSelection ? window.getSelection() : null;
+  const pane = $("live-tui-pane");
+  if (sel && !sel.isCollapsed && sel.anchorNode && pane && pane.contains(sel.anchorNode)) {
+    sel.removeAllRanges();
+    releaseTuiHold();
+  }
 }
 
 function wireTuiSelection() {
   const pane = $("live-tui-pane");
   if (!pane) return;
-  pane.addEventListener("pointerdown", () => { tuiPointerDown = true; });
+  pane.addEventListener("pointerdown", (e) => {
+    // The main button on the text only: not a right click (its menu takes
+    // the pointerup), and not a press on the pane's scrollbar.
+    if (e.button !== 0) return;
+    if (e.target === pane && (e.offsetX >= pane.clientWidth || e.offsetY >= pane.clientHeight)) return;
+    tuiPointerDown = true;
+  });
   const up = () => {
     if (!tuiPointerDown) return;
     tuiPointerDown = false;
@@ -4267,6 +4299,12 @@ function wireTuiSelection() {
   };
   window.addEventListener("pointerup", up);
   window.addEventListener("pointercancel", up);
+  // A pointerup that never came (let go outside the window, a menu, the
+  // tab hidden) must not leave the terminal held for good.
+  window.addEventListener("blur", up);
+  window.addEventListener("contextmenu", up, true);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) up(); });
+  window.addEventListener("pointermove", (e) => { if (tuiPointerDown && e.buttons === 0) up(); });
   document.addEventListener("selectionchange", () => {
     if (tuiHeldFrame || pane.classList.contains("held")) releaseTuiHold();
   });
@@ -4280,6 +4318,9 @@ function paintLiveTuiFrame(frame, force) {
       $("live-tui-pane").classList.add("held");
       return;
     }
+    // Drawing this one: a frame kept back earlier is older, and is dropped.
+    tuiHeldFrame = null;
+    $("live-tui-pane").classList.remove("held");
     const status = $("live-tui-status");
     const pane = $("live-tui-pane");
     const screen = $("live-tui-screen");
@@ -4387,6 +4428,7 @@ let _tuiSending = false;
 
 function sendLiveTuiKeys(keys, text) {
   liveTuiActiveAt = Date.now();     // the reader acted
+  dropTuiSelection();
   if (text && keys && keys.length) {
     // A whole line from the text field: text, a pause, then Enter. The
     // pause is the daemon's (some harnesses read a fast CR as pasted text).

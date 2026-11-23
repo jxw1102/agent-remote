@@ -304,12 +304,16 @@ def _sanitize(obj):
 # routes (links a browser opens, event streams, the hook a terminal posts
 # to). The request line is logged, so they went into daemon.log in clear.
 _SECRET_PARAMS = re.compile(r"([?&](?:secret|token)=)[^&\s\"']+", re.I)
+# A share link's token is the path itself, and whoever has it can read the
+# shared transcript.
+_SHARE_PATHS = re.compile(r"(/(?:api/)?share/)[A-Za-z0-9_-]{20,64}")
 
 
 def redact_secrets(text: str) -> str:
-    """`text` with the value of any `secret=` / `token=` query parameter
-    replaced, for logging."""
-    return _SECRET_PARAMS.sub(r"\1<redacted>", text or "")
+    """`text` with the value of any `secret=` / `token=` query parameter and
+    any share link's token replaced, for logging."""
+    text = _SECRET_PARAMS.sub(r"\1<redacted>", text or "")
+    return _SHARE_PATHS.sub(r"\1<redacted>", text)
 
 
 class ApiHandler(BaseHTTPRequestHandler):
