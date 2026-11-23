@@ -19,6 +19,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -163,9 +166,19 @@ fun LiveTuiPane(
     // it asks for what has scrolled off the screen since, and joins it below.
     // [0]: a refresh met a page in flight and is owed.
     val histOwed = remember(ref.key) { booleanArrayOf(false) }
+    // Every frame replaces the screen's text, which throws a selection away:
+    // on a terminal that is doing anything, nothing could be selected. From
+    // a long press until the next plain tap (or Resume) the text shown is
+    // this copy (screen, scrollback), and the terminal runs on behind it.
+    var held by remember(ref.key) { mutableStateOf<Pair<String, String>?>(null) }
+    val shownText = held?.first ?: text
+    val shownHistory = held?.second ?: history.text
+    val liveNow = androidx.compose.runtime.rememberUpdatedState(text to history.text)
     // [0]: when the history was last found empty (asked again, not at once).
     val histEmptyAt = remember(ref.key) { longArrayOf(0L) }
     fun loadHistory(older: Boolean) {
+        // Not under a selection: the scrollback's text changes when it grows.
+        if (held != null) return
         if (history.loading) {
             if (!older) histOwed[0] = true
             return
@@ -355,17 +368,50 @@ fun LiveTuiPane(
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = topInset + 14.dp),
                 )
-            } else Column(
+            } else androidx.compose.foundation.text.selection.SelectionContainer(
+                Modifier.fillMaxSize(),
+            ) { Column(
                 Modifier
                     .fillMaxSize()
+                    // A long press starts a selection: from then the text is
+                    // held still (see `held`). A plain tap, which clears the
+                    // selection, lets it run again. Watched on the way down
+                    // and never consumed, so scrolling and selecting work as
+                    // they did.
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(
+                                requireUnconsumed = false,
+                                pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial,
+                            )
+                            var outcome = "long"
+                            withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                                while (true) {
+                                    val ev = awaitPointerEvent(
+                                        androidx.compose.ui.input.pointer.PointerEventPass.Initial,
+                                    )
+                                    val c = ev.changes.firstOrNull { it.id == down.id }
+                                    if (c == null || !c.pressed) { outcome = "tap"; break }
+                                    if ((c.position - down.position).getDistance() > viewConfiguration.touchSlop) {
+                                        outcome = "move"; break
+                                    }
+                                }
+                            }
+                            when (outcome) {
+                                "long" -> if (held == null) held = liveNow.value
+                                "tap" -> held = null
+                            }
+                        }
+                    }
                     .verticalScroll(scroll)
                     .horizontalScroll(rememberScrollState())
                     .padding(start = 8.dp, end = 8.dp, top = topInset + 6.dp, bottom = 6.dp),
             ) {
                 // What scrolled off the top of the terminal, fetched when the
                 // reader scrolls up to the top (newest just above the screen).
-                if (history.text.isNotEmpty()) AnsiText(
-                    text = history.text,
+                if (shownHistory.isNotEmpty()) AnsiText(
+                    text = shownHistory,
+                    selectable = false,
                     modifier = Modifier.onSizeChanged { size ->
                         val grew = size.height - historyHeight[0]
                         historyHeight[0] = size.height
@@ -383,12 +429,31 @@ fun LiveTuiPane(
                     lineHeight = size * 1.3f,
                 )
                 AnsiText(
-                    text = text,
+                    text = shownText,
+                    selectable = false,
                     defaultColor = tuiFg,
                     light = tuiLight,
                     fontFamily = FontFamily.Monospace,
                     fontSize = size,
                     lineHeight = size * 1.3f,
+                )
+            } }
+            // Says why the terminal is not moving, and lets it go.
+            if (held != null && seq != 0L) androidx.compose.material3.Surface(
+                onClick = { held = null },
+                shape = RoundedCornerShape(50),
+                color = MaterialTheme.colorScheme.surface,
+                border = androidx.compose.foundation.BorderStroke(1.dp, pal.hairline),
+                shadowElevation = 6.dp,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 10.dp),
+            ) {
+                Text(
+                    "Held for selecting · Resume",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                 )
             }
         }

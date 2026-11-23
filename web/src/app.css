@@ -3050,3 +3050,13 @@ button.tab-bubble[aria-current="true"]:hover:not(:disabled) { border-color: var(
   }
   .live-tui-line:focus-within { border: 0; }
 }
+
+/* The terminal's text can be selected and copied. While it is (the screen
+   is held still meanwhile), a quiet line at the foot says why it is not
+   moving. */
+.live-tui-pane, .live-tui-pane * {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+.live-tui-pane.held { box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent) 70%, transparent); }

@@ -4100,6 +4100,8 @@ async function loadTuiHistory({ older = true } = {}) {
   const open = state.open;
   const profile = open && profileById(open.profileId);
   if (!profile || !profile.tuiHistory || !state.liveTui) return;
+  // Not under a selection: the scrollback's text is replaced when it grows.
+  if (tuiSelecting()) return;
   if (tuiHist.loading) {
     // A refresh that met a page in flight is owed, not dropped.
     if (!older) tuiHist.owed = true;
@@ -4223,8 +4225,61 @@ function paneIsLight() {
   return (0.2126 * m[1] + 0.7152 * m[2] + 0.0722 * m[3]) / 255 > 0.5;
 }
 
+// ---- selecting text in the terminal ----------------------------------------
+// Every frame used to replace the screen's text, which threw away whatever
+// the reader was selecting: on a terminal that is doing anything, nothing
+// could be selected at all. While a pointer is down on the pane, or text in
+// it is selected, the screen is left as it is and the newest frame waits;
+// it is drawn the moment the selection is let go.
+
+let tuiPointerDown = false;
+let tuiHeldFrame = null;
+
+function tuiSelecting() {
+  if (tuiPointerDown) return true;
+  const sel = window.getSelection ? window.getSelection() : null;
+  if (!sel || sel.isCollapsed || !sel.anchorNode) return false;
+  const pane = $("live-tui-pane");
+  return !!pane && pane.contains(sel.anchorNode);
+}
+
+function releaseTuiHold() {
+  const pane = $("live-tui-pane");
+  if (tuiSelecting()) return;
+  if (pane) pane.classList.remove("held");
+  if (tuiHeldFrame && state.liveTui) {
+    const frame = tuiHeldFrame;
+    tuiHeldFrame = null;
+    paintLiveTuiFrame(frame, false);
+  }
+  tuiHeldFrame = null;
+}
+
+function wireTuiSelection() {
+  const pane = $("live-tui-pane");
+  if (!pane) return;
+  pane.addEventListener("pointerdown", () => { tuiPointerDown = true; });
+  const up = () => {
+    if (!tuiPointerDown) return;
+    tuiPointerDown = false;
+    // The selection settles just after the pointer goes up.
+    setTimeout(releaseTuiHold, 0);
+  };
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
+  document.addEventListener("selectionchange", () => {
+    if (tuiHeldFrame || pane.classList.contains("held")) releaseTuiHold();
+  });
+}
+
 function paintLiveTuiFrame(frame, force) {
   {
+    if (!force && frame && frame.attached !== false && tuiSelecting()) {
+      // Wait: the reader is selecting. Only the newest frame is kept.
+      tuiHeldFrame = frame;
+      $("live-tui-pane").classList.add("held");
+      return;
+    }
     const status = $("live-tui-status");
     const pane = $("live-tui-pane");
     const screen = $("live-tui-screen");
@@ -8490,7 +8545,13 @@ function wire() {
   };
   const tuiKeyboard = () => [0, 150, 350].forEach((ms) => setTimeout(tuiFollow, ms));
   $("live-tui-input")?.addEventListener("focus", tuiKeyboard);
-  $("live-tui-pane")?.addEventListener("focus", () => { if (isCompact()) tuiKeyboard(); });
+  // Only from its end: a press on text higher up is the start of a
+  // selection, and jumping to the bottom would take the text away.
+  $("live-tui-pane")?.addEventListener("focus", () => {
+    const pane = $("live-tui-pane");
+    if (isCompact() && pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48) tuiKeyboard();
+  });
+  wireTuiSelection();
   if (window.visualViewport) {
     let lastTuiH = window.visualViewport.height;
     window.visualViewport.addEventListener("resize", () => {
