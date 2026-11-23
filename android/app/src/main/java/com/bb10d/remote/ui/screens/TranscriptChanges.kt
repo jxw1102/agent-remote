@@ -2,6 +2,8 @@ package com.bb10d.remote.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -103,7 +105,16 @@ private val HIDDEN_META = listOf(
     "index ", "similarity index ", "new file mode", "deleted file mode", "old mode", "new mode",
 )
 
+/** /Users/me/x or /home/me/x as ~/x: the rest of the path is the news. */
+internal fun homeShort(path: String): String =
+    path.replace(Regex("^/(?:Users|home)/[^/]+(?=/|$)"), "~")
+
+/** "app" when the diff is measured below the session folder, else "". */
+internal fun projectLabel(d: ChangesDto): String =
+    d.projects.firstOrNull { it.path == d.project }?.label?.takeIf { it != "." }.orEmpty()
+
 internal fun changesSummary(d: ChangesDto): String = buildList {
+    projectLabel(d).takeIf { it.isNotEmpty() }?.let { add(it) }
     if (d.scope == "turn") {
         add(
             if (d.since > 0) "this turn · started ${shortSpan(nowSeconds() - d.since)} ago"
@@ -152,6 +163,34 @@ private fun ScopeBar(turn: Boolean, onPick: (Boolean) -> Unit) {
     }
 }
 
+/** Which project the diff is measured in, when the agent wrote in several. */
+@Composable
+private fun ProjectBar(d: ChangesDto, onPick: (String) -> Unit) {
+    val pal = palette
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        d.projects.forEach { p ->
+            val on = p.path == d.project
+            Text(
+                if (p.label == ".") "This folder" else p.label,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (on) pal.onAccent else pal.dim,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (on) pal.accent else androidx.compose.ui.graphics.Color.Transparent)
+                    .clickable(role = Role.Tab) { onPick(p.path) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .semantics { selected = on },
+            )
+        }
+    }
+}
+
 @Composable
 internal fun ChangesSheet(
     ui: TranscriptViewModel.ChangesUi,
@@ -160,6 +199,7 @@ internal fun ChangesSheet(
     onPush: () -> Unit,
     canScope: Boolean = false,
     onScope: (Boolean) -> Unit = {},
+    onProject: (String) -> Unit = {},
 ) {
     val pal = palette
     val data = ui.data
@@ -201,6 +241,31 @@ internal fun ChangesSheet(
             TextButton(onClick = onRefresh, enabled = !ui.loading && !ui.busy) { Text("Refresh") }
         }
         if (canScope) ScopeBar(turn = ui.turnScope, onPick = onScope)
+        if (data != null && data.projects.size > 1) ProjectBar(data, onProject)
+        // The folder the diff is read from, spelled out: the session folder
+        // is often a level above it. `root` is git's top level (commit
+        // scope) or the snapshotted folder (turn scope).
+        val where = data?.let { it.root.ifBlank { it.project.ifBlank { it.cwd } } }.orEmpty()
+        if (where.isNotEmpty()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Text(
+                    "Folder",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = pal.dim,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+                Text(
+                    homeShort(where),
+                    style = MonoStyle.copy(fontSize = 12.sp),
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
         Hairline()
 
         LazyColumn(
@@ -222,6 +287,9 @@ internal fun ChangesSheet(
                             .padding(10.dp),
                     )
                 }
+            }
+            if (data != null && data.notice.isNotEmpty()) {
+                item(key = "notice") { Note(data.notice, pal.dim) }
             }
             when {
                 ui.error != null -> item(key = "error") { Note(ui.error, pal.danger) }
@@ -255,7 +323,7 @@ internal fun ChangesSheet(
                 data.files.isEmpty() -> item(key = "clean") {
                     Note(
                         if (data.scope == "turn") {
-                            "Nothing in this folder changed during the last turn."
+                            "Nothing here changed during the last turn."
                         } else {
                             "Nothing differs from the last commit." + when (data.ahead) {
                                 0 -> ""

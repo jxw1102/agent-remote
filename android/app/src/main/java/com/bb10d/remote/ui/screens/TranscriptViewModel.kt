@@ -1010,6 +1010,8 @@ class TranscriptViewModel(
         val output: String = "",
         val busy: Boolean = false,
         val turnScope: Boolean = false,
+        /** The project picked when the agent wrote in several; "" = the daemon's pick. */
+        val root: String = "",
         /** Counts commits that succeeded, so the sheet knows when to clear its message. */
         val committed: Int = 0,
     )
@@ -1033,14 +1035,22 @@ class TranscriptViewModel(
         loadChanges()
     }
 
+    /** Measure in another of the session's projects. */
+    fun setChangesRoot(path: String) {
+        if (_changes.value.data?.project == path) return
+        _changes.value = _changes.value.copy(root = path, data = null)
+        loadChanges()
+    }
+
     fun loadChanges() {
         val c = client ?: return
         val sid = _ref.value.sessionId
         if (sid.isEmpty() || !_changes.value.open) return
         val turn = _changes.value.turnScope
+        val root = _changes.value.root
         _changes.value = _changes.value.copy(loading = true, error = null)
         viewModelScope.launch {
-            val result = runCatching { c.changes(sid, turn = turn) }
+            val result = runCatching { c.changes(sid, turn = turn, root = root) }
             if (!_changes.value.open) return@launch
             _changes.value = result.fold(
                 onSuccess = { _changes.value.copy(loading = false, data = it) },

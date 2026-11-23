@@ -602,7 +602,20 @@ data class ChangesDto(
     val removed: Int = 0,
     val diff: String = "",
     val truncated: Boolean = false,
+    /**
+     * The folder the diff is measured in (daemon 2.28). A session started a
+     * level above its repositories is measured in the one the agent wrote
+     * in; [projects] lists every one found, newest edit first.
+     */
+    val project: String = "",
+    val projects: List<ChangesProjectDto> = emptyList(),
+    /** Why the answer is not the scope asked for (turn fell back to commit). */
+    val notice: String = "",
 )
+
+/** One project under a session folder; [label] is "." for the folder itself. */
+@Serializable
+data class ChangesProjectDto(val path: String = "", val label: String = "")
 
 @Serializable
 data class ErrorDto(val error: String = "")

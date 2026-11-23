@@ -361,12 +361,18 @@ class DaemonClient(
     // recency window, and that is exactly the row that must not be lost.
 
     /** What differs from the last commit in a session's folder (daemon ≥ 2.24). */
-    suspend fun changes(sessionId: String, turn: Boolean = false): ChangesDto =
-        call(
-            request(url("api/sessions/$sessionId/changes" + if (turn) "?scope=turn" else ""))
+    suspend fun changes(sessionId: String, turn: Boolean = false, root: String = ""): ChangesDto {
+        val q = buildList {
+            if (turn) add("scope=turn")
+            // One of the projects the daemon found under the folder (≥ 2.28).
+            if (root.isNotEmpty()) add("root=" + java.net.URLEncoder.encode(root, "UTF-8"))
+        }
+        return call(
+            request(url("api/sessions/$sessionId/changes" + if (q.isEmpty()) "" else "?" + q.joinToString("&")))
                 .get().build(),
             ChangesDto.serializer(),
         )
+    }
 
     suspend fun focus(): FocusDto =
         call(request(url("api/focus")).get().build(), FocusDto.serializer())

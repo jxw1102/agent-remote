@@ -644,6 +644,7 @@ private fun TranscriptScreenBody(
                 onPush = vm::pushChanges,
                 canScope = profile?.caps?.changesTurn == true,
                 onScope = vm::setChangesTurnScope,
+                onProject = vm::setChangesRoot,
             )
         }
     }
