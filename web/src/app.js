@@ -2509,6 +2509,7 @@ async function openSession(row) {
   syncComposer();
   syncChangesButton();
   side.msg = "";      // a commit message belongs to the session it was typed in
+  side.root = "";    // the project picked in another session means nothing here
   if (side.open) { side.data = null; side.out = ""; side.form = false; loadChanges(); }
   $("chat-title").textContent = row.session.title || "Session";
   renderChatSub();
@@ -2623,7 +2624,7 @@ function syncShareButton() {
 // tree against its last commit. Read-only on the daemon; commit and push are
 // explicit actions here, run through the same /api/shell as a "!command".
 
-const side = { open: false, loading: false, data: null, error: "", gen: 0, out: "", form: false, busy: false, msg: "", scope: "commit" };
+const side = { open: false, loading: false, data: null, error: "", gen: 0, out: "", form: false, busy: false, msg: "", scope: "commit", root: "" };
 
 function syncChangesButton() {
   const btn = $("btn-changes");
@@ -2673,9 +2674,14 @@ async function loadChanges() {
   renderSide();
   try {
     const turn = side.scope === "turn" && profile.changesTurn;
+    // ?root= (agentremoted ≥ 2.28): one of the projects the daemon found
+    // under the session folder, when the agent wrote in more than one.
+    const q = [];
+    if (turn) q.push("scope=turn");
+    if (side.root) q.push("root=" + encodeURIComponent(side.root));
     const data = await call(profile,
       `/api/sessions/${encodeURIComponent(sid)}/changes`
-      + (turn ? "?scope=turn" : ""), { timeout: 30000 });
+      + (q.length ? "?" + q.join("&") : ""), { timeout: 30000 });
     if (gen !== side.gen) return;
     side.data = data;
   } catch (e) {
@@ -2749,6 +2755,46 @@ function scopeBar() {
   return bar;
 }
 
+/**
+ * Which project the diff is measured in. A session started a level above
+ * its repositories is measured in the one the agent wrote in; with more
+ * than one, these pills switch between them (daemon ≥ 2.28).
+ */
+function projectBar(d) {
+  const list = (d && d.projects) || [];
+  if (list.length < 2) return null;
+  const bar = el("div", "scopebar projbar");
+  bar.setAttribute("role", "tablist");
+  bar.setAttribute("aria-label", "Project");
+  list.forEach((p) => {
+    const b = el("button", "pill", p.label === "." ? "This folder" : p.label);
+    b.type = "button";
+    b.title = p.path;
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", String(d.project === p.path));
+    b.addEventListener("click", () => {
+      if (d.project === p.path) return;
+      side.root = p.path;
+      side.data = null;
+      side.form = false;
+      loadChanges();
+    });
+    bar.appendChild(b);
+  });
+  return bar;
+}
+
+/** /Users/me/x or /home/me/x as ~/x: the rest of the path is the news. */
+function homeShort(path) {
+  return String(path || "").replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
+}
+
+/** "app" when the diff is measured below the session folder, else "". */
+function projectLabel(d) {
+  const p = ((d && d.projects) || []).find((x) => x.path === d.project);
+  return p && p.label !== "." ? p.label : "";
+}
+
 function renderSide() {
   const body = $("side-body");
   const sub = $("side-sub");
@@ -2777,6 +2823,23 @@ function renderSide() {
     return;
   }
   if (!d) return;
+  const pbar = projectBar(d);
+  if (pbar) body.appendChild(pbar);
+  // The folder the diff is read from, spelled out: the session folder is
+  // often a level above it, and "which repository is this?" is the first
+  // question. `root` is git's top level (commit scope) or the snapshotted
+  // folder (turn scope); older daemons only send `cwd`.
+  const where = d.root || d.project || d.cwd || "";
+  if (where) {
+    const row = el("div", "side-path");
+    row.appendChild(el("span", "side-path-k", "Folder"));
+    row.appendChild(el("span", "side-path-v", homeShort(where)));
+    row.title = where;
+    body.appendChild(row);
+  }
+  // The turn had no snapshot here, so the daemon answered "since last
+  // commit" instead, and says so.
+  if (d.notice) body.appendChild(el("div", "side-note", d.notice));
   // scope=turn with no mark to measure from: the daemon says why.
   if (d.available === false) {
     sub.textContent = d.cwd || "";
@@ -2803,6 +2866,8 @@ function renderSide() {
   }
   const turnScope = d.scope === "turn";
   const bits = [];
+  const plabel = projectLabel(d);
+  if (plabel) bits.push(plabel);
   if (turnScope) {
     bits.push(d.since
       ? `this turn · started ${shortSpan(Date.now() / 1000 - d.since)} ago`
@@ -2821,7 +2886,7 @@ function renderSide() {
 
   if (!files.length) {
     body.appendChild(el("div", "side-note", turnScope
-      ? "Nothing in this folder changed during the last turn."
+      ? "Nothing here changed during the last turn."
       : "Nothing differs from the last commit."
         + (d.ahead ? ` ${d.ahead} ${d.ahead === 1 ? "commit is" : "commits are"} not pushed yet.` : "")));
   } else {
