@@ -740,6 +740,7 @@ private fun TranscriptScreenBody(
                             // Any daemon that runs interactive turns can start one, so
                             // this does not wait on what the last ping said of auto mode.
                             onStartTerminal = if (profile?.caps?.interactive == true) vm::startTerminal else null,
+                            startError = if (jobState.status == "error") jobState.error else "",
                             accentColor = accent.tint,
                             onAccentColor = accent.onTint,
                             onTerminal = vm::terminalSeen,

@@ -6033,6 +6033,16 @@ async function pollJob() {
     if (side.open) loadChanges();
     // Only real job errors — never "failed" for empty/unknown status.
     if (snap.status === "error") notes.push(snap.error || "The turn failed");
+    // Sent from the TUI view (a line that was to start a terminal): the
+    // notice in the conversation is out of sight there, so say it here too.
+    if (snap.status === "error" && state.liveTui && jobBelongsToOpen(job)) {
+      const why = snap.error || "The turn failed";
+      toast(why);
+      const pane = $("live-tui-pane");
+      if (pane && pane.classList.contains("empty-tui")) {
+        $("live-tui-screen").textContent = "The terminal did not start.\n\n" + why;
+      }
+    }
     if (snap.status === "stopped") notes.push("Stopped");
     if (snap.dropped_queued) notes.push(`${snap.dropped_queued} queued prompt(s) dropped`);
     const endGen = paintCtx.gen;

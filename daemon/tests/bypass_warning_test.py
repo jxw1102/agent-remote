@@ -48,5 +48,16 @@ check("the folder-trust dialog does not block", m._blocked_reason(TRUST) == "")
 check("a ready pane does not block",
       m._blocked_reason(READY) == "" and m._pane_is_ready(READY))
 
+# A session held by Claude's background agents: named, with what to run.
+from agentremoted.providers.claude_interactive import (  # noqa: E402
+    _background_session, _background_help)
+BG = ("That session is running in the background (9393e381). Run `claude attach 9393e381` to open it, or `claude stop 9393e381`\n"
+      "first to resume it here. Add --fork-session to branch off a copy instead.\n")
+check("a session running in the background is recognized", _background_session(BG) == "9393e381")
+check("an ordinary pane is not", _background_session(READY) == "")
+check("the turn is told what to run on the host",
+      "claude stop 9393e381" in m._blocked_reason(BG) and "background agents" in m._blocked_reason(BG))
+check("the help names the id", "`claude stop 9393e381`" in _background_help("9393e381"))
+
 print("FAILED: %d" % failed if failed else "all passed")
 sys.exit(1 if failed else 0)

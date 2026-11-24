@@ -118,6 +118,9 @@ fun LiveTuiPane(
     onStartTerminal: ((String) -> Unit)? = null,
     /** The terminal is there (true once a live frame has come). */
     onTerminal: (Boolean) -> Unit = {},
+    /** Why the last turn failed, when it did: shown here, where a line that
+     *  was to start a terminal was sent from. */
+    startError: String = "",
     /** The session's accent, as on the chat's Send. */
     accentColor: Color? = null,
     onAccentColor: Color? = null,
@@ -139,7 +142,7 @@ fun LiveTuiPane(
     val seq = view.seq
     val cols = view.cols
     var keyError by remember { mutableStateOf<String?>(null) }
-    val error = keyError ?: view.error
+    val error = keyError ?: view.error ?: startError.takeIf { it.isNotBlank() && !view.live }
     LaunchedEffect(view.live) { onTerminal(view.live) }
     val scroll = rememberScrollState()
     // The bottom of a terminal is where it is used (the prompt, the cursor),

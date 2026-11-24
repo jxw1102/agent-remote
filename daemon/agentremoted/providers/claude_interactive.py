@@ -231,6 +231,28 @@ def _bypass_warning(text: str) -> bool:
         and "No, exit" in tail and not _claude_pane_ready(text)
 
 
+def _background_session(text: str) -> str:
+    """The id of a session Claude refuses to resume because it is running in
+    its background agents (`claude agents`) on this host, else "".
+
+    Claude prints "That session is running in the background (<id>). Run
+    `claude attach <id>` to open it, or `claude stop <id>` first to resume it
+    here." and exits with status 1, so the pane never becomes ready.
+    """
+    if not text or "running in the background" not in text:
+        return ""
+    m = re.search(r"claude stop ([A-Za-z0-9_-]+)", text)
+    return m.group(1) if m else "?"
+
+
+def _background_help(sid: str) -> str:
+    stop = "`claude stop %s`" % sid if sid and sid != "?" else "`claude stop <id>`"
+    return ("This session is running in Claude's background agents on this "
+            "host, so a terminal for it cannot be opened here. On the host, "
+            "run %s (or close it from `claude agents`), then send the "
+            "message again." % stop)
+
+
 _BYPASS_WARNING_HELP = (
     "Claude Code is waiting for a one-time answer on this host: it asks you "
     "to accept Bypass Permissions mode, which interactive turns run in. On "
@@ -447,7 +469,10 @@ class InteractiveManager:
 
     def _blocked_reason(self, text: str) -> str:
         """Non-empty when the pane is waiting on a human we must not key past."""
-        return _BYPASS_WARNING_HELP if _bypass_warning(text) else ""
+        if _bypass_warning(text):
+            return _BYPASS_WARNING_HELP
+        bg = _background_session(text)
+        return _background_help(bg) if bg else ""
 
     def _startup_key(self, text: str, nudge_i: int) -> str:
         """One tmux key to dismiss first-run chrome, or "" to leave the pane."""
@@ -1063,7 +1088,9 @@ class InteractiveManager:
                     or dead):
                 tail = self._pane_tail(tui.name)
                 self._kill(tui)
-                extra = why or tail
+                # Both: the status alone ("exit status 1") says nothing of
+                # why, and the screen's last lines usually do.
+                extra = " — ".join(x for x in (why, tail) if x)
                 return ("%s TUI did not become ready" % self.product +
                         (" — screen: %s" % extra if extra else ""))
             if (time.time() - last_nudge) >= _SPLASH_NUDGE_S:

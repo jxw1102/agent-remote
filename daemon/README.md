@@ -19,6 +19,15 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.31.5** A session held by Claude's background agents says so. When a
+session is open in `claude agents` on the host, `claude --resume` refuses
+it and exits; the interactive turn used to fail with "TUI did not become
+ready — screen: exit status 1". It now fails with what to do: run
+`claude stop <id>` on the host, then send again. Other start failures
+carry the screen's last lines as well as the exit status. Web and Android
+1.9.71 show a turn's failure in the TUI view, where it was sent from, and
+start a terminal from that view on any daemon that runs interactive turns.
+
 **2.31.4** The request log leaves out share tokens too: a share link's
 token is its path (`/share/<token>`, `/api/share/<token>`), and it was
 logged in clear. Web and Android 1.9.68: text in the terminal can be
