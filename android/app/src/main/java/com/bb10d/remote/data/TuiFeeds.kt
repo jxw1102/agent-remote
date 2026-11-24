@@ -165,7 +165,7 @@ class TuiFeeds(private val repo: AgentRepository, private val scope: CoroutineSc
                         detached = true,
                         status = frame.error.ifBlank { "No host TUI attached" },
                         text = if (v.seq == 0L) {
-                            if (repo.profile(ref.profileId)?.caps?.autoExec == true)
+                            if (repo.profile(ref.profileId)?.caps?.interactive == true)
                                 "No terminal for this session yet.\nType a line below and send it to start one."
                             else frame.error.ifBlank {
                                 "No interactive TUI for this session. Start a turn in Interactive mode."

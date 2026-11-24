@@ -1342,11 +1342,24 @@ async function pingProfile(profile) {
     syncShareButton();
     // Models, efforts and capabilities may have just arrived or changed.
     if (state.open && state.open.profileId === profile.id) { syncComposer(); syncChangesButton(); }
+    delete pingRetries[profile.id];
     return true;
   } catch {
+    // What the daemon can do is not known (or is stale, after an upgrade)
+    // until a ping gets through: try again a few times, further apart.
+    const n = pingRetries[profile.id] || 0;
+    if (n < PING_RETRY_MS.length) {
+      pingRetries[profile.id] = n + 1;
+      setTimeout(() => {
+        const p = profileById(profile.id);
+        if (p) pingProfile(p).then((ok) => { if (ok) { store.save(); renderFilters(); } });
+      }, PING_RETRY_MS[n]);
+    }
     return false;
   }
 }
+const PING_RETRY_MS = [4000, 15000, 60000];
+const pingRetries = {};
 
 const capOf = (profile, key, fallback = false, harness = null) => {
   if (harness && profile && profile.providerDetails && profile.providerDetails[harness]) {
@@ -4331,7 +4344,8 @@ function paintLiveTuiFrame(frame, force) {
       state.liveTuiSeq = 0;
       if (force || !pane.dataset.hadFrame) {
         const prof = state.open && profileById(state.open.profileId);
-        screen.textContent = prof && prof.autoExec
+        screen.textContent = prof && capOf(prof, "interactive", true,
+          sessionProvider(state.open && state.open.session, prof))
           ? "No terminal for this session yet.\nType a line below and send it to start one."
           : (frame?.error
             || "No interactive TUI for this session. Start a turn in Interactive mode.");
@@ -8440,10 +8454,15 @@ function wire() {
     const text = (input?.value || "").trim();
     if (!text) return;
     const prof = state.open && profileById(state.open.profileId);
-    if (prof && prof.autoExec && state.open.hasTui === false) {
+    const canStart = prof && capOf(prof, "interactive", true,
+      sessionProvider(state.open && state.open.session, prof));
+    if (canStart && state.open.hasTui === false) {
       // The daemon says the session has no terminal (none yet, or gone):
       // the line sent from here starts one (an interactive turn), and Chat
       // shares it from then on. Merely not connected yet is not that.
+      // Any daemon that runs interactive turns can do this, so it does not
+      // wait on what the last ping said about auto mode: a ping that
+      // failed left the line going out as keystrokes, refused with 409.
       const sent = await send(text, { mode: "interactive" });
       if (sent === false) return;      // refused: the line stays to be fixed
     } else {

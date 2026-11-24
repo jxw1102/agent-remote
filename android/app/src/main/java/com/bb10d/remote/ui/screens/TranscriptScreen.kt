@@ -737,7 +737,9 @@ private fun TranscriptScreenBody(
                             running = jobState.running,
                             onStop = vm::stop,
                             // No terminal yet: the first line sent starts one.
-                            onStartTerminal = if (profile?.caps?.autoExec == true) vm::startTerminal else null,
+                            // Any daemon that runs interactive turns can start one, so
+                            // this does not wait on what the last ping said of auto mode.
+                            onStartTerminal = if (profile?.caps?.interactive == true) vm::startTerminal else null,
                             accentColor = accent.tint,
                             onAccentColor = accent.onTint,
                             onTerminal = vm::terminalSeen,
