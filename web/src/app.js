@@ -6305,6 +6305,18 @@ function setConn(id, next) {
   const cur = state.conn[id];
   if (cur && cur.state === next) return;
   state.conn[id] = { state: next, since: Date.now() };
+  // Back after an outage: the daemon may have been restarted on another
+  // version, so what it can do is asked again. Without this a page left
+  // open across an upgrade kept the old daemon's abilities (no auto mode,
+  // no scrollback) until it was reloaded.
+  if (next === "live" && cur && (cur.state === "reconnecting" || cur.state === "offline")) {
+    const profile = profileById(id);
+    if (profile) {
+      pingProfile(profile).then(() => {
+        if (state.open && state.open.profileId === id) { probeTui(); syncComposer(); }
+      }).catch(() => {});
+    }
+  }
   renderTabs();     // each bubble's dot says whether its daemon is live
   clearTimeout(connTimers[id]);
   delete connTimers[id];

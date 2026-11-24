@@ -129,9 +129,19 @@ class AgentRepository(context: Context, private val scope: CoroutineScope) {
     private val connGrace = ConcurrentHashMap<String, Job>()
 
     private fun setConn(id: String, next: ConnState) {
-        if (_conn.value[id] == next) return
+        val was = _conn.value[id]
+        if (was == next) return
         connGrace.remove(id)?.cancel()
         _conn.value = _conn.value + (id to next)
+        // Back after an outage: the daemon may have been restarted on
+        // another version, so what it can do is asked again. Without this
+        // the app kept the old daemon's abilities across an upgrade until
+        // the list was next refreshed.
+        if (next == ConnState.LIVE && (was == ConnState.RECONNECTING || was == ConnState.OFFLINE)) {
+            profiles.value.profiles.firstOrNull { it.id == id }?.let { p ->
+                scope.launch { runCatching { pingProfile(p) } }
+            }
+        }
         _streamsUp.value =
             if (next == ConnState.LIVE) _streamsUp.value + id else _streamsUp.value - id
         when (next) {
