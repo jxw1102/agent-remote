@@ -512,6 +512,16 @@ class DaemonClient(
     }
 
     /** Whether a terminal is alive for the session (agentremoted ≥ 2.30). */
+    /**
+     * Force stop a session on its host (agentremoted ≥ 2.32): its running
+     * turn, the daemon's terminal for it, and Claude's background copy.
+     */
+    suspend fun resetSession(sessionId: String): com.bb10d.remote.data.SessionResetDto = call(
+        request(url("api/sessions/$sessionId/reset")).post(jsonBody(buildJsonObject {})).build(),
+        com.bb10d.remote.data.SessionResetDto.serializer(),
+        timeoutSeconds = 60,
+    )
+
     suspend fun tuiState(sessionId: String): com.bb10d.remote.data.TuiStateDto = call(
         request(url("api/sessions/$sessionId/tui", mapOf("state" to "1"))).get().build(),
         com.bb10d.remote.data.TuiStateDto.serializer(),

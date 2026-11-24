@@ -30,6 +30,7 @@ Endpoints (all under /api, all JSON):
   GET  /api/sessions/search?…&stream=1                      NDJSON progressive hits
   GET  /api/sessions/<id>                         one session's summary
   GET  /api/sessions/<id>/messages?offset=&limit= transcript window (default: tail)
+  POST /api/sessions/<id>/reset                       force stop it on the host
   POST /api/sessions/<id>/continue {prompt, permission_mode?}
   POST /api/sessions/new {cwd, prompt, permission_mode?}
   GET  /api/focus                                 focus rows only (session
@@ -116,6 +117,7 @@ _SESSION_MSGS = re.compile(r"^/api/sessions/([^/]+)/messages$")
 # Process view: full text behind one truncated step (<record uuid>:<block ix>).
 _SESSION_STEP = re.compile(r"^/api/sessions/([^/]+)/steps/([^/]+)$")
 _SESSION_CONT = re.compile(r"^/api/sessions/([^/]+)/continue$")
+_SESSION_RESET = re.compile(r"^/api/sessions/([^/]+)/reset$")
 _SESSION_TUI = re.compile(r"^/api/sessions/([^/]+)/tui$")
 _SESSION_FILE = re.compile(r"^/api/sessions/([^/]+)/file$")
 _SESSION_CHANGES = re.compile(r"^/api/sessions/([^/]+)/changes$")
@@ -1921,6 +1923,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         # when it has a live one, headless otherwise), `mode` on the reply
         # and on job snapshots, and GET …/tui?state=1.
         payload["auto_exec"] = 1
+        payload["session_reset"] = 1
         payload["tui_cols"] = TUI_COLS
         payload["tui_rows"] = TUI_ROWS
         caps = payload.get("caps")
@@ -1931,6 +1934,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             caps["tui_history"] = 1
             caps["tui_history_paged"] = 1
             caps["auto_exec"] = 1
+            caps["session_reset"] = 1
             payload["caps"] = caps
 
     def _stamp_upload_caps(self, payload: dict) -> None:
@@ -2942,6 +2946,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_tui_keys(m.group(1), body)
             return
 
+        m = _SESSION_RESET.match(path)
+        if m:
+            self._handle_session_reset(m.group(1))
+            return
+
         if path == "/api/sessions/new":
             self._handle_new_session(body)
             return
@@ -3038,6 +3047,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         if m:
             if self._tui_route(m.group(1)):
                 self._handle_tui_keys(m.group(1), body)
+            return
+        m = _SESSION_RESET.match(path)
+        if m:
+            if self._tui_route(m.group(1)):
+                self._handle_session_reset(m.group(1))
             return
         m = _JOB_PERM.match(path)
         if m:
@@ -3732,6 +3746,44 @@ class ApiHandler(BaseHTTPRequestHandler):
             return "interactive"    # a question from the session's terminal
         return "interactive" if (getattr(job, "permission_mode", "") or "") \
             == "interactive" else "headless"
+
+    def _handle_session_reset(self, session_id: str):
+        """POST /api/sessions/<id>/reset — let go of the session on this host.
+
+        For a session that will not open: stops its running turn, closes the
+        daemon's terminal for it (a dead pane too), and stops Claude's own
+        background copy (`claude stop`), which otherwise refuses every
+        resume. The conversation is kept; the next message opens it afresh.
+        """
+        if not self._tui_in_scope(session_id):
+            self._error(404, "session not found")
+            return
+        managers = [self.jobs] + [b.jobs for b in (self.bundles or {}).values()]
+        total = {"ok": True, "session_id": session_id, "turn_stopped": False,
+                 "terminals_closed": 0, "background_stopped": False, "detail": ""}
+        seen = []
+        for jm in managers:
+            if jm is None or jm in seen:
+                continue
+            seen.append(jm)
+            fn = getattr(jm, "reset_session", None)
+            if fn is None:
+                continue
+            try:
+                out = fn(session_id)
+            except Exception:  # one harness failing must not hide another
+                log.exception("session reset failed")
+                continue
+            if not out:
+                continue
+            total["turn_stopped"] = total["turn_stopped"] or bool(out.get("turn_stopped"))
+            total["terminals_closed"] += int(out.get("terminals_closed") or 0)
+            total["background_stopped"] = (total["background_stopped"]
+                                           or bool(out.get("background_stopped")))
+            if out.get("detail") and not total["detail"]:
+                total["detail"] = out["detail"]
+        _TUI_RUNNERS.pop(session_id, None)
+        self._send_json(total)
 
     def _session_has_tui(self, session_id: str) -> bool:
         """A terminal is alive for this session, on whichever harness owns it."""

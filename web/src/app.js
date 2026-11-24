@@ -1333,6 +1333,8 @@ async function pingProfile(profile) {
     // The daemon picks how each message runs (agentremoted ≥ 2.30): into the
     // session's terminal when it has a live one, headless when it does not.
     profile.autoExec = !!ping.auto_exec || !!(ping.caps && ping.caps.auto_exec);
+    // POST …/reset: force stop a session on its host (agentremoted ≥ 2.32).
+    profile.sessionReset = !!ping.session_reset || !!(ping.caps && ping.caps.session_reset);
     profile.chunkedUpload = !!ping.chunked_upload
       || !!(ping.caps && ping.caps.chunked_upload);
     if (typeof ping.max_upload_mb === "number" && ping.max_upload_mb > 0) {
@@ -1411,6 +1413,41 @@ const sendsToTerminal = (profile, harness = null) => {
   }
   return !!(state.open && state.open.hasTui);
 };
+
+/**
+ * Force stop the open session on its host: its running turn, the daemon's
+ * terminal for it, and Claude's own background copy (a session parked in
+ * `claude agents` there refuses to open anywhere else). For a session that
+ * will not start. The conversation is kept.
+ */
+async function resetOpenSession() {
+  const open = state.open;
+  const profile = open && profileById(open.profileId);
+  if (!profile || !open.sessionId) return;
+  if (!profile.sessionReset) { toast("This daemon is too old to reset a session"); return; }
+  if (!window.confirm("Force stop this session on its host?\n\n"
+      + "Its running turn is stopped, its terminal is closed, and Claude's "
+      + "background copy of it is stopped. The conversation is kept; the next "
+      + "message opens it again.")) return;
+  const gen = state.openGen;
+  try {
+    const res = await call(profile,
+      `/api/sessions/${encodeURIComponent(open.sessionId)}/reset`,
+      { method: "POST", body: {}, timeout: 60000 });
+    if (!isOpenStill(gen, open.profileId, open.sessionId)) return;
+    const did = [];
+    if (res.turn_stopped) did.push("turn stopped");
+    if (res.terminals_closed) did.push("terminal closed");
+    if (res.background_stopped) did.push("background copy stopped");
+    toast(res.detail ? res.detail
+      : (did.length ? "Reset: " + did.join(", ") : "Nothing was holding this session"));
+    resetTuiHistory();
+    setOpenHasTui(false);
+    probeTui();
+  } catch (e) {
+    toast(e.message || "Could not reset the session");
+  }
+}
 
 /** Ask the daemon whether the open session has a live terminal. */
 async function probeTui() {
@@ -3186,6 +3223,8 @@ function syncChangesButton() {
   btn.classList.toggle("hidden", !can);
   btn.setAttribute("aria-pressed", String(side.open));
   if (!can && side.open) closeSide();
+  // Reset on host: only where the daemon can do it.
+  $("btn-reset")?.classList.toggle("hidden", !(profile && profile.sessionReset));
 }
 
 function openSide() {
@@ -6040,7 +6079,10 @@ async function pollJob() {
       toast(why);
       const pane = $("live-tui-pane");
       if (pane && pane.classList.contains("empty-tui")) {
-        $("live-tui-screen").textContent = "The terminal did not start.\n\n" + why;
+        const prof = state.open && profileById(state.open.profileId);
+        $("live-tui-screen").textContent = "The terminal did not start.\n\n" + why
+          + (prof && prof.sessionReset
+            ? "\n\nMore › Reset on host stops it there from here." : "");
       }
     }
     if (snap.status === "stopped") notes.push("Stopped");
@@ -6872,6 +6914,7 @@ function normalizeProfile(p) {
     tuiStream: !!p.tuiStream,
     tuiHistory: !!p.tuiHistory,
     autoExec: !!p.autoExec,
+    sessionReset: !!p.sessionReset,
     chunkedUpload: !!p.chunkedUpload,
     ...(typeof p.maxUploadMb === "number" && p.maxUploadMb > 0
       ? { maxUploadMb: p.maxUploadMb } : {}),
@@ -8379,6 +8422,7 @@ function wire() {
   });
   $("btn-options").addEventListener("click", openOptions);
   $("btn-rename").addEventListener("click", openRename);
+  $("btn-reset")?.addEventListener("click", resetOpenSession);
   $("btn-share")?.addEventListener("click", openShare);
   $("btn-refresh").addEventListener("click", () => {
     loadTail();

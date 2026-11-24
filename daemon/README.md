@@ -19,6 +19,17 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.32.0** A session can be force stopped on its host from a client.
+`POST /api/sessions/<id>/reset` stops the session's running turn, closes
+the daemon's terminal for it (a dead pane too), and stops Claude's own
+background copy of it (`claude agents --json` to find it, `claude stop
+<id>`), which otherwise refuses every resume until someone stops it on the
+host. The conversation is kept. The reply says what was done
+(`turn_stopped`, `terminals_closed`, `background_stopped`, `detail`).
+Advertised as `session_reset`. Web and Android 1.9.72 have it under More
+as "Reset on host", behind a confirmation. BlackBerry 10, iOS and the
+pager do not have it yet.
+
 **2.31.5** A session held by Claude's background agents says so. When a
 session is open in `claude agents` on the host, `claude --resume` refuses
 it and exits; the interactive turn used to fail with "TUI did not become

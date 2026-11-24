@@ -598,6 +598,24 @@ class JobManager:
         thread.start()
         return job
 
+    def reset_session(self, session_id: str) -> dict:
+        """Stop the session's running turn and let go of whatever holds the
+        session on this host (see the interactive manager's reset_session).
+        None when this harness has nothing to reset."""
+        sid = (session_id or "").strip()
+        mgr_fn = getattr(self.runner, "_interactive_mgr", None)
+        if not sid or mgr_fn is None:
+            return None
+        mgr = mgr_fn()
+        fn = getattr(mgr, "reset_session", None)
+        if fn is None:
+            return None
+        job = self.running_for_session(sid)
+        stopped = bool(job is not None and self.stop(job.id))
+        out = fn(sid)
+        out["turn_stopped"] = stopped
+        return out
+
     def session_has_tui(self, session_id: str) -> bool:
         """Is a terminal (tmux TUI) alive for this session on this harness?"""
         sid = (session_id or "").strip()

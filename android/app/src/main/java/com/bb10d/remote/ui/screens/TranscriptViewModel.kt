@@ -235,6 +235,39 @@ class TranscriptViewModel(
         }
     }
 
+    /**
+     * Force stop this session on its host, for one that will not open: its
+     * running turn, the daemon's terminal for it, and Claude's own
+     * background copy. The conversation is kept.
+     */
+    fun resetOnHost() {
+        val c = client ?: return
+        val id = _ref.value.sessionId
+        if (id.isEmpty()) return
+        setStatus("Resetting the session on its host…")
+        viewModelScope.launch {
+            runCatching { c.resetSession(id) }
+                .onSuccess { r ->
+                    val did = buildList {
+                        if (r.turnStopped) add("turn stopped")
+                        if (r.terminalsClosed > 0) add("terminal closed")
+                        if (r.backgroundStopped) add("background copy stopped")
+                    }
+                    setStatus(
+                        when {
+                            r.detail.isNotBlank() -> r.detail
+                            did.isEmpty() -> "Nothing was holding this session"
+                            else -> "Reset: " + did.joinToString(", ")
+                        },
+                        sticky = false,
+                    )
+                    _hasTui.value = false
+                    probeTui()
+                }
+                .onFailure { setStatus(repo.reason(it)) }
+        }
+    }
+
     /** The TUI face saw the terminal (or its absence). */
     fun terminalSeen(live: Boolean) {
         if (live) _hasTui.value = true

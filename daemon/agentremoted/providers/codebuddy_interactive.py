@@ -66,6 +66,7 @@ class CodebuddyInteractiveManager(InteractiveManager):
     default_binary = "codebuddy"
     disable_view_env = "CODEBUDDY_CODE_DISABLE_AGENT_VIEW"
     classic_screen_env = ""     # Claude's switch; not known for CodeBuddy
+    background_cli = False      # `agents --json` / `stop` are Claude's
     product = "codebuddy"
 
     def _pane_busy(self, name: str) -> bool:

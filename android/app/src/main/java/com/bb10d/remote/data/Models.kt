@@ -185,6 +185,8 @@ data class PingDto(
     @SerialName("tui_history_paged") val tuiHistoryPaged: Int = 0,
     /** 1: permission_mode "auto" on /continue (agentremoted ≥ 2.30). */
     @SerialName("auto_exec") val autoExec: Int = 0,
+    /** 1: POST …/reset force stops a session on its host (agentremoted ≥ 2.32). */
+    @SerialName("session_reset") val sessionReset: Int = 0,
     /** Chunked POST /api/attachments (agentremoted ≥ 2.8.6). */
     @SerialName("chunked_upload") val chunkedUpload: Boolean = false,
     @SerialName("max_upload_mb") val maxUploadMb: Int = 16,
@@ -537,6 +539,15 @@ data class JobStartedDto(@SerialName("job_id") val jobId: String = "")
 /** A turn that was started: its job, and how it runs (≥ 2.30: "interactive" | "headless"). */
 data class StartedTurn(val jobId: String, val mode: String = "")
 
+/** POST …/reset: what was let go of on the host. */
+@Serializable
+data class SessionResetDto(
+    @SerialName("turn_stopped") val turnStopped: Boolean = false,
+    @SerialName("terminals_closed") val terminalsClosed: Int = 0,
+    @SerialName("background_stopped") val backgroundStopped: Boolean = false,
+    val detail: String = "",
+)
+
 /** GET …/tui?state=1 — whether a terminal is alive for the session. */
 @Serializable
 data class TuiStateDto(val attached: Boolean = false)
@@ -730,6 +741,8 @@ data class Caps(
      * the session's terminal when it has a live one, headless otherwise.
      */
     val autoExec: Boolean = false,
+    /** A session can be force stopped on its host (agentremoted >= 2.32). */
+    val sessionReset: Boolean = false,
     /** Chunked attachments (agentremoted >= 2.8.6). */
     val chunkedUpload: Boolean = false,
     /** Largest attachment the daemon accepts (ping max_upload_mb). */
@@ -880,6 +893,7 @@ data class Caps(
             // Scrollback is read a page at a time, which needs the paged route.
             tuiHistory = ping.tuiHistoryPaged > 0 || ping.caps["tui_history_paged"] == true,
             autoExec = ping.autoExec > 0 || ping.caps["auto_exec"] == true,
+            sessionReset = ping.sessionReset > 0 || ping.caps["session_reset"] == true,
             chunkedUpload = ping.chunkedUpload || ping.caps["chunked_upload"] == true,
             maxUploadMb = ping.maxUploadMb.takeIf { it > 0 } ?: 16,
             providers = ping.providers,

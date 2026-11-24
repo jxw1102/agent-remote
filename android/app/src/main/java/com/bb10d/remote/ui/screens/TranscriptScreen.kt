@@ -76,6 +76,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
@@ -401,6 +402,22 @@ private fun TranscriptScreenBody(
     // title) a few seconds later, or as soon as the reader drags the
     // conversation. A tap on the pill opens it again. It stays open while
     // its menu is open.
+    var confirmReset by remember(ref.key) { mutableStateOf(false) }
+    if (confirmReset) AlertDialog(
+        onDismissRequest = { confirmReset = false },
+        title = { Text("Force stop this session on its host?") },
+        text = {
+            Text(
+                "Its running turn is stopped, its terminal is closed, and Claude's " +
+                    "background copy of it is stopped. The conversation is kept; the " +
+                    "next message opens it again.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { confirmReset = false; vm.resetOnHost() }) { Text("Reset") }
+        },
+        dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
+    )
     var barOpen by remember(ref.key) { mutableStateOf(true) }
     var barTick by remember { mutableIntStateOf(0) }
     // Phones only (the sheet): a tablet or a phone held sideways has the
@@ -633,6 +650,14 @@ private fun TranscriptScreenBody(
                                     onClick = {
                                         menuOpen = false
                                         clipboard.copy(plainTranscript(ui.items))
+                                    },
+                                )
+                                if (profile?.caps?.sessionReset == true) DropdownMenuItem(
+                                    text = { Text("Reset on host") },
+                                    leadingIcon = { Icon(Icons.Outlined.PowerSettingsNew, null) },
+                                    onClick = {
+                                        menuOpen = false
+                                        confirmReset = true
                                     },
                                 )
                                 DropdownMenuItem(

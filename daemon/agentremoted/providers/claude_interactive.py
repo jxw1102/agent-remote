@@ -1140,6 +1140,69 @@ class InteractiveManager:
             why += ", killed by signal %s" % signal
         return True, why
 
+    # `<bin> agents --json` / `<bin> stop <id>`: Claude's own background
+    # sessions. A session parked there cannot be resumed anywhere else.
+    background_cli = True
+
+    def reset_session(self, session_id: str) -> dict:
+        """Let go of everything on this host that holds `session_id`, so the
+        next turn can open it afresh. The conversation itself is not touched.
+
+        Two things can hold a session: a terminal of ours (alive, or a dead
+        pane kept by remain-on-exit), and Claude's own background agents
+        (`claude agents`), where a session someone parked from the host
+        refuses to be resumed. Returns what was done.
+        """
+        sid = (session_id or "").strip()
+        out = {"session_id": sid, "terminals_closed": 0,
+               "background_stopped": False, "detail": ""}
+        if not sid:
+            return out
+        with self._lock:
+            mine = [t for t in self._tuis.values() if t.session_id == sid]
+            for t in mine:
+                self._kill(t)
+                self._tuis.pop(t.name, None)
+            if mine:
+                self._save_state()
+        out["terminals_closed"] = len(mine)
+        if self.background_cli:
+            stopped, detail = self._stop_background(sid)
+            out["background_stopped"] = stopped
+            out["detail"] = detail
+        return out
+
+    def _stop_background(self, session_id: str):
+        """(stopped, detail): stop Claude's background copy of the session."""
+        binary = self._binary()
+        try:
+            r = subprocess.run([binary, "agents", "--json"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=20)
+            rows = json.loads(r.stdout.decode("utf-8", errors="replace") or "[]")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+            return False, "could not list Claude's background sessions: %s" % e
+        ids = [str(row.get("id") or "") for row in rows
+               if isinstance(row, dict)
+               and str(row.get("sessionId") or "") == session_id
+               and str(row.get("kind") or "") == "background"]
+        ids = [i for i in ids if re.match(r"^[A-Za-z0-9_-]+$", i)]
+        if not ids:
+            return False, ""
+        for bg in ids:
+            try:
+                r = subprocess.run([binary, "stop", bg],
+                                   stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, timeout=30)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                return False, "`claude stop %s` failed: %s" % (bg, e)
+            if r.returncode != 0:
+                tail = r.stdout.decode("utf-8", errors="replace").strip()[-200:]
+                return False, "`claude stop %s` failed: %s" % (bg, tail)
+            log.info("stopped Claude background session %s (%s)", bg, session_id)
+        return True, ""
+
     def _kill(self, tui: _Tui):
         # Name the caller: a TUI dying mid-turn is indistinguishable from one
         # the daemon killed itself unless the log says which happened.
