@@ -6036,17 +6036,24 @@ async function pollJob() {
   if (snap.pending_question) {
     job.pendingQuestion = snap.pending_question;
     job.lastPendingQuestion = snap.pending_question;
+    job.questionGone = 0;
   } else if (!(frame && frame.pending_question)) {
-    // Only drop when the stream also says the gate is gone — and not while
-    // this request_id is still the one we optimistically cleared after Submit.
+    // Neither the job nor the stream has the question any more. Answered
+    // here: drop it at once. Otherwise it was answered somewhere else (the
+    // host, another client), and it goes too, once a second poll agrees:
+    // one poll alone can miss it while the daemon applies the picks. It
+    // used to be kept until answered on THIS client, so a question
+    // answered on the phone stayed up in the browser for good.
     const held = job.lastPendingQuestion && job.lastPendingQuestion.request_id;
-    if (!held || state.answeredQuestions.has(held)) {
+    job.questionGone = (job.questionGone || 0) + 1;
+    if (!held || state.answeredQuestions.has(held) || job.questionGone >= 2) {
       job.pendingQuestion = null;
-      if (state.answeredQuestions.has(held)) job.lastPendingQuestion = null;
+      job.lastPendingQuestion = null;
     } else {
       job.pendingQuestion = job.lastPendingQuestion;
     }
   } else {
+    job.questionGone = 0;
     job.pendingQuestion = job.lastPendingQuestion || job.pendingQuestion;
   }
 
