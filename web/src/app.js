@@ -8456,7 +8456,9 @@ function wire() {
     // next typed character would land in the page instead of the terminal.
     btn.addEventListener("mousedown", (e) => e.preventDefault());
     btn.addEventListener("click", () => {
-      sendLiveTuiKeys([btn.getAttribute("data-tui-key")]);
+      const key = btn.getAttribute("data-tui-key");
+      const times = Math.max(1, parseInt(btn.getAttribute("data-tui-repeat") || "1", 10) || 1);
+      sendLiveTuiKeys(Array(times).fill(key));
       focusLiveTuiPane();
     });
   });
