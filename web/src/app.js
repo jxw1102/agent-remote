@@ -4127,6 +4127,7 @@ let tuiHistTimer = null;
 
 function resetTuiHistory() {
   resetTuiHold();
+  tuiStick = true;      // a terminal just opened starts at its end
   clearTimeout(tuiHistTimer);
   tuiHistTimer = null;
   tuiHist = { text: "", lines: 0, total: 0, more: true, loading: false, gen: tuiHist.gen + 1 };
@@ -4178,7 +4179,7 @@ async function loadTuiHistory({ older = true } = {}) {
     const rows = got.text ? String(got.text).split("\n") : [];
     const pane = $("live-tui-pane");
     const before = pane.scrollHeight;
-    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
+    const atBottom = tuiStick;
     const total = got.history || 0;
     const was = tuiHist.text;
     const startOver = () => {
@@ -4237,6 +4238,7 @@ async function loadTuiHistory({ older = true } = {}) {
       $("live-tui-history").innerHTML = tuiHist.text ? ansiToHtml(tuiHist.text, paneIsLight()) : "";
       if (older) pane.scrollTop += pane.scrollHeight - before;   // keep the reader's line
       else if (atBottom) pane.scrollTop = pane.scrollHeight;
+      tuiLastTop = pane.scrollTop;
       // Not the reader's scrolling: the session bar takes no cue from it.
       barLastTop.set(pane, pane.scrollTop);
     }
@@ -4279,6 +4281,28 @@ function paneIsLight() {
   const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(c || "");
   if (!m) return false;
   return (0.2126 * m[1] + 0.7152 * m[2] + 0.0722 * m[3]) / 255 > 0.5;
+}
+
+// ---- following the terminal's end -------------------------------------------
+// The pane follows its end while the reader is there. "There" used to be
+// "within 48 px of the bottom", looked at as each frame was drawn: on a
+// terminal that is doing anything a frame comes several times a second, and
+// a scroll up had to cover those 48 px between two of them or it was thrown
+// back, so scrolling up kept snapping to the bottom. Now it is the reader's
+// last move that decides: scrolling up lets go, reaching the bottom takes
+// hold again.
+
+let tuiStick = true;
+let tuiLastTop = 0;
+
+function noteTuiScroll() {
+  const pane = $("live-tui-pane");
+  if (!pane) return;
+  const top = pane.scrollTop;
+  const gap = pane.scrollHeight - top - pane.clientHeight;
+  if (gap < 4) tuiStick = true;
+  else if (top < tuiLastTop - 1) tuiStick = false;
+  tuiLastTop = top;
 }
 
 // ---- selecting text in the terminal ----------------------------------------
@@ -4400,7 +4424,7 @@ function paintLiveTuiFrame(frame, force) {
     liveTuiActiveAt = Date.now();   // the pane changed
     pane.dataset.hadFrame = "1";
     pane.classList.remove("empty-tui");
-    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
+    const atBottom = tuiStick;
     // Coloured SGR when ?ansi=1 (default plain has no escapes).
     const raw = frame.text || "(empty pane)";
     if (frame.ansi || raw.includes("\u001b[") || raw.includes("\x1b[")) {
@@ -4415,7 +4439,7 @@ function paintLiveTuiFrame(frame, force) {
       ? frame.cols
       : Math.max(state.liveTuiCols, widestLine(raw));
     fitLiveTuiPane();
-    if (atBottom) pane.scrollTop = pane.scrollHeight;
+    if (atBottom) { pane.scrollTop = pane.scrollHeight; tuiLastTop = pane.scrollTop; }
     status.textContent = frame.job_id
       ? `Host TUI · job ${String(frame.job_id).slice(0, 8)}`
       : "Host TUI · live";
@@ -4812,7 +4836,8 @@ function watchTranscriptScroll() {
   const view = $("transcript");
   if (!view) return;
   const gesture = () => { state.gestureAt = Date.now(); };
-  ["wheel", "touchstart", "touchmove", "touchend"].forEach((ev) => {
+  // mousedown too: dragging the scrollbar is the reader's scrolling.
+  ["wheel", "touchstart", "touchmove", "touchend", "mousedown"].forEach((ev) => {
     view.addEventListener(ev, gesture, { passive: true });
   });
   view.addEventListener("scroll", () => {
@@ -4826,9 +4851,19 @@ function watchTranscriptScroll() {
     const top = view.scrollTop;
     // Momentum keeps firing scrolls long after the finger is gone; each one
     // moving up renews the window, so the flick runs to its own stop.
-    if (top < state.lastTop - 1) gesture();
+    const movedUp = top < state.lastTop - 1;
+    const movedDown = top > state.lastTop + 1;
+    if (movedUp) gesture();
     state.lastTop = top;
-    state.stick = view.scrollHeight - top - view.clientHeight < 24;
+    // Following is decided by the reader's last move, not only by where
+    // they are: a small scroll up used to leave them "within 24 px of the
+    // bottom", still following, and the next row of a live turn threw them
+    // back. Up lets go; reaching the bottom, or coming down near it, takes
+    // hold again.
+    const gap = view.scrollHeight - top - view.clientHeight;
+    if (gap < 4) state.stick = true;
+    else if (movedUp && readerScrolling()) state.stick = false;
+    else if (movedDown && gap < 24) state.stick = true;
     syncTailInView();
   }, { passive: true });
 }
@@ -8600,6 +8635,7 @@ function wire() {
   wireSheetGrip();
   renderTabs();
   $("live-tui-pane")?.addEventListener("scroll", maybeLoadTuiHistory, { passive: true });
+  $("live-tui-pane")?.addEventListener("scroll", noteTuiScroll, { passive: true });
   // The terminal's key card floats over its top; the terminal's text starts
   // below it, so it is told how tall the card is.
   const tuiBar = document.querySelector(".live-tui-bar");
@@ -8672,7 +8708,7 @@ function wire() {
   const tuiFollow = () => {
     if (!state.liveTui) return;
     const pane = $("live-tui-pane");
-    if (pane) pane.scrollTop = pane.scrollHeight;
+    if (pane) { pane.scrollTop = pane.scrollHeight; tuiStick = true; tuiLastTop = pane.scrollTop; }
   };
   const tuiKeyboard = () => [0, 150, 350].forEach((ms) => setTimeout(tuiFollow, ms));
   $("live-tui-input")?.addEventListener("focus", tuiKeyboard);
