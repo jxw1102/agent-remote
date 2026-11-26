@@ -523,13 +523,6 @@ fun LiveTuiPane(
                     Triple("\u2193", listOf("Down"), 1f),
                     Triple("\u2190", listOf("Left"), 1f),
                     Triple("\u2192", listOf("Right"), 1f),
-                    // Clears what is typed in the terminal's own input box,
-                    // wherever the cursor is in it: Ctrl+U takes what is
-                    // before the cursor on its line and Ctrl+K what is after
-                    // (each takes a line break when there is nothing else),
-                    // so the pair is sent enough times for a long draft.
-                    // Nothing happens on an empty box.
-                    Triple("Clr", List(32) { if (it % 2 == 0) "Ctrl+U" else "Ctrl+K" }, 1f),
                     Triple("^C", listOf("Ctrl+C"), 1f),
                 ).forEach { (label, keys, share) ->
                     LiveTuiKeyButton(
