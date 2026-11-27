@@ -7,6 +7,8 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -54,6 +56,8 @@ fun ProviderChip(
     profileName: String,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
+    /** The coloured dot before the name; the session rows leave it out. */
+    dot: Boolean = true,
 ) {
     val accent = Accent.forProvider(provider)
     Row(
@@ -64,13 +68,15 @@ fun ProviderChip(
             .padding(horizontal = 6.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            Modifier
-                .size(6.dp)
-                .clip(CircleShape)
-                .background(accent.tint),
-        )
-        Spacer(Modifier.width(5.dp))
+        if (dot) {
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(accent.tint),
+            )
+            Spacer(Modifier.width(5.dp))
+        }
         Text(
             text = if (compact) accent.label else profileName.ifBlank { accent.label },
             style = MaterialTheme.typography.labelSmall,
@@ -250,21 +256,60 @@ fun MetaPill(text: String, modifier: Modifier = Modifier, tint: Color? = null) {
 @Composable
 fun FocusPill(state: String, modifier: Modifier = Modifier, unread: Boolean = false) {
     val pal = palette
-    val (builtin, tint) = when (state) {
-        "needs_answer" -> "needs answer" to pal.warn
-        "failed" -> "failed" to pal.danger
-        "working" -> "working" to pal.ok
-        // Lit until opened, dim afterwards: an unread result should stand out
-        // in the list, a read one is just waiting on you.
-        "turn_finished" -> "turn finished" to
-            (if (unread) MaterialTheme.colorScheme.onSurface else pal.dim)
+    val builtin = when (state) {
+        "needs_answer" -> "needs answer"
+        "failed" -> "failed"
+        "working" -> "working"
+        "turn_finished" -> "turn finished"
         else -> return
     }
     // The daemon's wording when it has sent it, so every client says the same.
-    val vocabulary = com.bb10d.remote.ui.theme.DaemonVocabulary
-    val label = vocabulary.focusLabel(state) ?: builtin
+    val label = com.bb10d.remote.ui.theme.DaemonVocabulary.focusLabel(state) ?: builtin
+    // Lit until opened, dim afterwards: an unread result should stand out
+    // in the list, a read one is just waiting on you.
+    val color = if (state == "turn_finished") {
+        if (unread) MaterialTheme.colorScheme.onSurface else pal.dim
+    } else stateTint(state)
+    // The label carries the state's dot: breathing while the agent works,
+    // steady while it waits on you. There is no separate dot beside it.
+    val dotted = state == "working" || state == "needs_answer"
+    Row(
+        modifier
+            .clip(RoundedCornerShape(5.dp))
+            .background(color.copy(alpha = 0.10f))
+            .padding(horizontal = 5.dp, vertical = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (dotted) {
+            if (state == "working") WorkingPulse(color, size = 6)
+            else Box(Modifier.size(6.dp).clip(CircleShape).background(color))
+            Spacer(Modifier.width(5.dp))
+        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
+ * One colour per session state, wherever it is shown (rows, the tab bubbles,
+ * the live strip, the working row): the daemon's when it has sent them, else
+ * amber for "waits on you", green for "working", red for "failed".
+ */
+@Composable
+fun stateTint(state: String): Color {
+    val pal = palette
     val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    MetaPill(label, modifier, vocabulary.stateColour(state, dark) ?: tint)
+    return com.bb10d.remote.ui.theme.DaemonVocabulary.stateColour(state, dark) ?: when (state) {
+        "needs_answer" -> pal.warn
+        "failed" -> pal.danger
+        "working" -> pal.ok
+        else -> pal.dim
+    }
 }
 
 val ScreenPadding = PaddingValues(horizontal = 16.dp)
@@ -283,4 +328,41 @@ fun connTint(state: com.bb10d.remote.data.ConnState?): Color = when (state) {
     com.bb10d.remote.data.ConnState.OFFLINE -> palette.danger
     com.bb10d.remote.data.ConnState.RECONNECTING -> palette.warn
     else -> palette.dim
+}
+
+
+/**
+ * A round button whose ripple is the button: it starts at the touch and
+ * fills the whole disc, to its edge. (Material's IconButton draws its own
+ * smaller state layer inside whatever background it is given.)
+ */
+@Composable
+fun CircleButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: androidx.compose.ui.unit.Dp = 40.dp,
+    enabled: Boolean = true,
+    color: Color = Color.Transparent,
+    selected: Boolean? = null,
+    content: @Composable () -> Unit,
+) {
+    androidx.compose.foundation.layout.Box(
+        modifier
+            .size(size)
+            .clip(androidx.compose.foundation.shape.CircleShape)
+            .background(color)
+            .then(
+                if (selected != null) Modifier.toggleable(
+                    value = selected,
+                    enabled = enabled,
+                    role = androidx.compose.ui.semantics.Role.Switch,
+                    onValueChange = { onClick() },
+                ) else Modifier.clickable(
+                    enabled = enabled,
+                    role = androidx.compose.ui.semantics.Role.Button,
+                    onClick = onClick,
+                ),
+            ),
+        contentAlignment = Alignment.Center,
+    ) { content() }
 }

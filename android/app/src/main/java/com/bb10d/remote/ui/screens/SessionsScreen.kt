@@ -925,70 +925,25 @@ private fun SessionCard(
             }
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (working) {
-                WorkingPulse(accent.tint, Modifier.padding(end = 8.dp))
-            }
-            Text(
-                // Don't echo attachment filenames — the transcript chip already shows them.
-                text = listTitle(row.session),
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = Time.relativeStamp(row.sortKey),
-                style = MaterialTheme.typography.labelSmall,
-                color = pal.dim,
-            )
-        }
-
-        Spacer(Modifier.height(5.dp))
-
-        // One line: which daemon, where, what state it is in, and a short id
-        // at the far end. Folder and branch are words, not pills, and give
-        // way (they share what is left) so the state and the id are never cut.
+        // Four lines, as on the web: how it is, when and on which daemon,
+        // what it is (the title), what was last said, and where it runs
+        // (folder, branch). The session id is not shown; long-press the row
+        // to copy it.
         Row(verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                ProviderChip(row.provider, row.profileName, Modifier.widthIn(max = 132.dp))
-                val project = row.session.cwd.trimEnd('/').substringAfterLast('/')
-                if (project.isNotEmpty()) {
-                    Spacer(Modifier.width(7.dp))
-                    Text(
-                        project,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        // The folder keeps more of its name than the branch.
-                        modifier = Modifier.weight(2f, fill = false),
-                    )
-                }
-                if (row.session.gitBranch.isNotEmpty()) {
-                    Spacer(Modifier.width(7.dp))
-                    Text(
-                        "⑂ ${row.session.gitBranch}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = pal.dim,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                }
-                // The state tag, in the daemon's words. "Needs answer" shows in
-                // either view; the rest only in Focus, where the row was
-                // enrolled (in All it is noise). Derived from the live status
-                // stream, so a turn ending is visible without a refresh.
+                // The state starts the line, in the daemon's words. "Needs
+                // answer" shows in either view; the rest only in Focus, where
+                // the row was enrolled (in All it is noise). Derived from the
+                // live status stream, so a turn ending is visible without a
+                // refresh.
                 val focusState = liveFocusState(row.session.focusState, working, blocked)
+                // "Needs answer" and "working" carry their dot inside the
+                // label and show in either view.
                 if (blocked) {
-                    Spacer(Modifier.width(7.dp))
                     FocusPill("needs_answer")
+                } else if (working) {
+                    FocusPill("working")
                 } else if (showFocusState && focusState.isNotEmpty()) {
-                    Spacer(Modifier.width(7.dp))
                     // A turn that ended while we watched the stream is unread
                     // by definition: you were looking at the list.
                     FocusPill(
@@ -997,24 +952,37 @@ private fun SessionCard(
                             row.session.focusState == "working",
                     )
                 }
-            }
-            // Enough of the id to tell two sessions apart. Long-press the row
-            // to copy all of it.
-            if (row.ref.sessionId.isNotEmpty()) {
-                Spacer(Modifier.width(8.dp))
+                // When, right after the state (or first, with no state).
+                if (blocked || working || (showFocusState && focusState.isNotEmpty())) {
+                    Spacer(Modifier.width(8.dp))
+                }
                 Text(
-                    row.ref.sessionId.take(8),
+                    text = Time.agoStamp(row.sortKey),
                     style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = pal.dim.copy(alpha = 0.75f),
+                    color = pal.dim,
                     maxLines = 1,
                 )
             }
+            Spacer(Modifier.width(8.dp))
+            // Which daemon, at the line's end. No dot in it: the state has
+            // the row's only dot.
+            ProviderChip(row.provider, row.profileName, Modifier.widthIn(max = 132.dp), dot = false)
         }
+
+        Spacer(Modifier.height(4.dp))
+        Text(
+            // Don't echo attachment filenames — the transcript chip already shows them.
+            text = listTitle(row.session),
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
 
         val preview = listPreview(row.session, searching)
         if (preview.isNotBlank()) {
-            Spacer(Modifier.height(5.dp))
+            Spacer(Modifier.height(3.dp))
             Text(
                 // One line of what was last said, as prose: the markdown marks
                 // of a reply ("**Progress:**") are noise at this size.
@@ -1024,6 +992,36 @@ private fun SessionCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+
+        // The last line: where it runs, folder and branch.
+        Spacer(Modifier.height(5.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            val project = row.session.cwd.trimEnd('/').substringAfterLast('/')
+            if (project.isNotEmpty()) {
+                Text(
+                    project,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    // The folder keeps more of its name than the branch.
+                    modifier = Modifier.weight(2f, fill = false),
+                )
+            }
+            if (row.session.gitBranch.isNotEmpty()) {
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    "⑂ ${row.session.gitBranch}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = pal.dim,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
+            }
         }
     }
 }

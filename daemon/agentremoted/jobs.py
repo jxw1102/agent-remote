@@ -264,6 +264,9 @@ class Job:
                 "session_id": self.session_id,
                 "new_session_id": self.new_session_id,
                 "status": self.status,
+                # How this turn runs: in the session's terminal, or headless.
+                "mode": "interactive" if (self.watch or (self.permission_mode or "") == "interactive")
+                else "headless",
                 "error": self.error,
                 "result_text": self.result_text if self.status in ("done", "error") else "",
                 "pending_permission": dict(self.pending_permission)
@@ -555,6 +558,11 @@ class JobManager:
                   permission_mode: str = "", model: str = "", effort: str = "",
                   queued: list = None, isolate_root: str = "",
                   account: str = "main", model_pinned: bool = False) -> Job:
+        # "auto": into the session's terminal when it has a live one, a
+        # headless turn when it does not. Decided here, once, so everything
+        # after (the queue, typing into a running turn) sees a plain mode.
+        if (permission_mode or "").strip() == "auto":
+            permission_mode = self.auto_mode(session_id)
         job = Job(uuid.uuid4().hex[:12], session_id, prompt, cwd)
         job.permission_mode = permission_mode
         job.model = model
@@ -589,6 +597,46 @@ class JobManager:
         thread = threading.Thread(target=self._run, args=(job, permission_mode), daemon=True)
         thread.start()
         return job
+
+    def reset_session(self, session_id: str) -> dict:
+        """Stop the session's running turn and let go of whatever holds the
+        session on this host (see the interactive manager's reset_session).
+        None when this harness has nothing to reset."""
+        sid = (session_id or "").strip()
+        mgr_fn = getattr(self.runner, "_interactive_mgr", None)
+        if not sid or mgr_fn is None:
+            return None
+        mgr = mgr_fn()
+        fn = getattr(mgr, "reset_session", None)
+        if fn is None:
+            return None
+        job = self.running_for_session(sid)
+        stopped = bool(job is not None and self.stop(job.id))
+        out = fn(sid)
+        out["turn_stopped"] = stopped
+        return out
+
+    def session_has_tui(self, session_id: str) -> bool:
+        """Is a terminal (tmux TUI) alive for this session on this harness?"""
+        sid = (session_id or "").strip()
+        mgr_fn = getattr(self.runner, "_interactive_mgr", None)
+        if not sid or mgr_fn is None:
+            return False
+        try:
+            from .live_tui import _find_tui
+            mgr = mgr_fn()
+            tui = _find_tui(mgr, sid)
+            return tui is not None and bool(mgr._tmux_alive(tui.name))
+        except Exception:
+            log.debug("TUI lookup failed for %s", sid, exc_info=True)
+            return False
+
+    def auto_mode(self, session_id: str) -> str:
+        """The mode an "auto" message runs in: interactive (typed into the
+        session's terminal) when one is alive, otherwise headless. Only one
+        process ever drives a session, so its history cannot fork."""
+        return "interactive" if self.session_has_tui(session_id) \
+            else "bypassPermissions"
 
     def new_watch_job(self, session_id: str, provider: str = "",
                           account: str = "main") -> Job:
@@ -685,6 +733,10 @@ class JobManager:
         """
         job = self._chain_head(job_id)
         if job is None:
+            return None, "job not running"
+        if job.watch:
+            # A watch job only carries a question from an idle terminal; it
+            # never drains a queue, so a message left here would be lost.
             return None, "job not running"
         with job.lock:
             if job.status not in ("starting", "running"):

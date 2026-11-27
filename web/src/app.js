@@ -67,6 +67,39 @@ const _ANSI_BG = [
   "#0c0c0c", "#cd3131", "#0dbc79", "#e5e510",
   "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
 ];
+// The same eight on a light background (VS Code's light terminal).
+const _ANSI_FG_LIGHT = [
+  "#000000", "#cd3131", "#107c10", "#949800",
+  "#0451a5", "#bc05bc", "#0598bc", "#555555",
+];
+const _ANSI_FG_BRIGHT_LIGHT = [
+  "#666666", "#cd3131", "#14ce14", "#b5ba00",
+  "#0451a5", "#bc05bc", "#0598bc", "#a5a5a5",
+];
+
+/**
+ * A colour picked for a dark terminal, made readable on a light one: light
+ * text turns dark with its hue kept, a dark background block turns light,
+ * mid tones stay. Same rule as Android's adaptForLight.
+ */
+function _adaptForLight(r, g, b, background) {
+  const lin = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  const lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  const mx = Math.max(r, g, b) / 255, mn = Math.min(r, g, b) / 255;
+  let h = 0, sat = 0, l = (mx + mn) / 2;
+  if (mx !== mn) {
+    const d = mx - mn;
+    sat = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+    const R = r / 255, G = g / 255, B = b / 255;
+    h = mx === R ? (G - B) / d + (G < B ? 6 : 0) : mx === G ? (B - R) / d + 2 : (R - G) / d + 4;
+    h /= 6;
+  }
+  if (!background && lum > 0.4) l = Math.min(1 - l, 0.38);
+  else if (background && lum < 0.2) l = Math.max(1 - l, 0.88);
+  else return `rgb(${r},${g},${b})`;
+  return `hsl(${Math.round(h * 360)},${Math.round(sat * 100)}%,${Math.round(l * 100)}%)`;
+}
+
 function _ansi256(n) {
   n = n | 0;
   if (n < 0) return null;
@@ -88,9 +121,23 @@ function _escHtml(s) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
-/** Convert SGR sequences into <span style=…>…</span> (safe HTML). */
-function ansiToHtml(raw) {
+/** Convert SGR sequences into <span style=…>…</span> (safe HTML).
+ *  `light`: drawn on a light background, so the host's colours are adapted. */
+function ansiToHtml(raw, light = false) {
   if (!raw) return "";
+  const named = light ? _ANSI_FG_LIGHT : _ANSI_FG;
+  const namedBright = light ? _ANSI_FG_BRIGHT_LIGHT : _ANSI_FG_BRIGHT;
+  const rgbOf = (c) => {
+    const m = /^#([0-9a-f]{6})$/i.exec(c) || null;
+    if (m) { const v = parseInt(m[1], 16); return [v >> 16, (v >> 8) & 255, v & 255]; }
+    const r = /^rgb\((\d+),(\d+),(\d+)\)$/.exec(c);
+    return r ? [+r[1], +r[2], +r[3]] : null;
+  };
+  const adapt = (c, background) => {
+    if (!light || !c) return c;
+    const v = rgbOf(c);
+    return v ? _adaptForLight(v[0], v[1], v[2], background) : c;
+  };
   // Normalise CSI
   const s = String(raw).replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "");
   let i = 0;
@@ -132,20 +179,22 @@ function ansiToHtml(raw) {
       else if (code === 24) underline = false;
       else if (code === 39) fg = null;
       else if (code === 49) bg = null;
-      else if (code >= 30 && code <= 37) fg = _ANSI_FG[code - 30];
-      else if (code >= 90 && code <= 97) fg = _ANSI_FG_BRIGHT[code - 90];
-      else if (code >= 40 && code <= 47) bg = _ANSI_BG[code - 40];
-      else if (code >= 100 && code <= 107) bg = _ANSI_FG_BRIGHT[code - 100];
+      else if (code >= 30 && code <= 37) fg = named[code - 30];
+      else if (code >= 90 && code <= 97) fg = namedBright[code - 90];
+      else if (code >= 40 && code <= 47) bg = adapt(_ANSI_BG[code - 40], true);
+      else if (code >= 100 && code <= 107) bg = adapt(_ANSI_FG_BRIGHT[code - 100], true);
       else if (code === 38 || code === 48) {
         const isFg = code === 38;
         const mode = parts[p + 1];
         if (mode === 5 && parts[p + 2] != null) {
-          const c = _ansi256(parts[p + 2]);
-          if (isFg) fg = c; else bg = c;
+          const n = parts[p + 2] | 0;
+          const c = _ansi256(n);
+          if (isFg) fg = n < 8 ? named[n] : n < 16 ? namedBright[n - 8] : adapt(c, false);
+          else bg = adapt(c, true);
           p += 2;
         } else if (mode === 2 && parts[p + 4] != null) {
           const c = `rgb(${parts[p + 2]|0},${parts[p + 3]|0},${parts[p + 4]|0})`;
-          if (isFg) fg = c; else bg = c;
+          if (isFg) fg = adapt(c, false); else bg = adapt(c, true);
           p += 4;
         }
       }
@@ -727,6 +776,107 @@ function setProcessView(sessionId, on) {
   store.save();
 }
 
+// The session window has two faces, the chat and the host terminal (TUI).
+// Which one a session shows is remembered per session, like process view.
+function tuiFaceOn(profileId, sessionId) {
+  const map = state.settings.tuiFace || {};
+  return !!map[`${profileId}:${sessionId}`];
+}
+
+const TUI_FACES_MAX = 300;
+
+function setTuiFace(profileId, sessionId, on) {
+  const map = state.settings.tuiFace || {};
+  const key = `${profileId}:${sessionId}`;
+  delete map[key];
+  if (on) map[key] = true;    // re-added, so it is the newest key
+  // Only sessions left on TUI are stored, and a session deleted on the host
+  // is never removed: past the cap the oldest go (they reopen on Chat).
+  const keys = Object.keys(map);
+  for (let i = 0; i < keys.length - TUI_FACES_MAX; i++) delete map[keys[i]];
+  state.settings.tuiFace = map;
+  store.save();
+}
+
+// ------------------------------------------------------------ drafts
+//
+// What is typed in a session's message box and not sent yet is kept in this
+// browser, per session, so leaving the session, reloading the page or a
+// crashed tab does not lose it. Its own storage key: it is written on every
+// pause in typing, and the profiles blob need not be rewritten for that.
+
+const DRAFTS_KEY = "agentremote.drafts";
+const DRAFTS_MAX = 100;
+const DRAFT_TTL_MS = 30 * 24 * 3600 * 1000;
+let draftTimer = null;
+let draftFor = "";      // the session the text in the box belongs to
+
+function readDrafts() {
+  try {
+    const map = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "{}");
+    return map && typeof map === "object" ? map : {};
+  } catch { return {}; }
+}
+
+function openDraftKey() {
+  const open = state.open;
+  return open && open.sessionId ? `${open.profileId}:${open.sessionId}` : "";
+}
+
+function writeDraft(key, text) {
+  if (!key) return;
+  const map = readDrafts();
+  delete map[key];
+  if (text && text.trim()) map[key] = { text, at: Date.now() };
+  const now = Date.now();
+  const keys = Object.keys(map);
+  keys.forEach((k, i) => {
+    const d = map[k];
+    if (!d || now - (d.at || 0) > DRAFT_TTL_MS || i < keys.length - DRAFTS_MAX) delete map[k];
+  });
+  try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(map)); } catch { /* full or blocked */ }
+}
+
+/** Save the box for the session it belongs to, now (before switching away). */
+function flushDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = null;
+  if (draftFor) writeDraft(draftFor, $("prompt").value);
+}
+
+function scheduleDraftSave() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(flushDraft, 300);
+}
+
+/** The open session's id changed (a placeholder got its real id, a headless
+    resume forked): the text in the box follows it to the new key. */
+function rekeyDraft() {
+  const key = openDraftKey();
+  if (!draftFor || !key || key === draftFor) return;
+  writeDraft(draftFor, "");
+  draftFor = key;
+  writeDraft(key, $("prompt").value);
+}
+
+/** Put the open session's draft (or nothing) in the box. */
+function restoreDraft() {
+  const prompt = $("prompt");
+  draftFor = openDraftKey();
+  const d = draftFor ? readDrafts()[draftFor] : null;
+  prompt.value = d && typeof d.text === "string" ? d.text : "";
+  sizePrompt();
+  // The terminal's text line holds the same draft as the message box.
+  const line = $("live-tui-input");
+  if (line) line.value = prompt.value;
+}
+
+function sizePrompt() {
+  const prompt = $("prompt");
+  prompt.style.height = "auto";
+  prompt.style.height = Math.min(Math.max(prompt.scrollHeight, 38), 220) + "px";
+}
+
 function setSoundCues(on) {
   state.settings.soundCues = !!on;
   store.save();
@@ -924,6 +1074,16 @@ function stamp(ms) {
     return d.toLocaleDateString([], { day: "numeric", month: "short" });
   }
   return d.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+}
+/** How long ago, for the session list: "just now", "5m ago", "2h ago"
+    within the last 24 hours; the date beyond. */
+function agoStamp(ms) {
+  if (!ms) return "";
+  const mins = Math.floor((Date.now() - ms) / 60000);
+  if (mins < 0 || mins >= 24 * 60) return stamp(ms);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m ago";
+  return Math.floor(mins / 60) + "h ago";
 }
 function dayLabel(ms) {
   if (!ms) return "Older";
@@ -1166,6 +1326,15 @@ async function pingProfile(profile) {
     profile.sessionOptions = !!ping.session_options;
     // Live TUI frames pushed over SSE + ordered key batches (agentremoted ≥ 2.22).
     profile.tuiStream = !!ping.tui_stream;
+    // GET …/tui/history, a page at a time: the terminal's scrollback
+    // (agentremoted ≥ 2.31).
+    profile.tuiHistory = !!ping.tui_history_paged
+      || !!(ping.caps && ping.caps.tui_history_paged);
+    // The daemon picks how each message runs (agentremoted ≥ 2.30): into the
+    // session's terminal when it has a live one, headless when it does not.
+    profile.autoExec = !!ping.auto_exec || !!(ping.caps && ping.caps.auto_exec);
+    // POST …/reset: force stop a session on its host (agentremoted ≥ 2.32).
+    profile.sessionReset = !!ping.session_reset || !!(ping.caps && ping.caps.session_reset);
     profile.chunkedUpload = !!ping.chunked_upload
       || !!(ping.caps && ping.caps.chunked_upload);
     if (typeof ping.max_upload_mb === "number" && ping.max_upload_mb > 0) {
@@ -1175,11 +1344,24 @@ async function pingProfile(profile) {
     syncShareButton();
     // Models, efforts and capabilities may have just arrived or changed.
     if (state.open && state.open.profileId === profile.id) { syncComposer(); syncChangesButton(); }
+    delete pingRetries[profile.id];
     return true;
   } catch {
+    // What the daemon can do is not known (or is stale, after an upgrade)
+    // until a ping gets through: try again a few times, further apart.
+    const n = pingRetries[profile.id] || 0;
+    if (n < PING_RETRY_MS.length) {
+      pingRetries[profile.id] = n + 1;
+      setTimeout(() => {
+        const p = profileById(profile.id);
+        if (p) pingProfile(p).then((ok) => { if (ok) { store.save(); renderFilters(); } });
+      }, PING_RETRY_MS[n]);
+    }
     return false;
   }
 }
+const PING_RETRY_MS = [4000, 15000, 60000];
+const pingRetries = {};
 
 const capOf = (profile, key, fallback = false, harness = null) => {
   if (harness && profile && profile.providerDetails && profile.providerDetails[harness]) {
@@ -1211,6 +1393,82 @@ const execModeOf = (profile, harness = null) => {
     return normalizeExecMode(profile.execMode, canInteractive);
   return canInteractive ? "interactive" : "headless";
 };
+// ---- how a message runs ----------------------------------------------------
+// A daemon ≥ 2.30 decides per message ("auto"): typed into the session's
+// terminal when it has a live one, a headless turn when it does not, so
+// there is nothing to choose. Older daemons use the per-daemon Execution
+// setting, as before.
+
+/** The mode sent with a message for the open session. */
+const sendMode = (profile, harness = null) =>
+  (profile && profile.autoExec ? "auto" : wireExecMode(execModeOf(profile, harness)));
+
+/** Will a message for the open session be typed into a terminal? */
+const sendsToTerminal = (profile, harness = null) => {
+  if (!profile || !profile.autoExec) return execModeOf(profile, harness) === "interactive";
+  // The running turn's own mode when there is one; else whether the session
+  // has a terminal, as last heard from the daemon.
+  if (state.job && jobBelongsToOpen(state.job) && state.job.mode) {
+    return state.job.mode === "interactive";
+  }
+  return !!(state.open && state.open.hasTui);
+};
+
+/**
+ * Force stop the open session on its host: its running turn, the daemon's
+ * terminal for it, and Claude's own background copy (a session parked in
+ * `claude agents` there refuses to open anywhere else). For a session that
+ * will not start. The conversation is kept.
+ */
+async function resetOpenSession() {
+  const open = state.open;
+  const profile = open && profileById(open.profileId);
+  if (!profile || !open.sessionId) return;
+  if (!profile.sessionReset) { toast("This daemon is too old to reset a session"); return; }
+  if (!window.confirm("Force stop this session on its host?\n\n"
+      + "Its running turn is stopped, its terminal is closed, and Claude's "
+      + "background copy of it is stopped. The conversation is kept; the next "
+      + "message opens it again.")) return;
+  const gen = state.openGen;
+  try {
+    const res = await call(profile,
+      `/api/sessions/${encodeURIComponent(open.sessionId)}/reset`,
+      { method: "POST", body: {}, timeout: 60000 });
+    if (!isOpenStill(gen, open.profileId, open.sessionId)) return;
+    const did = [];
+    if (res.turn_stopped) did.push("turn stopped");
+    if (res.terminals_closed) did.push("terminal closed");
+    if (res.background_stopped) did.push("background copy stopped");
+    toast(res.detail ? res.detail
+      : (did.length ? "Reset: " + did.join(", ") : "Nothing was holding this session"));
+    resetTuiHistory();
+    setOpenHasTui(false);
+    probeTui();
+  } catch (e) {
+    toast(e.message || "Could not reset the session");
+  }
+}
+
+/** Ask the daemon whether the open session has a live terminal. */
+async function probeTui() {
+  const open = state.open;
+  const profile = open && profileById(open.profileId);
+  if (!profile || !profile.autoExec || !open.sessionId) return;
+  const gen = state.openGen;
+  try {
+    const res = await call(profile,
+      `/api/sessions/${encodeURIComponent(open.sessionId)}/tui?state=1`, { timeout: 8000 });
+    if (!isOpenStill(gen, open.profileId, open.sessionId)) return;
+    setOpenHasTui(!!(res && res.attached));
+  } catch { /* unknown: leave it as it was */ }
+}
+
+function setOpenHasTui(on) {
+  if (!state.open || state.open.hasTui === on) return;
+  state.open.hasTui = on;
+  syncComposer();
+}
+
 const requiresCwd = (profile, harness = null) => {
   const h = harness || profile.provider;
   return capOf(profile, "requires_cwd", h !== "grok", harness);
@@ -1623,6 +1881,7 @@ function finalizeSessionRows(collected) {
       if (!sid || isJobPlaceholder(sid)) continue;
       if (String(row.session.job_id || "") === jid) {
         state.open.sessionId = sid;
+        rekeyDraft();
         state.open.session = { ...state.open.session, ...row.session, id: sid };
         if (state.job && sessionIsJobPlaceholder(state.job.sessionId, jid)) {
           state.job.sessionId = sid;
@@ -2203,6 +2462,7 @@ function reconcileList(host, want) {
 }
 
 function renderSessions() {
+  renderTabs();
   const host = $("sessions");
   const want = [];
   const rows = visibleRows();
@@ -2252,7 +2512,7 @@ function renderSessions() {
     // Done, revealed on hover (CSS) so idle rows stay clean. Only on rows that
     // are actually in Focus — there is no "Track" counterpart because joining
     // is automatic: acting on a session through the daemon enrols it. Nested
-    // inside the row button like .session-id-tag, and it stops propagation so
+    // inside the row button, and it stops propagation so
     // the click never also opens the session.
     if (row.session.focus === true && focusCapable(profileById(row.profileId))) {
       const done = el("button", "row-done");
@@ -2273,22 +2533,8 @@ function renderSessions() {
       btn.appendChild(done);
     }
 
-    const top = el("div", "row-top");
-    // Working = breathing dot; permission/question = blinking "?" in that spot.
-    if (blocked.has(key)) {
-      const mark = el("span", "pulse-ask", "?");
-      mark.title = "Waiting for your answer";
-      mark.setAttribute("aria-label", "Waiting for your answer");
-      top.appendChild(mark);
-    } else if (working.has(key)) {
-      const dot = el("span", "pulse");
-      dot.style.background = pal.accent;
-      top.appendChild(dot);
-    }
-    top.appendChild(el("div", "row-title", listTitle(row.session)));
-    top.appendChild(el("div", "row-when", stamp(row.sortKey)));
-    btn.appendChild(top);
-
+    // Four lines: how it is, when and on which daemon, what it is (the
+    // title), what was last said, and where it runs (folder, branch).
     const meta = el("div", "row-meta");
     // Host chip in this session's harness colour (Mbp+Grok → cyan, not multi purple).
     // No separate Grok/Claude/Codex tag — host colour already implies harness.
@@ -2297,26 +2543,20 @@ function renderSessions() {
     hostTag.title = (pal.label || row.provider)
       ? `${row.profileName} · ${pal.label || row.provider}`
       : "Daemon profile";
-    meta.appendChild(hostTag);
-    const folder = String(row.session.cwd || "").replace(/\/+$/, "").split("/").pop();
-    if (folder) {
-      const f = el("span", "row-folder", folder);
-      f.title = row.session.cwd;
-      meta.appendChild(f);
-    }
-    if (row.session.git_branch) {
-      const br = el("span", "row-branch", "⑂ " + row.session.git_branch);
-      br.title = "Branch " + row.session.git_branch;
-      meta.appendChild(br);
-    }
-    // The daemon's word for it, so the list, Focus and every other client agree.
-    if (blocked.has(key)) meta.appendChild(el("span", "tag waiting", FOCUS_LABELS.needs_answer));
-    // Focus state tag. Same row layout as any other session — one more chip.
-    // Focus mode only: in All mode it is noise on rows the human never
-    // enrolled, and it duplicates the working dot. Suppressed when the row
-    // already says "waiting for you", the same fact in stronger words.
+    // One label says the state, dot and word together, in the state's own
+    // colour (the daemon's: amber waits on you, green is working, red
+    // failed). The dot breathes while the agent works and blinks while it
+    // waits on you. "Working" and "needs answer" show in either view; the
+    // rest only in Focus, where the row was enrolled.
     const bstate = liveFocusState(row.session, key, working, blocked);
-    if (focusMode() && bstate && FOCUS_LABELS[bstate] && !blocked.has(key)) {
+    const live = blocked.has(key) ? "needs_answer" : working.has(key) ? "working" : "";
+    if (live) {
+      const tag = el("span", `tag focus state-tag focus-${live.replace(/_/g, "-")}`);
+      tag.appendChild(el("span", "state-dot"));
+      tag.appendChild(document.createTextNode(FOCUS_LABELS[live] || live.replace(/_/g, " ")));
+      tag.title = FOCUS_HINTS[live] || "";
+      meta.appendChild(tag);
+    } else if (focusMode() && bstate && FOCUS_LABELS[bstate]) {
       const cls = `tag focus focus-${bstate.replace(/_/g, "-")}`;
       const unread = bstate === "turn_finished"
         && !row.session.focus_seen_local
@@ -2328,21 +2568,11 @@ function renderSessions() {
         + (unread ? " — you have not opened it since" : "");
       meta.appendChild(tag);
     }
-    if (row.session.id) {
-      // Enough of the id to tell two sessions apart; the tooltip has all of
-      // it and a click copies all of it, without opening the session.
-      const idTag = el("button", "tag session-id-tag", String(row.session.id).slice(0, 8));
-      idTag.setAttribute("aria-label", "Copy session id " + row.session.id);
-      idTag.type = "button";
-      idTag.title = `Copy session id\n${row.session.id}`;
-      idTag.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        copySessionId(btn._row.session.id);
-      });
-      meta.appendChild(idTag);
-    }
+    // When, right after the state; which daemon, at the line's end.
+    meta.appendChild(el("span", "row-when", agoStamp(row.sortKey)));
+    meta.appendChild(hostTag);
     btn.appendChild(meta);
+    btn.appendChild(el("div", "row-title", listTitle(row.session)));
 
     btn.addEventListener("contextmenu", (e) => {
       e.preventDefault();
@@ -2358,6 +2588,21 @@ function renderSessions() {
         .replace(/\s+/g, " ").trim(), state.query);
       btn.appendChild(box);
     }
+
+    // The last line: where it runs, folder and branch.
+    const place = el("div", "row-place");
+    const folder = String(row.session.cwd || "").replace(/\/+$/, "").split("/").pop();
+    if (folder) {
+      const f = el("span", "row-folder", folder);
+      f.title = row.session.cwd;
+      place.appendChild(f);
+    }
+    if (row.session.git_branch) {
+      const br = el("span", "row-branch", "⑂ " + row.session.git_branch);
+      br.title = "Branch " + row.session.git_branch;
+      place.appendChild(br);
+    }
+    btn.appendChild(place);
 
     btn.addEventListener("click", () => openSession(btn._row));
     let nodeKey = "row:" + key;
@@ -2390,7 +2635,8 @@ function highlightInto(host, text, query) {
 // the chat and adds a history entry, so the browser's Back (and the Android
 // back gesture) returns to the list instead of leaving the page.
 
-const compactQuery = window.matchMedia("(max-width: 720px)");
+// A phone, upright or sideways: a narrow window, or a short one.
+const compactQuery = window.matchMedia("(max-width: 720px), (max-height: 520px)");
 const isCompact = () => compactQuery.matches;
 let chatHistoryPushed = false;
 
@@ -2398,6 +2644,7 @@ function showChatPane(on) {
   const app = $("app");
   const was = app.classList.contains("show-chat");
   app.classList.toggle("show-chat", !!on);
+  syncLiveTuiHold();
   if (on && !was && isCompact() && !chatHistoryPushed) {
     try {
       history.pushState({ pane: "chat" }, "");
@@ -2407,6 +2654,7 @@ function showChatPane(on) {
 }
 
 function backToList() {
+  flushDraft();
   if (chatHistoryPushed) history.back();   // popstate does the rest
   else showChatPane(false);
 }
@@ -2414,7 +2662,343 @@ function backToList() {
 window.addEventListener("popstate", () => {
   chatHistoryPushed = false;
   $("app").classList.remove("show-chat");
+  syncLiveTuiHold();
 });
+document.addEventListener("visibilitychange", () => syncLiveTuiHold());
+
+// ------------------------------------------------------------- tabs
+//
+// On a portrait phone the session page is a sheet that comes up from the
+// bottom, and the conversations opened from the list stay above it as
+// bubbles, like a browser's tabs: tap one to switch, tap the open one's ×
+// (or long-press any) to close it. The set is kept in this browser.
+
+const TABS_KEY = "agentremote.tabs";
+const TABS_MAX = 10;
+const sheetQuery = compactQuery;
+
+function readTabs() {
+  try {
+    const t = JSON.parse(localStorage.getItem(TABS_KEY) || "[]");
+    return Array.isArray(t) ? t.filter((x) => x && x.profileId && x.sessionId) : [];
+  } catch { return []; }
+}
+function writeTabs(tabs) {
+  try { localStorage.setItem(TABS_KEY, JSON.stringify(tabs.slice(-TABS_MAX))); } catch { /* blocked */ }
+}
+
+/** The session just opened becomes a tab (at the end, as a browser does). */
+function addTab(row) {
+  if (!row || !row.session || !row.session.id) return;
+  const tabs = readTabs();
+  const at = tabs.findIndex((t) => t.profileId === row.profileId && t.sessionId === row.session.id);
+  const tab = {
+    profileId: row.profileId,
+    sessionId: row.session.id,
+    title: listTitle(row.session),
+    cwd: row.session.cwd || "",
+    provider: row.provider || "",
+    profileName: row.profileName || "",
+  };
+  if (at >= 0) tabs[at] = tab;
+  else {
+    tabs.push(tab);
+    // Past the cap the oldest go, but never the one being opened.
+    while (tabs.length > TABS_MAX) tabs.shift();
+  }
+  writeTabs(tabs);
+  renderTabs();
+}
+
+function closeTab(profileId, sessionId) {
+  const tabs = readTabs();
+  const at = tabs.findIndex((t) => t.profileId === profileId && t.sessionId === sessionId);
+  if (at < 0) return;
+  tabs.splice(at, 1);
+  writeTabs(tabs);
+  const open = state.open;
+  if (open && open.profileId === profileId && open.sessionId === sessionId) {
+    // The open one closed: its neighbour comes forward, as in a browser;
+    // with none left the sheet goes down.
+    const next = tabs[Math.min(at, tabs.length - 1)];
+    if (next) openTab(next);
+    else backToList();
+  }
+  renderTabs();
+}
+
+function openTab(tab) {
+  const row = (state.rows || []).find((r) => r.profileId === tab.profileId
+      && r.session && r.session.id === tab.sessionId)
+    || {
+      profileId: tab.profileId,
+      profileName: tab.profileName || (profileById(tab.profileId) || {}).name || "",
+      provider: tab.provider,
+      session: { id: tab.sessionId, title: tab.title, cwd: tab.cwd, provider: tab.provider },
+      sortKey: 0,
+    };
+  openSession(row);
+}
+
+/** Two letters for a bubble: the first letters of the title's first words. */
+function tabInitials(title) {
+  const words = String(title || "").replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/);
+  const first = (words[0] || "?")[0] || "?";
+  const second = words.length > 1 ? words[1][0] : (words[0] || "")[1] || "";
+  return (first + second).toUpperCase();
+}
+
+function renderTabs() {
+  const strip = $("tabstrip");
+  if (!strip) return;
+  const tabs = readTabs();
+  const working = workingKeys(), blocked = blockedKeys();
+  const open = state.open;
+  const sig = JSON.stringify([tabs.map((t) => [t.profileId, t.sessionId, t.title, t.provider,
+    connOf(t.profileId)]),
+    open && [open.profileId, open.sessionId],
+    tabs.map((t) => blocked.has(`${t.profileId}/${t.sessionId}`) ? 2
+      : working.has(`${t.profileId}/${t.sessionId}`) ? 1 : 0)]);
+  if (strip._sig === sig) return;
+  strip._sig = sig;
+  strip.textContent = "";
+  // The open conversation's bubble stays where it is, at the foot of the
+  // column; the others fan out above it, the most recently opened nearest.
+  const isOpen = (t) => !!open && open.profileId === t.profileId && open.sessionId === t.sessionId;
+  const ordered = tabs.filter(isOpen).concat(tabs.filter((t) => !isOpen(t)).reverse());
+  ordered.forEach((t) => {
+    const key = `${t.profileId}/${t.sessionId}`;
+    const active = isOpen(t);
+    const b = el("button", "tab-bubble");
+    b.type = "button";
+    b.style.setProperty("--tab", providerOf(t.provider).accent);
+    b.title = `${t.title}${t.profileName ? " · " + t.profileName : ""}`;
+    b.setAttribute("aria-label", t.title);
+    if (active) b.setAttribute("aria-current", "true");
+    b.appendChild(el("span", "tab-initials", tabInitials(t.title)));
+    // The live status, as a dot on the bubble: green while its daemon is
+    // live, breathing while the agent works, "?" when it waits on you, grey
+    // while the daemon is out of reach. (On a phone it replaces the live
+    // strip under the session bar.)
+    if (blocked.has(key)) b.appendChild(el("span", "tab-state tab-ask", "?"));
+    else {
+      const live = connOf(t.profileId) === "live";
+      const dot = el("span", "tab-state " + (!live ? "tab-down"
+        : working.has(key) ? "tab-live tab-working" : "tab-live"));
+      dot.title = !live ? "Daemon not connected" : working.has(key) ? "Working" : "Live";
+      b.appendChild(dot);
+    }
+    let pressTimer = null, longPressed = false;
+    b.addEventListener("pointerdown", () => {
+      longPressed = false;
+      pressTimer = setTimeout(() => { longPressed = true; closeTab(t.profileId, t.sessionId); }, 550);
+    });
+    ["pointerup", "pointerleave", "pointercancel"].forEach((ev) =>
+      b.addEventListener(ev, () => clearTimeout(pressTimer)));
+    b.addEventListener("contextmenu", (e) => e.preventDefault());
+    b.addEventListener("click", (e) => {
+      if (longPressed) return;
+      e.stopPropagation();
+      if (!active) { fanTabs(false); openTab(t); }
+      // The open one stands for all of them: a tap fans the others out.
+      else if (tabs.length > 1) fanTabs(!strip.classList.contains("fan"));
+    });
+    const wrap = el("div", active ? "tab-wrap active" : "tab-wrap");
+    wrap.appendChild(b);
+    if (active && tabs.length > 1) {
+      const n = el("span", "tab-count", String(tabs.length));
+      n.title = `${tabs.length} conversations open`;
+      wrap.appendChild(n);
+    }
+    if (active) {
+      const x = el("button", "tab-close", "×");
+      x.type = "button";
+      x.title = "Close this conversation's tab";
+      x.setAttribute("aria-label", "Close tab " + t.title);
+      x.addEventListener("click", (e) => { e.stopPropagation(); closeTab(t.profileId, t.sessionId); });
+      wrap.appendChild(x);
+    }
+    strip.appendChild(wrap);
+
+  });
+}
+
+/**
+ * The tabs take one bubble's room: the open conversation's, with a count of
+ * how many are open. A tap fans the others out above it; picking one, a tap
+ * elsewhere or a few seconds put them away again, so they are not standing
+ * over the text being read.
+ */
+let fanTimer = null;
+function fanTabs(on) {
+  const strip = $("tabstrip");
+  if (!strip) return;
+  strip.classList.toggle("fan", !!on);
+  strip.scrollTop = 0;      // start at the foot, by the open bubble
+  clearTimeout(fanTimer);
+  if (on) fanTimer = setTimeout(() => fanTabs(false), 6000);
+}
+document.addEventListener("click", (e) => {
+  if (!e.target.closest || !e.target.closest("#tabstrip")) fanTabs(false);
+});
+
+// ---------------------------------------------------------- collapsing bar
+//
+// The session bar opens expanded when a session opens and folds down to a
+// slim strip (the title) a few seconds later, or as soon as the reader
+// scrolls the conversation or the terminal. A tap on it opens it again.
+// It stays open while its More menu is open or a pointer rests on it.
+
+const BAR_COLLAPSE_MS = 5000;
+let barTimer = null;
+
+/** Where each scrolling box last was, for the direction of a scroll. Code
+    that moves a box itself (a page put on top) records the new place here,
+    so the move is not read as the reader's. */
+const barLastTop = new WeakMap();
+/** The tallest this window has been at its width: the on-screen keyboard
+    takes height away, and must not make a roomy screen "small". */
+let barRoom = { w: 0, h: 0 };
+
+/** Does the session bar fold itself away here? On a phone, yes. Not in a
+    wide window, and not in an upright one with room to spare (at least
+    480 x 720): the open bar costs nothing there. */
+function barFolds() {
+  if (!isCompact()) return false;
+  const w = window.innerWidth;
+  barRoom = w === barRoom.w
+    ? { w, h: Math.max(barRoom.h, window.innerHeight) } : { w, h: window.innerHeight };
+  const h = barRoom.h;
+  return !(h > w && w >= 480 && h >= 720);
+}
+
+function expandBar() {
+  const float = $("chat-float");
+  if (!float) return;
+  float.classList.remove("collapsed");
+  requestAnimationFrame(syncBarPieces);
+  scheduleBarCollapse();
+}
+
+function collapseBar() {
+  const float = $("chat-float");
+  if (!float || !state.open) return;
+  // Phones only: a wide window has the room, and folding there would only
+  // take the title and the buttons away. So does a roomy upright one.
+  if (!barFolds()) return;
+  if ($("chat-more")?.classList.contains("open") || float.matches(":hover")) {
+    scheduleBarCollapse();
+    return;
+  }
+  float.classList.add("collapsed");
+  syncBarPieces();
+}
+
+/**
+ * Where the bar's two halves end when it folds: around Back, and around the
+ * Chat | TUI switch and More. The buttons do not move between the states,
+ * so this can be measured at any time.
+ */
+function syncBarPieces() {
+  const head = $("chat-head");
+  const back = $("btn-back");
+  const actions = head && head.querySelector(".chat-actions");
+  if (!head || !actions || !head.offsetWidth) return;
+  const hr = head.getBoundingClientRect();
+  const pad = 5;
+  if (back && back.offsetWidth) {
+    const r = back.getBoundingClientRect();
+    head.style.setProperty("--bl", Math.max(0, r.left - hr.left - pad) + "px");
+    // Where the two parts meet, open and folded alike: just after Back.
+    head.style.setProperty("--split", Math.max(0, r.right - hr.left + pad) + "px");
+  }
+  // From the first control that shows when folded (the switch, else More).
+  const sw = $("btn-live-tui");
+  const first = sw && sw.offsetWidth && !sw.classList.contains("icon-idle") ? sw : $("btn-more");
+  const ar = actions.getBoundingClientRect();
+  const left = first && first.offsetWidth ? first.getBoundingClientRect().left : ar.left;
+  head.style.setProperty("--al", Math.max(0, left - hr.left - pad - 2) + "px");
+  head.style.setProperty("--ar", Math.max(0, hr.right - ar.right - pad) + "px");
+}
+
+function scheduleBarCollapse() {
+  clearTimeout(barTimer);
+  barTimer = setTimeout(collapseBar, BAR_COLLAPSE_MS);
+}
+
+function wireBarCollapse() {
+  const float = $("chat-float");
+  if (!float) return;
+  // Folded, the bar is two pieces. Back, the Chat | TUI switch and Stop do
+  // their own job there; More joins the bar again and opens its menu.
+  float.addEventListener("click", (e) => {
+    if (!float.classList.contains("collapsed")) { scheduleBarCollapse(); return; }
+    if (e.target.closest("#btn-more")) expandBar();
+  }, true);
+  // The reader's own scrolling: down (toward the latest) folds the bar
+  // away, up (back through the conversation) brings it out again.
+  const onScroll = (e) => {
+    const box = e.currentTarget;
+    const was = barLastTop.has(box) ? barLastTop.get(box) : box.scrollTop;
+    const by = box.scrollTop - was;
+    barLastTop.set(box, box.scrollTop);
+    if (!readerScrolling() || Math.abs(by) < 4) return;
+    const folded = float.classList.contains("collapsed");
+    if (by > 0 && !folded) {
+      clearTimeout(barTimer);
+      collapseBar();
+    } else if (by < 0 && folded && barFolds()) {
+      expandBar();
+    }
+  };
+  $("transcript")?.addEventListener("scroll", onScroll, { passive: true });
+  $("live-tui-pane")?.addEventListener("scroll", onScroll, { passive: true });
+  // A window made wide again has its bar back.
+  compactQuery.addEventListener("change", () => { if (!isCompact()) expandBar(); });
+  window.addEventListener("resize", () => {
+    // Grown roomy while folded: the bar comes back.
+    if (!barFolds() && $("chat-float")?.classList.contains("collapsed")) expandBar();
+    else syncBarPieces();
+  });
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(syncBarPieces).observe(float.querySelector(".chat-actions"));
+  }
+  ["wheel", "touchmove"].forEach((ev) => $("live-tui-pane")?.addEventListener(ev,
+    () => { state.gestureAt = Date.now(); }, { passive: true }));
+}
+
+/**
+ * The tab bubbles stand just above whatever is at the bottom of the page:
+ * the floating message box (with a gate card) on the chat face, the keys
+ * and the text line on the TUI face.
+ */
+function placeTabs() {
+  const pane = document.querySelector(".pane-chat");
+  if (!pane) return;
+  const paneRect = pane.getBoundingClientRect();
+  let top = paneRect.bottom;
+  const consider = state.liveTui
+    ? ["live-tui-keys", "live-tui-line", "gate"] : ["chat-bottom"];
+  consider.forEach((id) => {
+    const n = id === "live-tui-line" ? document.querySelector(".live-tui-line") : $(id);
+    if (n && n.offsetHeight && !n.classList.contains("hidden")) {
+      top = Math.min(top, n.getBoundingClientRect().top);
+    }
+  });
+  $("app").style.setProperty("--bottom-h", Math.max(0, paneRect.bottom - top) + "px");
+}
+
+/** A tap on the dimmed list behind the sheet closes it. */
+function wireSheetGrip() {
+  // The scrim is the app's ::after, so the click lands on the app itself.
+  $("app").addEventListener("click", (e) => {
+    // Only a click on the scrim itself: a click on a list row bubbles here
+    // too, after it has just opened the sheet.
+    if (e.target !== $("app")) return;
+    if (!sheetQuery.matches || !$("app").classList.contains("show-chat")) return;
+    backToList();
+  });
+}
 
 // ---------------------------------------------------------- follow scroll
 //
@@ -2433,20 +3017,19 @@ function syncJumpPill() {
   const pill = $("jump-latest");
   if (!pill) return;
   const view = $("transcript");
-  const show = !!state.open && !nearBottom(view)
+  // Not over the terminal: the pill belongs to the conversation.
+  const show = !!state.open && !state.liveTui && !nearBottom(view)
     && view.scrollHeight > view.clientHeight + NEAR_BOTTOM_PX;
   pill.classList.toggle("hidden", !show);
   if (!show) { unseenLive = 0; return; }
   pill.textContent = unseenLive > 0
     ? `↓ ${unseenLive} new`
     : "↓ Jump to latest";
-  // Keep it just above the composer, whatever height that currently is.
-  // Keep it just above whatever is docked under the transcript.
-  const h = ["composer", "gate"].reduce((sum, id) => {
-    const n = $(id);
-    return sum + (n && !n.classList.contains("hidden") ? n.offsetHeight : 0);
-  }, 0);
-  pill.style.setProperty("--jump-bottom", `${h + 14}px`);
+  // Keep it just above the floating bottom bar, whatever its height.
+  const bottom = $("chat-bottom");
+  const h = bottom && bottom.offsetHeight
+    ? bottom.parentElement.clientHeight - bottom.offsetTop : 0;
+  pill.style.setProperty("--jump-bottom", `${h + 10}px`);
 }
 
 function scrollToLatest(smooth) {
@@ -2474,6 +3057,7 @@ function applyAccent(provider) {
 }
 
 async function openSession(row) {
+  flushDraft();
   stopJobWatch();
   closeLiveTui();
   showChatPane(true);
@@ -2503,7 +3087,10 @@ async function openSession(row) {
   applyAccent(row.provider);
 
   $("chat-head").classList.remove("hidden");
+  expandBar();      // a session opens with its bar open; it folds by itself
   syncShareButton();
+  addTab(row);
+  restoreDraft();
   $("composer").classList.remove("hidden");
   closePop();
   syncComposer();
@@ -2513,7 +3100,8 @@ async function openSession(row) {
   if (side.open) { side.data = null; side.out = ""; side.form = false; loadChanges(); }
   $("chat-title").textContent = row.session.title || "Session";
   renderChatSub();
-  updateLiveTuiButton();
+  updateLiveTuiButton({ restore: true });   // back on the face it was left on
+  probeTui();
   renderSessions();
   // Opening it is the only honest signal the output was read — dims the tag.
   markSeen(profileById(row.profileId), sessionId);
@@ -2543,7 +3131,7 @@ async function openSession(row) {
     // unanswered AskUserQuestion (Stop + panel race) — recover via /api/jobs.
     recoverPendingGate(row.profileId, sessionId, gen);
   }
-  updateLiveTuiButton();
+  updateLiveTuiButton({ restore: true });
 }
 
 /**
@@ -2635,6 +3223,8 @@ function syncChangesButton() {
   btn.classList.toggle("hidden", !can);
   btn.setAttribute("aria-pressed", String(side.open));
   if (!can && side.open) closeSide();
+  // Reset on host: only where the daemon can do it.
+  $("btn-reset")?.classList.toggle("hidden", !(profile && profile.sessionReset));
 }
 
 function openSide() {
@@ -3279,31 +3869,51 @@ function setIconIdle(btn, idle) {
   btn.tabIndex = idle ? -1 : 0;
 }
 
-function updateLiveTuiButton() {
-  const btn = $("btn-live-tui");
-  if (!btn) return;
+function openSessionHasTui() {
   const open = state.open;
-  if (!open || !open.sessionId) {
-    setIconIdle(btn, true);
-    return;
-  }
+  if (!open || !open.sessionId) return false;
   const profile = profileById(open.profileId);
-  const harness = sessionProvider(open.session, profile);
-  if (!profileSupportsLiveTui(profile, harness)) {
-    setIconIdle(btn, true);
+  return profileSupportsLiveTui(profile, sessionProvider(open.session, profile));
+}
+
+function updateLiveTuiButton({ restore = false } = {}) {
+  const box = $("btn-live-tui");
+  if (!box) return;
+  const can = openSessionHasTui();
+  // The face this session was left on, once TUI is known to be possible:
+  // the daemon's capabilities can arrive after the session has opened.
+  // Only from openSession: closing the TUI also lands here, and must not
+  // reopen it.
+  if (restore && can && !state.liveTui
+      && tuiFaceOn(state.open.profileId, state.open.sessionId)) {
+    openLiveTui();
     return;
   }
-  // Always keep the slot; only the idle flag changes — never display:none.
-  setIconIdle(btn, false);
-  btn.setAttribute("aria-pressed", state.liveTui ? "true" : "false");
-  btn.title = state.liveTui
-    ? "Back to transcript"
-    : "Live TUI — host terminal for this session";
+  // Always keep the slot on a wide window; only the idle flag changes.
+  box.classList.toggle("icon-idle", !can);
+  box.setAttribute("aria-hidden", can ? "false" : "true");
+  box.querySelectorAll("[data-face]").forEach((b) => {
+    const on = (b.dataset.face === "tui") === !!state.liveTui;
+    b.setAttribute("aria-selected", on ? "true" : "false");
+    b.tabIndex = can ? (on ? 0 : -1) : -1;
+  });
+}
+
+/** The face the reader picked: switch to it and remember it for this session. */
+function pickFace(tui) {
+  const open = state.open;
+  if (!open || !open.sessionId) return;
+  if (tui && !openSessionHasTui()) return;
+  setTuiFace(open.profileId, open.sessionId, tui);
+  if (tui && !state.liveTui) openLiveTui();
+  else if (!tui && state.liveTui) closeLiveTui();
 }
 
 function openLiveTui() {
   if (!state.open || !state.open.sessionId) return;
+  resetTuiHistory();
   state.liveTui = true;
+  liveTuiActiveAt = Date.now();
   state.liveTuiSeq = 0;
   state.liveTuiCols = 0;
   $("live-tui").classList.remove("hidden");
@@ -3321,6 +3931,9 @@ function openLiveTui() {
   // straight back.
   focusLiveTuiPane();
   updateLiveTuiCapture();
+  syncJumpPill();
+  syncTailInView();
+  requestAnimationFrame(placeTabs);
   startLiveTuiFeed();
 }
 
@@ -3376,6 +3989,52 @@ function startLiveTuiFeed() {
 
 const LIVE_TUI_STREAM_RETRY_MS = 10000;
 
+// The terminal stream outlives the session page: going back to the list
+// leaves it running, so coming back shows the pane at once. It is let go only
+// when the session page is out of sight AND the page itself has been hidden
+// (another app, another tab, the screen off) for five minutes; it reconnects
+// when both are back.
+const LIVE_TUI_RELEASE_MS = 5 * 60 * 1000;
+let liveTuiReleaseTimer = null;
+let liveTuiReleased = false;
+
+const sessionPageVisible = () => !isCompact() || $("app").classList.contains("show-chat");
+
+// Also let it go when nobody can see it and nothing has happened for five
+// minutes: no new frame from the host and no key from the reader. A still
+// pane nobody looks at is not worth a connection.
+let liveTuiActiveAt = Date.now();
+const terminalOnScreen = () => document.visibilityState !== "hidden" && sessionPageVisible();
+setInterval(() => {
+  if (!state.liveTui || liveTuiReleased || terminalOnScreen()) return;
+  if (Date.now() - liveTuiActiveAt < LIVE_TUI_RELEASE_MS) return;
+  stopLiveTuiFeed();
+  liveTuiReleased = true;
+}, 30 * 1000);
+
+function syncLiveTuiHold() {
+  const hidden = document.visibilityState === "hidden";
+  if (state.liveTui && hidden && !sessionPageVisible()) {
+    if (!liveTuiReleaseTimer && !liveTuiReleased) {
+      liveTuiReleaseTimer = setTimeout(() => {
+        liveTuiReleaseTimer = null;
+        if (!state.liveTui) return;
+        stopLiveTuiFeed();
+        liveTuiReleased = true;
+      }, LIVE_TUI_RELEASE_MS);
+    }
+    return;
+  }
+  clearTimeout(liveTuiReleaseTimer);
+  liveTuiReleaseTimer = null;
+  // Back in sight: a released stream reconnects.
+  if (liveTuiReleased && terminalOnScreen() && state.liveTui && state.open) {
+    liveTuiReleased = false;
+    liveTuiActiveAt = Date.now();
+    startLiveTuiFeed();
+  }
+}
+
 function startLiveTuiPolling() {
   clearInterval(state.liveTuiTimer);
   pollLiveTui(true);
@@ -3392,6 +4051,10 @@ function stopLiveTuiFeed() {
 }
 
 function closeLiveTui() {
+  resetTuiHistory();
+  clearTimeout(liveTuiReleaseTimer);
+  liveTuiReleaseTimer = null;
+  liveTuiReleased = false;
   flushLiveTuiText();
   state.liveTui = false;
   state.liveTuiKeys = false;
@@ -3402,7 +4065,14 @@ function closeLiveTui() {
   if (tr) tr.classList.remove("hidden");
   if (state.open) {
     $("composer")?.classList.remove("hidden");
+    sizePrompt();   // the draft may have grown in the terminal's line
+    // Back on the chat: a reader who was following lands on the newest row
+    // (the transcript kept filling while it was out of sight).
+    if (tr && state.stick) jumpBottom(tr);
   }
+  syncJumpPill();
+  syncTailInView();
+  requestAnimationFrame(placeTabs);
   updateLiveTuiCapture();
   updateLiveTuiButton();
 }
@@ -3447,18 +4117,301 @@ async function pollLiveTui(force) {
 }
 
 /** Draw one frame, however it arrived (pushed or polled). */
+// ---- terminal scrollback ---------------------------------------------------
+// Scrolling the terminal to its top asks the daemon for what scrolled off it,
+// a page of 200 lines each time while there are more. While it is shown, new
+// output that scrolls off the screen joins it, so the two stay joined.
+
+let tuiHist = { text: "", lines: 0, total: 0, more: true, loading: false, gen: 0 };
+let tuiHistTimer = null;
+
+function resetTuiHistory() {
+  resetTuiHold();
+  tuiStick = true;      // a terminal just opened starts at its end
+  clearTimeout(tuiHistTimer);
+  tuiHistTimer = null;
+  tuiHist = { text: "", lines: 0, total: 0, more: true, loading: false, gen: tuiHist.gen + 1 };
+  const h = $("live-tui-history");
+  if (h) h.textContent = "";
+  const m = $("live-tui-more");
+  if (m) m.textContent = "";
+}
+
+const TUI_HIST_PAGE = 200;
+const TUI_HIST_MAX = 20000;     // lines kept in the page; older are not asked for
+
+/**
+ * One page of scrollback. `older` asks for the page before what is shown
+ * and puts it on top; otherwise it asks for what has scrolled off the
+ * screen since, and joins it below. Either way one request carries one
+ * page, never the whole history again.
+ *
+ * Two anchors: `next`/`at` are the daemon's cursor for the next older page;
+ * `total` is the history size up to which the bottom of the block is
+ * complete, so the refresh knows how much has scrolled off since.
+ */
+async function loadTuiHistory({ older = true } = {}) {
+  const open = state.open;
+  const profile = open && profileById(open.profileId);
+  if (!profile || !profile.tuiHistory || !state.liveTui) return;
+  // Not under a selection: the scrollback's text is replaced when it grows.
+  if (tuiSelecting()) return;
+  if (tuiHist.loading) {
+    // A refresh that met a page in flight is owed, not dropped.
+    if (!older) tuiHist.owed = true;
+    return;
+  }
+  const gen = tuiHist.gen;
+  tuiHist.loading = true;
+  if (older) $("live-tui-more").textContent = "Loading earlier lines…";
+  let again = false;
+  try {
+    const q = older && tuiHist.lines
+      ? `&before=${tuiHist.next}&at=${tuiHist.at}` : "";
+    const got = await call(profile,
+      `/api/sessions/${encodeURIComponent(open.sessionId)}/tui/history?ansi=1&lines=${TUI_HIST_PAGE}${q}`,
+      { timeout: 20000 });
+    if (gen !== tuiHist.gen) return;
+    if (!got || !got.attached) { tuiHist.more = false; return; }
+    // A selection begun while this was on its way: the page is let go (the
+    // cursor has not moved) and asked for again when the selection ends.
+    if (tuiSelecting()) return;
+    const rows = got.text ? String(got.text).split("\n") : [];
+    const pane = $("live-tui-pane");
+    const before = pane.scrollHeight;
+    const atBottom = tuiStick;
+    const total = got.history || 0;
+    const was = tuiHist.text;
+    const startOver = () => {
+      // The newest page is all there is to trust: older pages load again
+      // on demand.
+      tuiHist.text = rows.join("\n");
+      tuiHist.lines = rows.length;
+      tuiHist.total = total;
+      tuiHist.next = got.next || rows.length;
+      tuiHist.at = total;
+      tuiHist.more = !!got.more;
+    };
+    if (older && !tuiHist.lines) {
+      startOver();
+      // Nothing has scrolled off yet: not the end of it, just not begun.
+      if (!total) { tuiHist.more = true; tuiHist.emptyAt = Date.now(); }
+    } else if (older) {
+      if (got.reset || total < tuiHist.at) {
+        // History got shorter (tmux trimmed it, or it was cleared): what is
+        // shown no longer lines up with it.
+        startOver();
+      } else {
+        // What scrolled in since the last refresh sits between this page
+        // and the screen, not in it (the daemon skipped it); the refresh
+        // below fetches it.
+        if (rows.length) {
+          tuiHist.text = tuiHist.text ? rows.join("\n") + "\n" + tuiHist.text : rows.join("\n");
+          tuiHist.lines += rows.length;
+        }
+        tuiHist.next = got.next;
+        tuiHist.at = total;
+        tuiHist.more = !!got.more && tuiHist.lines < TUI_HIST_MAX;
+        if (total > tuiHist.total) again = true;
+      }
+    } else {
+      const grown = total - tuiHist.total;
+      if (grown < 0 || grown > rows.length) {
+        // Shorter than it was, or more than a page scrolled off at once:
+        // start again from this newest page rather than show a gap.
+        startOver();
+      } else if (grown > 0) {
+        const add = rows.slice(rows.length - grown);
+        let text = tuiHist.text ? tuiHist.text + "\n" + add.join("\n") : add.join("\n");
+        tuiHist.lines += add.length;
+        tuiHist.total = total;
+        if (tuiHist.lines > TUI_HIST_MAX) {
+          // Kept to its bound: the oldest lines go, and are not asked for.
+          text = text.split("\n").slice(tuiHist.lines - TUI_HIST_MAX).join("\n");
+          tuiHist.lines = TUI_HIST_MAX;
+          tuiHist.more = false;
+        }
+        tuiHist.text = text;
+      }
+    }
+    if (tuiHist.text !== was) {
+      $("live-tui-history").innerHTML = tuiHist.text ? ansiToHtml(tuiHist.text, paneIsLight()) : "";
+      if (older) pane.scrollTop += pane.scrollHeight - before;   // keep the reader's line
+      else if (atBottom) pane.scrollTop = pane.scrollHeight;
+      tuiLastTop = pane.scrollTop;
+      // Not the reader's scrolling: the session bar takes no cue from it.
+      barLastTop.set(pane, pane.scrollTop);
+    }
+  } catch { /* the next scroll to the top asks again */ }
+  finally {
+    if (gen === tuiHist.gen) {
+      tuiHist.loading = false;
+      $("live-tui-more").textContent = tuiHist.lines && !tuiHist.more
+        ? (tuiHist.lines >= TUI_HIST_MAX ? "Earlier lines are not shown"
+          : "Start of the terminal's history") : "";
+      if (again || tuiHist.owed) {
+        tuiHist.owed = false;
+        if (tuiHist.lines) loadTuiHistory({ older: false });
+      }
+    }
+  }
+}
+
+function maybeLoadTuiHistory() {
+  const pane = $("live-tui-pane");
+  if (!state.liveTui || !pane || pane.scrollTop > 24 || !state.liveTuiSeq) return;
+  // An empty history is asked about again, but not on every scroll event.
+  if (!tuiHist.lines && tuiHist.emptyAt && Date.now() - tuiHist.emptyAt < 3000) return;
+  if (tuiHist.more && !tuiHist.loading) loadTuiHistory({ older: true });
+}
+
+function refreshTuiHistorySoon() {
+  // Once in 1.2 s at most, and not put off by each new frame: a terminal
+  // that keeps printing would otherwise never be refreshed at all.
+  if (!tuiHist.lines || tuiHistTimer) return;
+  tuiHistTimer = setTimeout(() => {
+    tuiHistTimer = null;
+    loadTuiHistory({ older: false });
+  }, 1200);
+}
+
+/** Is the TUI pane drawn on a light background (the app's theme)? */
+function paneIsLight() {
+  const c = getComputedStyle($("live-tui-pane")).backgroundColor;
+  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(c || "");
+  if (!m) return false;
+  return (0.2126 * m[1] + 0.7152 * m[2] + 0.0722 * m[3]) / 255 > 0.5;
+}
+
+// ---- following the terminal's end -------------------------------------------
+// The pane follows its end while the reader is there. "There" used to be
+// "within 48 px of the bottom", looked at as each frame was drawn: on a
+// terminal that is doing anything a frame comes several times a second, and
+// a scroll up had to cover those 48 px between two of them or it was thrown
+// back, so scrolling up kept snapping to the bottom. Now it is the reader's
+// last move that decides: scrolling up lets go, reaching the bottom takes
+// hold again.
+
+let tuiStick = true;
+let tuiLastTop = 0;
+
+function noteTuiScroll() {
+  const pane = $("live-tui-pane");
+  if (!pane) return;
+  const top = pane.scrollTop;
+  const gap = pane.scrollHeight - top - pane.clientHeight;
+  if (gap < 4) tuiStick = true;
+  else if (top < tuiLastTop - 1) tuiStick = false;
+  tuiLastTop = top;
+}
+
+// ---- selecting text in the terminal ----------------------------------------
+// Every frame used to replace the screen's text, which threw away whatever
+// the reader was selecting: on a terminal that is doing anything, nothing
+// could be selected at all. While a pointer is down on the pane, or text in
+// it is selected, the screen is left as it is and the newest frame waits;
+// it is drawn the moment the selection is let go.
+
+let tuiPointerDown = false;
+let tuiHeldFrame = null;
+
+function tuiSelecting() {
+  if (tuiPointerDown) return true;
+  const sel = window.getSelection ? window.getSelection() : null;
+  if (!sel || sel.isCollapsed || !sel.anchorNode) return false;
+  const pane = $("live-tui-pane");
+  return !!pane && pane.contains(sel.anchorNode);
+}
+
+function releaseTuiHold() {
+  const pane = $("live-tui-pane");
+  if (tuiSelecting()) return;
+  if (pane) pane.classList.remove("held");
+  const frame = tuiHeldFrame;
+  tuiHeldFrame = null;
+  if (!state.liveTui) return;
+  if (frame) paintLiveTuiFrame(frame, false);
+  // What was put off under the selection: a page asked for at the top,
+  // and the lines that scrolled off meanwhile.
+  maybeLoadTuiHistory();
+  refreshTuiHistorySoon();
+}
+
+/** Forget any hold: another session's terminal, or this one closed. A frame
+    kept for one session must never be drawn into another. */
+function resetTuiHold() {
+  tuiPointerDown = false;
+  tuiHeldFrame = null;
+  $("live-tui-pane")?.classList.remove("held");
+}
+
+/** The reader is typing into the terminal: a selection left lying in it must
+    not keep the screen from showing what they type. */
+function dropTuiSelection() {
+  if (tuiPointerDown) return;
+  const sel = window.getSelection ? window.getSelection() : null;
+  const pane = $("live-tui-pane");
+  if (sel && !sel.isCollapsed && sel.anchorNode && pane && pane.contains(sel.anchorNode)) {
+    sel.removeAllRanges();
+    releaseTuiHold();
+  }
+}
+
+function wireTuiSelection() {
+  const pane = $("live-tui-pane");
+  if (!pane) return;
+  pane.addEventListener("pointerdown", (e) => {
+    // The main button on the text only: not a right click (its menu takes
+    // the pointerup), and not a press on the pane's scrollbar.
+    if (e.button !== 0) return;
+    if (e.target === pane && (e.offsetX >= pane.clientWidth || e.offsetY >= pane.clientHeight)) return;
+    tuiPointerDown = true;
+  });
+  const up = () => {
+    if (!tuiPointerDown) return;
+    tuiPointerDown = false;
+    // The selection settles just after the pointer goes up.
+    setTimeout(releaseTuiHold, 0);
+  };
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
+  // A pointerup that never came (let go outside the window, a menu, the
+  // tab hidden) must not leave the terminal held for good.
+  window.addEventListener("blur", up);
+  window.addEventListener("contextmenu", up, true);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) up(); });
+  window.addEventListener("pointermove", (e) => { if (tuiPointerDown && e.buttons === 0) up(); });
+  document.addEventListener("selectionchange", () => {
+    if (tuiHeldFrame || pane.classList.contains("held")) releaseTuiHold();
+  });
+}
+
 function paintLiveTuiFrame(frame, force) {
   {
+    if (!force && frame && frame.attached !== false && tuiSelecting()) {
+      // Wait: the reader is selecting. Only the newest frame is kept.
+      tuiHeldFrame = frame;
+      $("live-tui-pane").classList.add("held");
+      return;
+    }
+    // Drawing this one: a frame kept back earlier is older, and is dropped.
+    tuiHeldFrame = null;
+    $("live-tui-pane").classList.remove("held");
     const status = $("live-tui-status");
     const pane = $("live-tui-pane");
     const screen = $("live-tui-screen");
+    if (frame) setOpenHasTui(frame.attached !== false);
     if (!frame || frame.attached === false) {
       status.textContent = frame?.error || "No host TUI attached";
       status.classList.remove("live");
       state.liveTuiSeq = 0;
       if (force || !pane.dataset.hadFrame) {
-        screen.textContent = frame?.error
-          || "No interactive TUI for this session. Start a turn in Interactive mode.";
+        const prof = state.open && profileById(state.open.profileId);
+        screen.textContent = prof && capOf(prof, "interactive", true,
+          sessionProvider(state.open && state.open.session, prof))
+          ? "No terminal for this session yet.\nType a line below and send it to start one."
+          : (frame?.error
+            || "No interactive TUI for this session. Start a turn in Interactive mode.");
         pane.classList.add("empty-tui");
         pane.style.fontSize = "";
         delete pane.dataset.hadFrame;
@@ -3467,13 +4420,15 @@ function paintLiveTuiFrame(frame, force) {
     }
     if (!force && frame.seq === state.liveTuiSeq) return;
     state.liveTuiSeq = frame.seq;
+    refreshTuiHistorySoon();
+    liveTuiActiveAt = Date.now();   // the pane changed
     pane.dataset.hadFrame = "1";
     pane.classList.remove("empty-tui");
-    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
+    const atBottom = tuiStick;
     // Coloured SGR when ?ansi=1 (default plain has no escapes).
     const raw = frame.text || "(empty pane)";
     if (frame.ansi || raw.includes("\u001b[") || raw.includes("\x1b[")) {
-      screen.innerHTML = ansiToHtml(raw);
+      screen.innerHTML = ansiToHtml(raw, paneIsLight());
     } else {
       screen.textContent = raw;
     }
@@ -3484,7 +4439,7 @@ function paintLiveTuiFrame(frame, force) {
       ? frame.cols
       : Math.max(state.liveTuiCols, widestLine(raw));
     fitLiveTuiPane();
-    if (atBottom) pane.scrollTop = pane.scrollHeight;
+    if (atBottom) { pane.scrollTop = pane.scrollHeight; tuiLastTop = pane.scrollTop; }
     status.textContent = frame.job_id
       ? `Host TUI · job ${String(frame.job_id).slice(0, 8)}`
       : "Host TUI · live";
@@ -3549,6 +4504,8 @@ const _tuiQueue = [];      // { text } | { keys } | { line: { text, keys } }
 let _tuiSending = false;
 
 function sendLiveTuiKeys(keys, text) {
+  liveTuiActiveAt = Date.now();     // the reader acted
+  dropTuiSelection();
   if (text && keys && keys.length) {
     // A whole line from the text field: text, a pause, then Enter. The
     // pause is the daemon's (some harnesses read a fast CR as pasted text).
@@ -3830,6 +4787,8 @@ async function loadOlder(btn) {
     state.items = expandMessages(page.messages || [], page.offset || 0).concat(state.items);
     renderTranscript(false);
     view.scrollTop = view.scrollHeight - before;
+    // Not the reader's scrolling: the session bar takes no cue from it.
+    barLastTop.set(view, view.scrollTop);
   } catch (e) {
     if (!isOpenStill(gen, profileId, sessionId)) return;
     toast(e.message);
@@ -3877,16 +4836,35 @@ function watchTranscriptScroll() {
   const view = $("transcript");
   if (!view) return;
   const gesture = () => { state.gestureAt = Date.now(); };
-  ["wheel", "touchstart", "touchmove", "touchend"].forEach((ev) => {
+  // mousedown too: dragging the scrollbar is the reader's scrolling.
+  ["wheel", "touchstart", "touchmove", "touchend", "mousedown"].forEach((ev) => {
     view.addEventListener(ev, gesture, { passive: true });
   });
   view.addEventListener("scroll", () => {
+    // Reaching the top asks for the earlier messages by itself, as if the
+    // "Load earlier messages" button had been pressed.
+    // Only when the reader scrolled there: a rebuild also passes the top.
+    if (view.scrollTop < 120 && readerScrolling()) {
+      const more = view.querySelector(".load-older");
+      if (more && !more.disabled) loadOlder(more);
+    }
     const top = view.scrollTop;
     // Momentum keeps firing scrolls long after the finger is gone; each one
     // moving up renews the window, so the flick runs to its own stop.
-    if (top < state.lastTop - 1) gesture();
+    const movedUp = top < state.lastTop - 1;
+    const movedDown = top > state.lastTop + 1;
+    if (movedUp) gesture();
     state.lastTop = top;
-    state.stick = view.scrollHeight - top - view.clientHeight < 24;
+    // Following is decided by the reader's last move, not only by where
+    // they are: a small scroll up used to leave them "within 24 px of the
+    // bottom", still following, and the next row of a live turn threw them
+    // back. Up lets go; reaching the bottom, or coming down near it, takes
+    // hold again.
+    const gap = view.scrollHeight - top - view.clientHeight;
+    if (gap < 4) state.stick = true;
+    else if (movedUp && readerScrolling()) state.stick = false;
+    else if (movedDown && gap < 24) state.stick = true;
+    syncTailInView();
   }, { passive: true });
 }
 
@@ -4393,6 +5371,8 @@ function renderChips({ force = false } = {}) {
   if (pop.kind === "chip") closePop();
   bar.innerHTML = "";
   bar.classList.toggle("hidden", !choices.length);
+  const pill = el("div", "chips-pill");
+  if (choices.length) bar.appendChild(pill);
   choices.forEach((c) => {
     const b = el("button", "cchip");
     b.type = "button";
@@ -4414,7 +5394,7 @@ function renderChips({ force = false } = {}) {
         else openChipMenu(c.key, b);
       });
     }
-    bar.appendChild(b);
+    pill.appendChild(b);
   });
 }
 
@@ -4500,7 +5480,7 @@ function syncSlashMenu() {
   }
   pop.dismissed = null;
   const ctx = turnContext();
-  const headless = execModeOf(ctx.profile, ctx.harness) !== "interactive";
+  const headless = !sendsToTerminal(ctx.profile, ctx.harness);
   const keep = pop.kind === "slash" ? pop.items[pop.index] : null;
   pop.kind = "slash";
   pop.anchor = prompt;
@@ -4574,16 +5554,24 @@ function slashKeydown(e) {
   return true;
 }
 
+const SEND_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>';
+const SEND_ICON_QUEUE = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h11M4 12h11M4 18h7"/><path d="M17 15l3 3-3 3"/><path d="M14 18h6"/></svg>';
+
 /** Send says what it will do: a headless turn in progress queues the message. */
 function syncSendButton() {
   const ctx = turnContext();
   const running = !!(state.job && jobBelongsToOpen(state.job));
-  const queues = running && ctx
-    && execModeOf(ctx.profile, ctx.harness) !== "interactive";
+  const queues = running && ctx && !sendsToTerminal(ctx.profile, ctx.harness);
   const b = $("btn-send");
-  b.textContent = queues ? "Queue" : "Send";
-  b.title = queues ? "Runs after the current turn"
-    : (running ? "Typed into the running session" : "");
+  // An icon only: a paper plane, or a queue arrow while a turn runs.
+  const icon = queues ? "queue" : "send";
+  if (b.dataset.icon !== icon) {
+    b.dataset.icon = icon;
+    b.innerHTML = queues ? SEND_ICON_QUEUE : SEND_ICON;
+  }
+  b.setAttribute("aria-label", queues ? "Queue" : "Send");
+  b.title = queues ? "Queue: runs after the current turn"
+    : (running ? "Send: typed into the running session" : "Send");
 }
 
 function syncComposer() {
@@ -4599,7 +5587,22 @@ function syncComposer() {
  *  - while a turn runs, interactive types into the TUI and headless queues on
  *    the daemon — never on this page, which can be closed at any moment.
  */
-async function send(text) {
+/**
+ * What the daemon made of an "auto" message. Says so once when a session
+ * that had a terminal no longer has one, since a headless turn behaves
+ * differently (messages queue, terminal-only commands do not run).
+ */
+function noteSendMode(mode) {
+  if (!mode || !state.open) return;
+  const had = state.open.hasTui;
+  setOpenHasTui(mode === "interactive");
+  if (had && mode === "headless") {
+    composerNote("This session's terminal is gone, so this ran headless. "
+      + "Send a line from TUI to start it again.", true);
+  }
+}
+
+async function send(text, { mode = "" } = {}) {
   const raw = String(text || "").trim();
   if (!raw || !state.open) return;
   // Snapshot the open session BEFORE any await — a mid-send row switch must
@@ -4617,14 +5620,18 @@ async function send(text) {
 
   if (/^\/[A-Za-z][A-Za-z0-9_-]*$/.test(raw.split(" ")[0])) {
     const cmd = raw.split(" ")[0];
-    const interactive = execModeOf(profile,
-      sessionProvider(state.open && state.open.session, profile)) === "interactive";
+    const interactive = sendsToTerminal(profile,
+      sessionProvider(state.open && state.open.session, profile));
     // /rewind never reaches the harness — the daemon rewinds the session
     // journal itself (≥ 2.5) — so it is exempt from the interactive-only
     // rule. The advertised-list check below still gates it (old daemons
     // don't list it).
-    if (!interactive && cmd !== "/rewind") {
-      composerNote(`${cmd} needs interactive execution — headless turns cannot run commands`, true);
+    // A line sent from the TUI face to start a terminal is interactive by
+    // definition, whatever the session has now.
+    if (!interactive && mode !== "interactive" && cmd !== "/rewind") {
+      composerNote(profile.autoExec
+        ? `${cmd} needs the session's terminal: send a line from TUI to start one`
+        : `${cmd} needs interactive execution — headless turns cannot run commands`, true);
       return;
     }
     // No hardcoded whitelist: the daemon advertises each harness's real
@@ -4633,10 +5640,13 @@ async function send(text) {
     // command that harness would not understand.
     const known = slashOf(profile, sessionProvider(state.open && state.open.session, profile));
     if (!known.includes(cmd)) {
-      composerNote(known.length
+      const why = known.length
         ? `${cmd} is not available here — try: ${known.slice(0, 6).join(" ")}`
-        : "This daemon does not advertise any slash commands", true);
-      return;
+        : "This daemon does not advertise any slash commands";
+      composerNote(why, true);
+      // From the TUI face the composer's note is out of sight.
+      if (mode === "interactive") toast(why);
+      return false;
     }
   }
 
@@ -4646,8 +5656,8 @@ async function send(text) {
   appendLive({ role: "user", text: raw }, paint);
 
   if (job) {
-    const interactive = execModeOf(profile,
-      sessionProvider(state.open && state.open.session, profile)) === "interactive";
+    const interactive = sendsToTerminal(profile,
+      sessionProvider(state.open && state.open.session, profile));
     const jobId = job.id;
     try {
       await call(profile, `/api/jobs/${jobId}/${interactive ? "input" : "queue"}`,
@@ -4673,13 +5683,17 @@ async function send(text) {
         method: "POST",
         body: {
           prompt: raw,
-          permission_mode: wireExecMode(execModeOf(profile, harness)),
+          permission_mode: mode || sendMode(profile, harness),
           model: sessionModelOf(profile, state.open && state.open.session, harness),
           effort: sessionEffortOf(profile, state.open && state.open.session, harness),
         },
       });
     if (res && res.job_id && isOpenStill(openGen, openProfileId, openSessionId)) {
+      noteSendMode(res.mode);
       attachJob(res.job_id, openSessionId);
+      // Known before the first poll, so a follow-up sent at once goes the
+      // same way as the turn it follows.
+      if (res.mode && state.job && state.job.id === res.job_id) state.job.mode = res.mode;
     }
   } catch (e) {
     appendLive({ role: "notice", text: e.message, severity: "error" }, paint);
@@ -4724,7 +5738,7 @@ async function runShell(command) {
     const harness = sessionProvider(state.open && state.open.session, profile);
     const started = await call(profile,
       `/api/sessions/${encodeURIComponent(openSessionId)}/continue`,
-      { method: "POST", body: { prompt, permission_mode: wireExecMode(execModeOf(profile, harness)),
+      { method: "POST", body: { prompt, permission_mode: sendMode(profile, harness),
                                 model: sessionModelOf(
                                   profile, state.open && state.open.session, harness),
                                 effort: sessionEffortOf(
@@ -4863,6 +5877,7 @@ function attachJob(jobId, sessionId = null, { adopted = false } = {}) {
   chimeLastStatusMs = 0;
   renderBanner();
   setIconIdle($("btn-stop"), false);
+  setIconIdle($("btn-tui-stop"), false);
   syncSendButton();
   state.jobTimer = setInterval(pollJob, 250);
   pollJob();
@@ -4877,6 +5892,7 @@ function detachJobWatch() {
   state.jobLastFetch = 0;
   // Keep the 34×34 Stop slot empty — do not collapse the row.
   setIconIdle($("btn-stop"), true);
+  setIconIdle($("btn-tui-stop"), true);
   syncSendButton();
 }
 
@@ -4960,6 +5976,12 @@ async function pollJob() {
   let snap;
   try {
     snap = await call(profile, `/api/jobs/${job.id}?since=${state.jobSince}`);
+    // How this turn runs (a daemon ≥ 2.30 says): into the terminal or headless.
+    if (snap && snap.mode && state.job === job && job.mode !== snap.mode) {
+      job.mode = snap.mode;
+      if (snap.mode === "interactive") setOpenHasTui(true);
+      syncComposer();
+    }
     state.jobFails = 0;
   } catch {
     if (++state.jobFails >= 5) {
@@ -5014,17 +6036,24 @@ async function pollJob() {
   if (snap.pending_question) {
     job.pendingQuestion = snap.pending_question;
     job.lastPendingQuestion = snap.pending_question;
+    job.questionGone = 0;
   } else if (!(frame && frame.pending_question)) {
-    // Only drop when the stream also says the gate is gone — and not while
-    // this request_id is still the one we optimistically cleared after Submit.
+    // Neither the job nor the stream has the question any more. Answered
+    // here: drop it at once. Otherwise it was answered somewhere else (the
+    // host, another client), and it goes too, once a second poll agrees:
+    // one poll alone can miss it while the daemon applies the picks. It
+    // used to be kept until answered on THIS client, so a question
+    // answered on the phone stayed up in the browser for good.
     const held = job.lastPendingQuestion && job.lastPendingQuestion.request_id;
-    if (!held || state.answeredQuestions.has(held)) {
+    job.questionGone = (job.questionGone || 0) + 1;
+    if (!held || state.answeredQuestions.has(held) || job.questionGone >= 2) {
       job.pendingQuestion = null;
-      if (state.answeredQuestions.has(held)) job.lastPendingQuestion = null;
+      job.lastPendingQuestion = null;
     } else {
       job.pendingQuestion = job.lastPendingQuestion;
     }
   } else {
+    job.questionGone = 0;
     job.pendingQuestion = job.lastPendingQuestion || job.pendingQuestion;
   }
 
@@ -5058,6 +6087,7 @@ async function pollJob() {
         || sessionIsJobPlaceholder(state.open.sessionId, job.id)
         || !job.sessionId)) {
     state.open.sessionId = snap.new_session_id;
+    rekeyDraft();
     if (state.open.session) state.open.session.id = snap.new_session_id;
     job.sessionId = snap.new_session_id;
     paintCtx.sessionId = snap.new_session_id;
@@ -5084,6 +6114,19 @@ async function pollJob() {
     if (side.open) loadChanges();
     // Only real job errors — never "failed" for empty/unknown status.
     if (snap.status === "error") notes.push(snap.error || "The turn failed");
+    // Sent from the TUI view (a line that was to start a terminal): the
+    // notice in the conversation is out of sight there, so say it here too.
+    if (snap.status === "error" && state.liveTui && jobBelongsToOpen(job)) {
+      const why = snap.error || "The turn failed";
+      toast(why);
+      const pane = $("live-tui-pane");
+      if (pane && pane.classList.contains("empty-tui")) {
+        const prof = state.open && profileById(state.open.profileId);
+        $("live-tui-screen").textContent = "The terminal did not start.\n\n" + why
+          + (prof && prof.sessionReset
+            ? "\n\nMore › Reset on host stops it there from here." : "");
+      }
+    }
     if (snap.status === "stopped") notes.push("Stopped");
     if (snap.dropped_queued) notes.push(`${snap.dropped_queued} queued prompt(s) dropped`);
     const endGen = paintCtx.gen;
@@ -5110,6 +6153,7 @@ async function pollJob() {
     // already chimed after its own paint, this is a no-op; if we got here
     // first, chimeJobEnded only plays the sound (alreadyPainted).
     if (snap.status === "done" || snap.status === "error") {
+      probeTui();     // a turn can start or end a terminal
       await chimeJobEnded(profile.id, job.id, {
         nextSeq: state.jobSince,
         sessionId: endSid,
@@ -5153,6 +6197,7 @@ function syncWorkingTail() {
   const on = thread && box && !box.classList.contains("hidden");
   if (!on) {
     if (old) old.remove();
+    syncTailInView();
     return;
   }
   const ask = box.classList.contains("needs-answer");
@@ -5173,6 +6218,17 @@ function syncWorkingTail() {
   tail.lastChild.textContent = text;
   if (tail.parentNode !== thread || thread.lastChild !== tail) thread.appendChild(tail);
   followBottom(view);
+  syncTailInView();
+}
+
+/** Is the working row on screen? Then the bar's live strip is not needed. */
+function syncTailInView() {
+  const pane = document.querySelector(".pane-chat");
+  const view = $("transcript");
+  if (!pane || !view) return;
+  const tail = document.getElementById("working-tail");
+  const on = !!tail && !state.liveTui && nearBottom(view);
+  pane.classList.toggle("tail-in-view", on);
 }
 
 function renderBannerStrip() {
@@ -5357,6 +6413,19 @@ function setConn(id, next) {
   const cur = state.conn[id];
   if (cur && cur.state === next) return;
   state.conn[id] = { state: next, since: Date.now() };
+  // Back after an outage: the daemon may have been restarted on another
+  // version, so what it can do is asked again. Without this a page left
+  // open across an upgrade kept the old daemon's abilities (no auto mode,
+  // no scrollback) until it was reloaded.
+  if (next === "live" && cur && (cur.state === "reconnecting" || cur.state === "offline")) {
+    const profile = profileById(id);
+    if (profile) {
+      pingProfile(profile).then(() => {
+        if (state.open && state.open.profileId === id) { probeTui(); syncComposer(); }
+      }).catch(() => {});
+    }
+  }
+  renderTabs();     // each bubble's dot says whether its daemon is live
   clearTimeout(connTimers[id]);
   delete connTimers[id];
   if (next === "reconnecting" || next === "connecting") {
@@ -5885,6 +6954,9 @@ function normalizeProfile(p) {
     share: !!p.share,
     linkedFiles: !!p.linkedFiles,
     tuiStream: !!p.tuiStream,
+    tuiHistory: !!p.tuiHistory,
+    autoExec: !!p.autoExec,
+    sessionReset: !!p.sessionReset,
     chunkedUpload: !!p.chunkedUpload,
     ...(typeof p.maxUploadMb === "number" && p.maxUploadMb > 0
       ? { maxUploadMb: p.maxUploadMb } : {}),
@@ -6344,9 +7416,10 @@ function renderGate({ focus = false } = {}) {
         b.setAttribute("aria-pressed", String(active));
         b.appendChild(el("span", "qmark",
           q.multi_select ? (active ? "[x]" : "[ ]") : (active ? "(o)" : "( )")));
-        const col = el("div");
+        const col = el("div", "qcol");
         col.appendChild(el("div", null, opt.label));
         if (opt.description) col.appendChild(el("div", "qdesc", opt.description));
+        if (opt.preview) col.appendChild(el("div", "qprev", opt.preview));
         b.appendChild(col);
         b.addEventListener("click", () => {
           if (q.multi_select) {
@@ -6491,9 +7564,10 @@ function showPlanModal(pending) {
           b.setAttribute("aria-pressed", String(active));
           b.appendChild(el("span", "qmark",
             q.multi_select ? (active ? "[x]" : "[ ]") : (active ? "(o)" : "( )")));
-          const col = el("div");
+          const col = el("div", "qcol");
           col.appendChild(el("div", null, opt.label));
           if (opt.description) col.appendChild(el("div", "qdesc", opt.description));
+          if (opt.preview) col.appendChild(el("div", "qprev", opt.preview));
           b.appendChild(col);
           b.addEventListener("click", () => {
             if (q.multi_select) {
@@ -6712,7 +7786,7 @@ function attachPathToPrompt(path) {
   const prompt = $("prompt");
   const sep = prompt.value && !/\s$/.test(prompt.value) ? " " : "";
   prompt.value = prompt.value + sep + "[attached: " + path + "]";
-  prompt.dispatchEvent(new Event("input"));
+  prompt.dispatchEvent(new Event("input"));   // also saves the draft
   prompt.focus();
 }
 
@@ -7278,12 +8352,19 @@ function openOptions() {
       // the composer, because they change far more often than this does.
       const canInteractive = capOf(profile, "interactive", true, harness || null);
       const execNow = execModeOf(profile, harness || null);
-      group("Execution",
-            canInteractive ? ["interactive", "headless"] : ["headless"],
-            execNow,
-            (v) => { profile.execMode = normalizeExecMode(v, canInteractive); },
-            execModeLabel);
-      body.appendChild(el("div", "help", EXEC_HINT[execNow] || ""));
+      if (profile.autoExec) {
+        // Nothing to choose: the daemon picks per message.
+        body.appendChild(el("div", "help",
+          "Messages go into this session's terminal when it has one, and run "
+          + "headless when it does not. Send a line from TUI to start a terminal."));
+      } else {
+        group("Execution",
+              canInteractive ? ["interactive", "headless"] : ["headless"],
+              execNow,
+              (v) => { profile.execMode = normalizeExecMode(v, canInteractive); },
+              execModeLabel);
+        body.appendChild(el("div", "help", EXEC_HINT[execNow] || ""));
+      }
       const choices = turnChoices();
       if (choices.length) {
         body.appendChild(el("div", "help",
@@ -7383,6 +8464,7 @@ function wire() {
   });
   $("btn-options").addEventListener("click", openOptions);
   $("btn-rename").addEventListener("click", openRename);
+  $("btn-reset")?.addEventListener("click", resetOpenSession);
   $("btn-share")?.addEventListener("click", openShare);
   $("btn-refresh").addEventListener("click", () => {
     loadTail();
@@ -7396,16 +8478,21 @@ function wire() {
       renderBanner();
     }
   });
-  $("btn-live-tui")?.addEventListener("click", () => {
-    if (state.liveTui) closeLiveTui();
-    else openLiveTui();
+  $("btn-live-tui")?.querySelectorAll("[data-face]").forEach((b) => {
+    b.addEventListener("click", () => pickFace(b.dataset.face === "tui"));
+    // Arrow keys move between the two tabs, as in any tab list.
+    b.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      pickFace(!state.liveTui);
+      $("btn-live-tui").querySelector('[aria-selected="true"]')?.focus();
+    });
   });
   // A resized window changes how many glyphs fit, never how many the host
   // draws — so the pane rescales instead of reflowing.
   window.addEventListener("resize", () => {
     if (state.liveTui) fitLiveTuiPane();
   });
-  $("btn-live-tui-close")?.addEventListener("click", () => closeLiveTui());
   $("live-tui")?.querySelectorAll("[data-tui-key]").forEach((btn) => {
     // mousedown, not click: a plain click would blur the pane first and the
     // next typed character would land in the page instead of the terminal.
@@ -7458,14 +8545,47 @@ function wire() {
     e.preventDefault();
     sendLiveTuiKeys(null, text);
   });
-  $("btn-live-tui-send")?.addEventListener("click", () => {
+  $("btn-live-tui-send")?.addEventListener("click", async () => {
     const input = $("live-tui-input");
     const text = (input?.value || "").trim();
     if (!text) return;
-    // Full line into TUI (Enter included) via key path: text + Enter.
-    sendLiveTuiKeys(["Enter"], text);
+    const prof = state.open && profileById(state.open.profileId);
+    const canStart = prof && capOf(prof, "interactive", true,
+      sessionProvider(state.open && state.open.session, prof));
+    if (canStart && state.open.hasTui === false) {
+      // The daemon says the session has no terminal (none yet, or gone):
+      // the line sent from here starts one (an interactive turn), and Chat
+      // shares it from then on. Merely not connected yet is not that.
+      // Any daemon that runs interactive turns can do this, so it does not
+      // wait on what the last ping said about auto mode: a ping that
+      // failed left the line going out as keystrokes, refused with 409.
+      const sent = await send(text, { mode: "interactive" });
+      if (sent === false) return;      // refused: the line stays to be fixed
+    } else {
+      // Full line into TUI (Enter included) via key path: text + Enter.
+      sendLiveTuiKeys(["Enter"], text);
+    }
     if (input) input.value = "";
+    // Sent from the terminal: the shared draft goes too.
+    $("prompt").value = "";
+    flushDraft();
   });
+  // The terminal keys row can be put away from the text line; the choice is
+  // kept in this browser.
+  const syncTuiKeys = () => {
+    const on = state.settings.tuiKeys !== false;
+    $("live-tui")?.classList.toggle("keys-hidden", !on);
+    requestAnimationFrame(placeTabs);
+    $("btn-tui-keys")?.setAttribute("aria-pressed", on ? "true" : "false");
+  };
+  $("btn-tui-keys")?.addEventListener("mousedown", (e) => e.preventDefault());
+  $("btn-tui-keys")?.addEventListener("click", () => {
+    state.settings.tuiKeys = state.settings.tuiKeys === false;
+    store.save();
+    syncTuiKeys();
+    if (state.liveTui) fitLiveTuiPane();
+  });
+  syncTuiKeys();
   $("live-tui-input")?.addEventListener("keydown", (e) => {
     // isComposing: Enter while an IME candidate window is open commits the
     // candidate — it is not the user sending the line.
@@ -7474,6 +8594,8 @@ function wire() {
       $("btn-live-tui-send")?.click();
     }
   });
+  // The terminal's text line has a Stop of its own; it is the same button.
+  $("btn-tui-stop")?.addEventListener("click", () => $("btn-stop").click());
   $("btn-stop").addEventListener("click", async () => {
     if (!state.job) return;
     const profile = profileById(state.open.profileId);
@@ -7513,13 +8635,119 @@ function wire() {
     searchTimer = setTimeout(refreshSessions, 400);
   });
 
+  wireSheetGrip();
+  renderTabs();
+  $("live-tui-pane")?.addEventListener("scroll", maybeLoadTuiHistory, { passive: true });
+  $("live-tui-pane")?.addEventListener("scroll", noteTuiScroll, { passive: true });
+  // The terminal's key card floats over its top; the terminal's text starts
+  // below it, so it is told how tall the card is.
+  const tuiBar = document.querySelector(".live-tui-bar");
+  if (tuiBar && typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => {
+      $("live-tui").style.setProperty("--tui-bar-h", (tuiBar.offsetHeight || 0) + "px");
+    }).observe(tuiBar);
+  }
+  // The floating bar: the conversation and the terminal start below it, so
+  // they are told how tall it is (with its live strip) as that changes.
+  const float = $("chat-float");
+  const measureFloat = () => {
+    // Collapsed, the bar is shorter, but the page keeps the room it had
+    // when open: padding that changed with it would shift the whole page.
+    if (float.classList.contains("collapsed")) return;
+    const h = float.offsetHeight ? float.offsetTop + float.offsetHeight : 0;
+    float.parentElement.style.setProperty("--float-h", h + "px");
+  };
+  wireBarCollapse();
+  // The floating bottom bar: the conversation ends above it, so it is told
+  // how tall the bar is (gate, chips, the message box) as that changes, and
+  // a reader at the bottom stays there.
+  const bottomBar = $("chat-bottom");
+  const measureBottom = () => {
+    const h = bottomBar.offsetHeight
+      ? bottomBar.parentElement.clientHeight - bottomBar.offsetTop : 0;
+    const was = bottomBar.parentElement.style.getPropertyValue("--bottom-h");
+    bottomBar.parentElement.style.setProperty("--bottom-h", h + "px");
+    placeTabs();
+    if (was !== h + "px" && state.open && state.stick && !state.liveTui) jumpBottom($("transcript"));
+    syncJumpPill();
+  };
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(measureBottom).observe(bottomBar);
+  window.addEventListener("resize", measureBottom);
+  measureBottom();
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(measureFloat).observe(float);
+  window.addEventListener("resize", measureFloat);
+  measureFloat();
+
   const prompt = $("prompt");
   const grow = () => {
     prompt.style.height = "auto";
     prompt.style.height = Math.min(Math.max(prompt.scrollHeight, 38), 220) + "px";
   };
   prompt.addEventListener("input", grow);
+  prompt.addEventListener("input", scheduleDraftSave);
+  // One draft per session, whichever face it is typed in: the message box
+  // and the terminal's text line mirror each other.
+  prompt.addEventListener("input", () => {
+    const line = $("live-tui-input");
+    if (line && line.value !== prompt.value) line.value = prompt.value;
+  });
+  $("live-tui-input")?.addEventListener("input", (e) => {
+    if (prompt.value === e.target.value) return;
+    prompt.value = e.target.value;
+    scheduleDraftSave();
+  });
   prompt.addEventListener("input", syncSlashMenu);
+  // The on-screen keyboard opening: the page is resized to what is left
+  // above it (viewport interactive-widget=resizes-content; Safari moves the
+  // visual viewport instead), and the conversation follows to its newest
+  // row, so the reply being typed sits right under what it answers.
+  const keyboardFollow = () => {
+    if (!state.open || state.liveTui || document.activeElement !== prompt) return;
+    jumpBottom($("transcript"));
+    syncJumpPill();
+  };
+  // The same for the terminal: its bottom (the prompt, the cursor) is where
+  // it is used, so the keyboard coming up brings the pane to its end.
+  const tuiFollow = () => {
+    if (!state.liveTui) return;
+    const pane = $("live-tui-pane");
+    if (pane) { pane.scrollTop = pane.scrollHeight; tuiStick = true; tuiLastTop = pane.scrollTop; }
+  };
+  const tuiKeyboard = () => [0, 150, 350].forEach((ms) => setTimeout(tuiFollow, ms));
+  $("live-tui-input")?.addEventListener("focus", tuiKeyboard);
+  // Only from its end: a press on text higher up is the start of a
+  // selection, and jumping to the bottom would take the text away.
+  $("live-tui-pane")?.addEventListener("focus", () => {
+    const pane = $("live-tui-pane");
+    if (isCompact() && pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48) tuiKeyboard();
+  });
+  wireTuiSelection();
+  if (window.visualViewport) {
+    let lastTuiH = window.visualViewport.height;
+    window.visualViewport.addEventListener("resize", () => {
+      const h = window.visualViewport.height;
+      if (h < lastTuiH - 40) tuiFollow();
+      lastTuiH = h;
+    });
+  }
+  prompt.addEventListener("focus", () => {
+    if (!isCompact()) return;
+    // The keyboard takes a moment to come up; follow it as it does.
+    [0, 150, 350].forEach((ms) => setTimeout(keyboardFollow, ms));
+  });
+  if (window.visualViewport) {
+    let lastH = window.visualViewport.height;
+    window.visualViewport.addEventListener("resize", () => {
+      const h = window.visualViewport.height;
+      if (h < lastH - 40) keyboardFollow();     // shrank: a keyboard came up
+      lastH = h;
+    });
+  }
+  // A tab being closed or hidden may never fire the timer.
+  window.addEventListener("pagehide", flushDraft);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushDraft();
+  });
   prompt.addEventListener("focus", syncSlashMenu);
   prompt.addEventListener("blur", () => { if (pop.kind === "slash") closePop(); });
   $("composer-pop").addEventListener("keydown", onPopKeydown);
@@ -7550,6 +8778,8 @@ function wire() {
       const text = prompt.value;
       prompt.value = "";
       grow();
+      if ($("live-tui-input")) $("live-tui-input").value = "";
+      flushDraft();     // sent: the draft goes
       send(text);
     }
   });
@@ -7572,6 +8802,8 @@ function wire() {
     const text = prompt.value;
     prompt.value = "";
     grow();
+    if ($("live-tui-input")) $("live-tui-input").value = "";
+    flushDraft();
     send(text);
   });
 

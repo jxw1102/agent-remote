@@ -63,6 +63,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import uuid
@@ -134,6 +135,12 @@ _OLD_PREFIXES = ("cld-", "bb10i-")
 # The AskUserQuestion panel's footer, i.e. "the panel is still up". Used to
 # tell "submitted, panel gone" from "still waiting" after the last pick.
 _ASK_PANEL_MARKER = "to navigate"
+_ASK_PREVIEW_CAP = 4000
+# An option that has a preview is painted beside a box holding it, so its
+# row reads "1. Label        ┌────┐": everything from the gap on is the box.
+# A box edge opens it (┌ ╭ top, │ side, └ ╰ bottom); a bare "─" does not, as
+# a label may use one as a dash ("Fast  ─ recommended").
+_ASK_SIDE_BOX_RE = re.compile(r"\s{2,}[\u2502\u250c\u2514\u256d\u2570].*$")
 
 # A permission dialog in the pane. bypassPermissions does NOT suppress these:
 # the static Bash guards (cd-compound-read/write/redirect, and commands whose
@@ -205,6 +212,52 @@ def _trust_dialog_key(text: str) -> str:
         if "❯" in line:
             return "Enter" if "trust this folder" in line else "Down"
     return "Down"
+
+
+def _bypass_warning(text: str) -> bool:
+    """Claude's one-time "running in Bypass Permissions mode" consent screen.
+
+    Shown the first time `--dangerously-skip-permissions` is used on a host,
+    with "No, exit" selected. It says "you accept all responsibility", so
+    the daemon does not key past it: that answer is the host owner's.
+    """
+    if not text:
+        return False
+    # The dialog itself, at the foot of the pane: both of its options and
+    # its title in the last screenful. A resumed transcript that merely
+    # quotes the screen scrolls by above an input box, and is not it.
+    tail = "\n".join([l for l in text.splitlines() if l.strip()][-24:])
+    return "Bypass Permissions mode" in tail and "Yes, I accept" in tail \
+        and "No, exit" in tail and not _claude_pane_ready(text)
+
+
+def _background_session(text: str) -> str:
+    """The id of a session Claude refuses to resume because it is running in
+    its background agents (`claude agents`) on this host, else "".
+
+    Claude prints "That session is running in the background (<id>). Run
+    `claude attach <id>` to open it, or `claude stop <id>` first to resume it
+    here." and exits with status 1, so the pane never becomes ready.
+    """
+    if not text or "running in the background" not in text:
+        return ""
+    m = re.search(r"claude stop ([A-Za-z0-9_-]+)", text)
+    return m.group(1) if m else "?"
+
+
+def _background_help(sid: str) -> str:
+    stop = "`claude stop %s`" % sid if sid and sid != "?" else "`claude stop <id>`"
+    return ("This session is running in Claude's background agents on this "
+            "host, so a terminal for it cannot be opened here. On the host, "
+            "run %s (or close it from `claude agents`), then send the "
+            "message again." % stop)
+
+
+_BYPASS_WARNING_HELP = (
+    "Claude Code is waiting for a one-time answer on this host: it asks you "
+    "to accept Bypass Permissions mode, which interactive turns run in. On "
+    "the host, run `claude --dangerously-skip-permissions`, choose "
+    "\"Yes, I accept\", exit, then send the message again.")
 
 
 def _claude_pane_ready(text: str) -> bool:
@@ -328,6 +381,11 @@ class InteractiveManager:
     binary_attr = "claude_bin"
     default_binary = "claude"
     disable_view_env = "CLAUDE_CODE_DISABLE_AGENT_VIEW"
+    # Claude's fullscreen renderer draws on the terminal's alternate screen,
+    # so tmux keeps none of the conversation: the Live TUI's scrollback is
+    # empty. Set, this makes the CLI use its classic renderer, whose output
+    # scrolls into tmux history (config `tui_scrollback`, on by default).
+    classic_screen_env = "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"
     product = "claude"
 
     def __init__(self, config, runner=None):
@@ -378,12 +436,16 @@ class InteractiveManager:
         joined = " ".join(shlex.quote(p) for p in parts)
         hook = shlex.quote(self._hook_url(tui.name))
         view = self.disable_view_env
+        classic = self.classic_screen_env \
+            if getattr(self.config, "tui_scrollback", True) else ""
         if guest:
             bits = [
                 "ulimit -n 65536 2>/dev/null",
                 "export AGENTREMOTE_HOOK_URL=%s" % hook,
                 "export %s=1" % view,
             ]
+            if classic:
+                bits.append("export %s=1" % classic)
             for key, value in self._extra_exports(tui):
                 bits.append("export %s=%s" % (key, shlex.quote(str(value))))
             bits.append("exec %s" % joined)
@@ -392,6 +454,8 @@ class InteractiveManager:
             "AGENTREMOTE_HOOK_URL=%s" % hook,
             "%s=1" % view,
         ]
+        if classic:
+            assigns.append("%s=1" % classic)
         for key, value in self._extra_exports(tui):
             assigns.append("%s=%s" % (key, shlex.quote(str(value))))
         return "ulimit -n 65536 2>/dev/null; %s exec %s" % (
@@ -405,7 +469,10 @@ class InteractiveManager:
 
     def _blocked_reason(self, text: str) -> str:
         """Non-empty when the pane is waiting on a human we must not key past."""
-        return ""
+        if _bypass_warning(text):
+            return _BYPASS_WARNING_HELP
+        bg = _background_session(text)
+        return _background_help(bg) if bg else ""
 
     def _startup_key(self, text: str, nudge_i: int) -> str:
         """One tmux key to dismiss first-run chrome, or "" to leave the pane."""
@@ -1021,7 +1088,9 @@ class InteractiveManager:
                     or dead):
                 tail = self._pane_tail(tui.name)
                 self._kill(tui)
-                extra = why or tail
+                # Both: the status alone ("exit status 1") says nothing of
+                # why, and the screen's last lines usually do.
+                extra = " — ".join(x for x in (why, tail) if x)
                 return ("%s TUI did not become ready" % self.product +
                         (" — screen: %s" % extra if extra else ""))
             if (time.time() - last_nudge) >= _SPLASH_NUDGE_S:
@@ -1070,6 +1139,69 @@ class InteractiveManager:
         if signal:
             why += ", killed by signal %s" % signal
         return True, why
+
+    # `<bin> agents --json` / `<bin> stop <id>`: Claude's own background
+    # sessions. A session parked there cannot be resumed anywhere else.
+    background_cli = True
+
+    def reset_session(self, session_id: str) -> dict:
+        """Let go of everything on this host that holds `session_id`, so the
+        next turn can open it afresh. The conversation itself is not touched.
+
+        Two things can hold a session: a terminal of ours (alive, or a dead
+        pane kept by remain-on-exit), and Claude's own background agents
+        (`claude agents`), where a session someone parked from the host
+        refuses to be resumed. Returns what was done.
+        """
+        sid = (session_id or "").strip()
+        out = {"session_id": sid, "terminals_closed": 0,
+               "background_stopped": False, "detail": ""}
+        if not sid:
+            return out
+        with self._lock:
+            mine = [t for t in self._tuis.values() if t.session_id == sid]
+            for t in mine:
+                self._kill(t)
+                self._tuis.pop(t.name, None)
+            if mine:
+                self._save_state()
+        out["terminals_closed"] = len(mine)
+        if self.background_cli:
+            stopped, detail = self._stop_background(sid)
+            out["background_stopped"] = stopped
+            out["detail"] = detail
+        return out
+
+    def _stop_background(self, session_id: str):
+        """(stopped, detail): stop Claude's background copy of the session."""
+        binary = self._binary()
+        try:
+            r = subprocess.run([binary, "agents", "--json"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=20)
+            rows = json.loads(r.stdout.decode("utf-8", errors="replace") or "[]")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+            return False, "could not list Claude's background sessions: %s" % e
+        ids = [str(row.get("id") or "") for row in rows
+               if isinstance(row, dict)
+               and str(row.get("sessionId") or "") == session_id
+               and str(row.get("kind") or "") == "background"]
+        ids = [i for i in ids if re.match(r"^[A-Za-z0-9_-]+$", i)]
+        if not ids:
+            return False, ""
+        for bg in ids:
+            try:
+                r = subprocess.run([binary, "stop", bg],
+                                   stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, timeout=30)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                return False, "`claude stop %s` failed: %s" % (bg, e)
+            if r.returncode != 0:
+                tail = r.stdout.decode("utf-8", errors="replace").strip()[-200:]
+                return False, "`claude stop %s` failed: %s" % (bg, tail)
+            log.info("stopped Claude background session %s (%s)", bg, session_id)
+        return True, ""
 
     def _kill(self, tui: _Tui):
         # Name the caller: a TUI dying mid-turn is indistinguishable from one
@@ -1552,6 +1684,7 @@ class InteractiveManager:
         found = {}
         expect = None          # options form a descending run 5,4,3,2,1
         top = footer
+        box_col = None         # where the preview box starts on the option rows
         for i in range(footer - 1, max(-1, footer - 80), -1):
             m = _PERM_OPT_RE.match(rows[i])
             if not m:
@@ -1559,7 +1692,11 @@ class InteractiveManager:
             num = int(m.group(1))
             if expect is not None and num != expect:
                 continue        # not this panel's sequence
-            found[num] = m.group(2).strip()
+            side = _ASK_SIDE_BOX_RE.search(rows[i])
+            if side:
+                box_col = side.start() if box_col is None \
+                    else min(box_col, side.start())
+            found[num] = _ASK_SIDE_BOX_RE.sub("", m.group(2)).strip()
             expect = num - 1
             top = i
             if num == 1:
@@ -1567,12 +1704,22 @@ class InteractiveManager:
         if len(found) < 2:
             return {}
         options = [found[n] for n in sorted(found)
-                   if found[n].lower() != "type something"]
+                   if found[n] and found[n].lower() != "type something"]
         if len(options) < 2:
             return {}
         # The tab strip above the question ("\u2190  \u2610 Header  \u2714 Submit  \u2192")
         # is chrome, not part of the ask.
-        context = [r for r in rows[max(0, top - 6):top]
+        def unside(row):
+            # The box beside the options can reach up into the question's
+            # rows. Cut it there only from the column it starts at on the
+            # option rows: a question line of its own that holds a table or
+            # a tree ("  │ a │ b │") must survive.
+            if box_col is None:
+                return row
+            m = _ASK_SIDE_BOX_RE.search(row)
+            return row[:m.start()] if m and m.start() >= box_col else row
+
+        context = [r for r in (unside(x) for x in rows[max(0, top - 6):top])
                    if r.strip()
                    and not r.startswith(("\u25cf", "\u2234", "\u2514", "\u2500"))
                    and not any(mark in r for mark in ("\u2610", "\u2714",
@@ -1631,6 +1778,26 @@ class InteractiveManager:
                 continue
             panel = self._ask_panel(pane)
             kind = "ask"
+            # The footer of a panel already answered stays in the scrollback,
+            # and so would its options: publish an ask only while one is
+            # actually up, or an answered question comes back as a new card.
+            live = bool(panel or tui.hook_ask) and self._ask_panel_live(tui.name)
+            if panel and not live:
+                panel = {}
+            # The hook handed over the questions as the agent wrote them:
+            # every question, whole, with descriptions. What can be read
+            # back off the pane is a poor copy (the last two lines of the
+            # question, labels cut at 60, and a preview box drawn beside
+            # the options lands inside them), so it is only the fallback
+            # for a harness with no hook.
+            # Only while it is the panel on screen: a hook payload left over
+            # from an earlier question must not stand in for a later one.
+            asked = self._ask_payload(tui.hook_ask) \
+                if tui.hook_ask and live \
+                and (not panel or self._hook_matches(tui.hook_ask, panel)) \
+                else []
+            if asked:
+                panel = {"questions": asked}
             if not panel:
                 panel = self._permission_panel(pane)
                 kind = "permission"
@@ -1650,10 +1817,30 @@ class InteractiveManager:
                 target=self._run_watch, args=(job, tui, panel, kind),
                 daemon=True, name="tui-watch-%s" % tui.name).start()
 
+    @classmethod
+    def _hook_matches(cls, raw, panel: dict) -> bool:
+        """Do the hook's questions describe the panel read off the screen?
+
+        The screen shows one question at a time with labels cut at 60, so
+        every label on screen must start some option label of the hook's.
+        """
+        hook = [o["label"] for q in cls._ask_payload(raw) for o in q["options"]]
+        shown = [str(o.get("label") or "") for o in panel.get("options") or []]
+        if not hook or not shown:
+            return False
+        for label in shown:
+            stem = label[:-3] if label.endswith("...") else label
+            if not any(h.startswith(stem) or stem.startswith(h) for h in hook):
+                return False
+        return True
+
     def _run_watch(self, job, tui: _Tui, panel: dict, kind: str) -> None:
         """Answer the published panel from the phone, then close the job."""
+        mine = tui.hook_ask
         try:
-            if kind == "ask":
+            if kind == "ask" and panel.get("questions"):
+                self._answer_questions(job, tui, panel["questions"])
+            elif kind == "ask":
                 _qtext = panel.get("question") or ""
                 questions = [{
                     "question": _qtext,
@@ -1668,6 +1855,13 @@ class InteractiveManager:
         except Exception:
             log.exception("watched panel failed")
         finally:
+            if kind == "ask":
+                # Answered (on the phone or on the host) or cancelled: the
+                # hook's copy of it is history, and must not be published
+                # again for the next panel in this turn. Only this panel's,
+                # though: the hook may already have stored the next question.
+                if tui.hook_ask is mine:
+                    tui.hook_ask = None
             with job.lock:
                 job.status = "done"
             job.add_event("result", is_error=False, duration_ms=0, cost_usd=0)
@@ -1675,22 +1869,28 @@ class InteractiveManager:
                 if self._watched.get(tui.name) == job.id:
                     self._watched.pop(tui.name, None)
 
-    def _ask_seen(self, job, tool_input: dict, state: dict):
-        """Record an AskUserQuestion the transcript (or PreToolUse hook) showed.
-
-        Hook fires while the panel is open; the JSONL tool_use line is often
-        written only *after* the user answers. Without dedupe, that late
-        transcript line re-queues the same panel on the phone even though
-        Live TUI already applied the picks.
-        """
+    @staticmethod
+    def _ask_payload(raw) -> list:
+        """AskUserQuestion's own `questions` input as the clients' payload."""
         questions = []
-        for q in tool_input.get("questions") or []:
+        for q in raw or []:
             if not isinstance(q, dict):
                 continue
-            options = [{"label": str(o.get("label")),
-                        "description": str(o.get("description") or "")}
-                       for o in q.get("options") or []
-                       if isinstance(o, dict) and o.get("label")]
+            options = []
+            for o in q.get("options") or []:
+                if not isinstance(o, dict) or not o.get("label"):
+                    continue
+                row = {"label": str(o.get("label")),
+                       "description": str(o.get("description") or "")}
+                # A mock-up the agent drew for this option (plain text, laid
+                # out in a fixed-width font). Capped: it rides every poll.
+                # The shared left margin goes: on a phone it only pushes the
+                # drawing off the right edge.
+                preview = textwrap.dedent(
+                    str(o.get("preview") or "").expandtabs(4)).strip("\n").rstrip()
+                if preview.strip():
+                    row["preview"] = preview[:_ASK_PREVIEW_CAP]
+                options.append(row)
             if not options:
                 continue
             _qtext = str(q.get("question") or "")
@@ -1704,6 +1904,17 @@ class InteractiveManager:
                 "options": options,
                 "multi_select": bool(q.get("multiSelect") or q.get("multi_select")),
             })
+        return questions
+
+    def _ask_seen(self, job, tool_input: dict, state: dict):
+        """Record an AskUserQuestion the transcript (or PreToolUse hook) showed.
+
+        Hook fires while the panel is open; the JSONL tool_use line is often
+        written only *after* the user answers. Without dedupe, that late
+        transcript line re-queues the same panel on the phone even though
+        Live TUI already applied the picks.
+        """
+        questions = self._ask_payload(tool_input.get("questions"))
         if not questions:
             return
         fp = self._ask_fingerprint(questions)
@@ -1731,8 +1942,51 @@ class InteractiveManager:
         secs = float(getattr(self.config, "question_timeout", 0) or 0)
         timeout = secs if secs > 0 else None
         self._await_pane(tui, "Esc to cancel", 15.0)
-        answers = job.request_question(questions, timeout)
+        # The panel can be answered where it is, in the terminal or the
+        # Live TUI. Then the card on the phone is for nothing, and its keys
+        # would land in whatever the pane is doing by then: an Escape there
+        # interrupts a running turn, Down and Enter send a half-typed line.
+        seen = [False]
+        misses = [0]
+
+        def gone() -> bool:
+            try:
+                live = self._ask_panel_live(tui.name)
+            except Exception:
+                return False
+            if live:
+                seen[0] = True
+                misses[0] = 0
+                return False
+            # The panel's other pages (typing an answer, the review page)
+            # have a different footer and are still the question: it is gone
+            # only once the input box is back under it.
+            try:
+                if not _claude_pane_ready(self._pane_text(tui.name)):
+                    misses[0] = 0
+                    return False
+            except Exception:
+                return False
+            # Three readings in a row (about a second): one repaint between
+            # two frames must not withdraw a question that is still open.
+            misses[0] += 1
+            return seen[0] and misses[0] >= 3
+
+        gone()
+        answers = job.request_question(questions, timeout, abort_when=gone)
         try:
+            # Checked more than once for the same reason as above: here a
+            # wrong "gone" would throw away the answer just given, so with an
+            # answer in hand the panel has to stay gone for two seconds (a
+            # repaint, or a footer that reads differently for a moment, is
+            # far shorter) before the pick is dropped.
+            checks = 3 if answers is None else 8
+            if seen[0] and not any(
+                    self._ask_panel_live(tui.name) or time.sleep(0.25)
+                    for _ in range(checks)):
+                job.add_event("tool", name="AskUserQuestion",
+                              detail="answered on the host")
+                return
             if answers is None:
                 # Escape cancels the panel: the tool returns "cancelled" and
                 # the model carries on rather than blocking the TUI forever.

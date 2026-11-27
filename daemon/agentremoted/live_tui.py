@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 import threading
 import time
 
@@ -356,6 +357,76 @@ def capture_session(mgr, session_id: str, *, ansi: bool = False) -> dict:
     if job is not None:
         job_id = getattr(job, "id", "") or ""
     return frame_payload(session_id, text, True, job_id=job_id, ansi=want_ansi)
+
+
+# ---- scrollback -------------------------------------------------------------
+#
+# A frame is the visible screen only. What scrolled off its top is still in
+# tmux's history, and a reader who scrolls the terminal to its top asks for
+# it: the newest `lines` lines of history, just above the screen, so the two
+# join without a gap at the moment of the request.
+
+HISTORY_MAX_LINES = 5000
+
+
+def history_session(mgr, session_id: str, *, lines: int = 200,
+                    before: int = 0, at: int = 0, ansi: bool = False) -> dict:
+    """One page of the pane's scrollback (oldest first).
+
+    `lines` is the page size. `before` skips that many of the newest history
+    lines (the ones the client already has), so pages are fetched one at a
+    time going back. History keeps growing while the client reads, which
+    would shift the count: `at` is the history size the client last heard
+    (`history` in a reply), and what has scrolled in since is skipped too,
+    so the next page starts exactly where the last one ended. The reply's
+    `next` is the `before` for the page after this one.
+    """
+    tui = _find_tui(mgr, session_id)
+    tmux = getattr(mgr, "_tmux", None)
+    if tui is None or tmux is None:
+        return {"session_id": session_id, "attached": False, "text": "",
+                "lines": 0, "history": 0, "more": False, "ansi": bool(ansi),
+                "before": 0, "next": 0, "reset": False}
+    lines = max(1, min(int(lines or 200), HISTORY_MAX_LINES))
+    try:
+        out = tmux("display-message", "-p", "-t", tui.name,
+                   "#{history_size}", capture=True)
+        total = int(out.stdout.decode("ascii", "replace").strip() or 0)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        total = 0
+    skip = max(0, int(before or 0))
+    at = max(0, int(at or 0))
+    # History got shorter than the client last heard (tmux trimmed it at its
+    # limit, or the program cleared it): the client's count no longer means
+    # anything. It gets the newest page and `reset`, and starts over.
+    reset = bool(skip and at and total < at)
+    if reset:
+        skip = 0
+    elif skip and at and total > at:
+        skip += total - at
+    skip = min(skip, total)
+    take = min(lines, total - skip)
+    text = ""
+    if take > 0:
+        # History lines are numbered -1 (just above the screen) to -total.
+        args = ["capture-pane", "-p"]
+        if ansi:
+            args.append("-e")
+        args += ["-S", str(-(skip + take)), "-E", str(-(skip + 1)), "-t", tui.name]
+        try:
+            out = tmux(*args, capture=True)
+            text = out.stdout.decode("utf-8", errors="replace")
+        except (OSError, subprocess.TimeoutExpired):
+            text = ""
+        if text.endswith("\n"):
+            text = text[:-1]
+        if not ansi:
+            text = plain_tui_text(text)
+    count = text.count("\n") + 1 if text else 0
+    return {"session_id": session_id, "attached": True, "text": text,
+            "lines": count, "history": total, "more": skip + take < total,
+            "ansi": bool(ansi), "before": skip, "next": skip + take,
+            "reset": reset}
 
 
 # ---- frame stream ---------------------------------------------------------

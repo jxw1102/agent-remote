@@ -7,6 +7,8 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.ui.draw.shadow
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -47,10 +49,13 @@ internal fun PermissionPrompt(
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .border(1.dp, accent.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+            // The same card as the bars it floats between: their edges,
+            // corners, surface and shadow; the accent is a wash over it.
+            .shadow(8.dp, RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(18.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .background(accent.copy(alpha = 0.06f))
+            .border(1.dp, accent.copy(alpha = 0.4f), RoundedCornerShape(18.dp))
             .padding(14.dp),
     ) {
         Text(
@@ -87,12 +92,15 @@ internal fun QuestionBanner(accent: Color, onAnswer: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .shadow(6.dp, RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(18.dp))
+            .background(MaterialTheme.colorScheme.surface)
             .background(accent.copy(alpha = 0.14f))
+            .border(1.dp, accent.copy(alpha = 0.4f), RoundedCornerShape(18.dp))
+            .heightIn(min = 44.dp)
             .clickable(role = Role.Button, onClickLabel = "answer", onClick = onAnswer)
             .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Assertive }
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         WorkingPulse(accent, size = 7)

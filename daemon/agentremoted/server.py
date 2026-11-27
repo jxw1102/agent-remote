@@ -30,6 +30,7 @@ Endpoints (all under /api, all JSON):
   GET  /api/sessions/search?…&stream=1                      NDJSON progressive hits
   GET  /api/sessions/<id>                         one session's summary
   GET  /api/sessions/<id>/messages?offset=&limit= transcript window (default: tail)
+  POST /api/sessions/<id>/reset                       force stop it on the host
   POST /api/sessions/<id>/continue {prompt, permission_mode?}
   POST /api/sessions/new {cwd, prompt, permission_mode?}
   GET  /api/focus                                 focus rows only (session
@@ -116,11 +117,13 @@ _SESSION_MSGS = re.compile(r"^/api/sessions/([^/]+)/messages$")
 # Process view: full text behind one truncated step (<record uuid>:<block ix>).
 _SESSION_STEP = re.compile(r"^/api/sessions/([^/]+)/steps/([^/]+)$")
 _SESSION_CONT = re.compile(r"^/api/sessions/([^/]+)/continue$")
+_SESSION_RESET = re.compile(r"^/api/sessions/([^/]+)/reset$")
 _SESSION_TUI = re.compile(r"^/api/sessions/([^/]+)/tui$")
 _SESSION_FILE = re.compile(r"^/api/sessions/([^/]+)/file$")
 _SESSION_CHANGES = re.compile(r"^/api/sessions/([^/]+)/changes$")
 _SESSION_TUI_KEYS = re.compile(r"^/api/sessions/([^/]+)/tui/keys$")
 _SESSION_TUI_STREAM = re.compile(r"^/sse/sessions/([^/]+)/tui$")
+_SESSION_TUI_HISTORY = re.compile(r"^/api/sessions/([^/]+)/tui/history$")
 # session id -> the runner whose TUI answered for it. A session never changes
 # harness, so this only saves probing every runner on every frame and key.
 _TUI_RUNNERS = {}
@@ -297,6 +300,22 @@ def _sanitize(obj):
     if obj is None or isinstance(obj, (str, int, bool)):
         return obj
     return str(obj)
+
+
+# The API token and the TUI hook secret travel in a URL's query on a few
+# routes (links a browser opens, event streams, the hook a terminal posts
+# to). The request line is logged, so they went into daemon.log in clear.
+_SECRET_PARAMS = re.compile(r"([?&](?:secret|token)=)[^&\s\"']+", re.I)
+# A share link's token is the path itself, and whoever has it can read the
+# shared transcript.
+_SHARE_PATHS = re.compile(r"(/(?:api/)?share/)[A-Za-z0-9_-]{20,64}")
+
+
+def redact_secrets(text: str) -> str:
+    """`text` with the value of any `secret=` / `token=` query parameter and
+    any share link's token replaced, for logging."""
+    text = _SECRET_PARAMS.sub(r"\1<redacted>", text or "")
+    return _SHARE_PATHS.sub(r"\1<redacted>", text)
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -1005,7 +1024,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             t.join(timeout=0.1)
 
     def log_message(self, fmt, *args):
-        log.info("%s %s", self._caller_ip(), fmt % args)
+        log.info("%s %s", self._caller_ip(), redact_secrets(fmt % args))
 
     def _caller_ip(self):
         """The socket peer, except when it's the loopback of a local
@@ -1897,6 +1916,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         # 1: GET /sse/sessions/<id>/tui pushes frames, and POST …/tui/keys
         # takes an ordered `events` list. Absent: poll GET …/tui.
         payload["tui_stream"] = 1
+        # 1: GET …/tui/history?lines=N returns the pane's scrollback.
+        payload["tui_history"] = 1
+        payload["tui_history_paged"] = 1
+        # 1: permission_mode "auto" on /continue (the session's terminal
+        # when it has a live one, headless otherwise), `mode` on the reply
+        # and on job snapshots, and GET …/tui?state=1.
+        payload["auto_exec"] = 1
+        payload["session_reset"] = 1
         payload["tui_cols"] = TUI_COLS
         payload["tui_rows"] = TUI_ROWS
         caps = payload.get("caps")
@@ -1904,6 +1931,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             caps = dict(caps)
             caps["tui_keys"] = 2
             caps["tui_stream"] = 1
+            caps["tui_history"] = 1
+            caps["tui_history_paged"] = 1
+            caps["auto_exec"] = 1
+            caps["session_reset"] = 1
             payload["caps"] = caps
 
     def _stamp_upload_caps(self, payload: dict) -> None:
@@ -2053,7 +2084,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             route()
         except Exception:
-            log.exception("unhandled error handling %s %s", self.command, self.path)
+            log.exception("unhandled error handling %s %s", self.command,
+                          redact_secrets(self.path))
             try:
                 self._error(500, "internal server error")
             except OSError:
@@ -2377,6 +2409,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_tui_capture(m.group(1), query)
             return
 
+        m = _SESSION_TUI_HISTORY.match(path)
+        if m:
+            self._handle_tui_history(m.group(1), query)
+            return
+
         m = _SESSION_TUI_STREAM.match(path)
         if m:
             self._handle_tui_stream(m.group(1), query)
@@ -2632,6 +2669,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             # indexes it; _tui_route lets that through.
             if self._tui_route(m.group(1)):
                 self._handle_tui_capture(m.group(1), query)
+            return
+        m = _SESSION_TUI_HISTORY.match(path)
+        if m:
+            if self._tui_route(m.group(1)):
+                self._handle_tui_history(m.group(1), query)
             return
         m = _SESSION_ONE.match(path)
         if m:
@@ -2904,6 +2946,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_tui_keys(m.group(1), body)
             return
 
+        m = _SESSION_RESET.match(path)
+        if m:
+            self._handle_session_reset(m.group(1))
+            return
+
         if path == "/api/sessions/new":
             self._handle_new_session(body)
             return
@@ -3000,6 +3047,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         if m:
             if self._tui_route(m.group(1)):
                 self._handle_tui_keys(m.group(1), body)
+            return
+        m = _SESSION_RESET.match(path)
+        if m:
+            if self._tui_route(m.group(1)):
+                self._handle_session_reset(m.group(1))
             return
         m = _JOB_PERM.match(path)
         if m:
@@ -3287,7 +3339,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._error(409, reason)
                     return
                 self._focus_enroll(running)
-                self._send_json({"job_id": running.id}, status=200)
+                self._send_json({"job_id": running.id,
+                                 "mode": self._job_mode(running)}, status=200)
                 return
             # This session's own model wins over whatever the client
             # happens to have selected daemon-wide: a pin was set against
@@ -3309,8 +3362,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._error(503, str(e))
             return
         # 200 (not 202): some mobile HTTP stacks / proxies mishandle 202
-        # bodies; clients only need the job_id JSON either way.
-        self._send_json({"job_id": job.id}, status=200)
+        # bodies; clients only need the job_id JSON either way. `mode` says
+        # how the turn runs (what "auto" came to).
+        self._send_json({"job_id": job.id, "mode": self._job_mode(job)}, status=200)
 
     # A second POST /api/sessions/new with the same account, harness, folder
     # and prompt inside this window is a repeat, not a second task: a tap that
@@ -3678,8 +3732,119 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not self._tui_in_scope(session_id):
             self._error(404, "session not found")
             return
+        if self._flag(query or {}, "state"):
+            # Only whether a terminal is alive for the session: no capture.
+            self._send_json({"session_id": session_id,
+                             "attached": self._session_has_tui(session_id)})
+            return
         self._send_json(self._tui_frame(
             session_id, self._flag(query or {}, "ansi")))
+
+    @staticmethod
+    def _job_mode(job) -> str:
+        if getattr(job, "watch", False):
+            return "interactive"    # a question from the session's terminal
+        return "interactive" if (getattr(job, "permission_mode", "") or "") \
+            == "interactive" else "headless"
+
+    def _handle_session_reset(self, session_id: str):
+        """POST /api/sessions/<id>/reset — let go of the session on this host.
+
+        For a session that will not open: stops its running turn, closes the
+        daemon's terminal for it (a dead pane too), and stops Claude's own
+        background copy (`claude stop`), which otherwise refuses every
+        resume. The conversation is kept; the next message opens it afresh.
+        """
+        if not self._tui_in_scope(session_id):
+            self._error(404, "session not found")
+            return
+        managers = [self.jobs] + [b.jobs for b in (self.bundles or {}).values()]
+        total = {"ok": True, "session_id": session_id, "turn_stopped": False,
+                 "terminals_closed": 0, "background_stopped": False, "detail": ""}
+        seen = []
+        for jm in managers:
+            if jm is None or jm in seen:
+                continue
+            seen.append(jm)
+            fn = getattr(jm, "reset_session", None)
+            if fn is None:
+                continue
+            try:
+                out = fn(session_id)
+            except Exception:  # one harness failing must not hide another
+                log.exception("session reset failed")
+                continue
+            if not out:
+                continue
+            total["turn_stopped"] = total["turn_stopped"] or bool(out.get("turn_stopped"))
+            total["terminals_closed"] += int(out.get("terminals_closed") or 0)
+            total["background_stopped"] = (total["background_stopped"]
+                                           or bool(out.get("background_stopped")))
+            if out.get("detail") and not total["detail"]:
+                total["detail"] = out["detail"]
+        _TUI_RUNNERS.pop(session_id, None)
+        self._send_json(total)
+
+    def _session_has_tui(self, session_id: str) -> bool:
+        """A terminal is alive for this session, on whichever harness owns it."""
+        managers = [self.jobs] + [b.jobs for b in (self.bundles or {}).values()]
+        seen = []
+        for jm in managers:
+            if jm is None or jm in seen:
+                continue
+            seen.append(jm)
+            fn = getattr(jm, "session_has_tui", None)
+            if fn is not None and fn(session_id):
+                return True
+        return False
+
+    def _handle_tui_history(self, session_id: str, query=None):
+        """GET /api/sessions/<id>/tui/history?lines=N[&before=K&at=H][&ansi=1].
+
+        Scrollback, a page at a time: N lines that scrolled off the top of
+        the pane (oldest first), skipping the newest K the client already
+        has. `at` is the `history` size from the client's last reply, so
+        lines that scrolled in since do not shift the page. `more` says
+        whether there is older; `next` is the `before` for the next page.
+        """
+        if not self._tui_in_scope(session_id):
+            self._error(404, "session not found")
+            return
+        from .live_tui import history_session
+        q = query or {}
+        raw = q.get("lines")
+        raw = raw[0] if isinstance(raw, list) else raw
+        try:
+            lines = int(raw or 200)
+        except (TypeError, ValueError):
+            lines = 200
+
+        def _num(name):
+            v = q.get(name)
+            v = v[0] if isinstance(v, list) else v
+            try:
+                return max(0, int(v or 0))
+            except (TypeError, ValueError):
+                return 0
+        before, at = _num("before"), _num("at")
+        ansi = self._flag(q, "ansi")
+        last = None
+        for r in self._tui_runners():
+            mgr = r._interactive_mgr() if hasattr(r, "_interactive_mgr") else r
+            try:
+                out = history_session(mgr, session_id, lines=lines,
+                                      before=before, at=at, ansi=ansi)
+            except Exception:  # one harness failing must not hide another
+                log.exception("tui history failed")
+                continue
+            last = out
+            if out.get("attached"):
+                self._send_json(out)
+                return
+        self._send_json(last or {"session_id": session_id, "attached": False,
+                                 "text": "", "lines": 0, "history": 0,
+                                 "more": False, "ansi": ansi,
+                                 "before": 0, "next": 0})
 
     def _handle_tui_events(self, session_id, events):
         if not isinstance(events, list) or not events or len(events) > 256:

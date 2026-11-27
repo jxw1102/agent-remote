@@ -12,6 +12,7 @@ import com.bb10d.remote.data.MessageDto
 import com.bb10d.remote.data.Profile
 import com.bb10d.remote.data.SessionDto
 import com.bb10d.remote.data.SessionRef
+import com.bb10d.remote.data.SessionTab
 import com.bb10d.remote.data.StepDto
 import com.bb10d.remote.data.Time
 import com.bb10d.remote.net.DaemonClient
@@ -179,6 +180,150 @@ class TranscriptViewModel(
     )
 
     /**
+     * Which face of the session window shows: false = Chat, true = the host
+     * terminal (TUI). Remembered per session, so a session opens on the face
+     * it was left on.
+     */
+    val tuiView: StateFlow<Boolean> = combine(repo.settings, _ref) { s, ref ->
+        ref.sessionId.isNotEmpty() && tuiFaceKey(ref) in s.tuiViewSessions
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.Eagerly,
+        initialRef.sessionId.isNotEmpty() &&
+            tuiFaceKey(initialRef) in repo.settings.value.tuiViewSessions,
+    )
+
+    fun setTuiView(on: Boolean) {
+        val ref = _ref.value
+        if (ref.sessionId.isEmpty()) return
+        viewModelScope.launch { repo.settingsStore.setTuiView(tuiFaceKey(ref), on) }
+    }
+
+    // Profile and session, as the web client keys it: two profiles that
+    // front the same daemon see the same session ids.
+    private fun tuiFaceKey(ref: SessionRef) = "${ref.profileId}:${ref.sessionId}"
+
+    // ---- how a message runs ------------------------------------------------
+    // A daemon >= 2.30 decides per message ("auto"): typed into the session's
+    // terminal when it has a live one, a headless turn when it does not, so
+    // there is nothing to choose. Older daemons use the per-daemon Execution
+    // setting, as before.
+
+    /** The session has a live terminal, as last heard from the daemon. */
+    private val _hasTui = MutableStateFlow(false)
+
+    /** Will a message for this session be typed into a terminal? */
+    val sendsToTerminal: StateFlow<Boolean> =
+        combine(profile, _hasTui, harnessProvider) { p, has, harness ->
+            when {
+                p == null -> false
+                p.caps.autoExec -> has
+                else -> p.effectiveExecMode(harness) == ExecMode.INTERACTIVE
+            }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    private fun wireMode(profile: Profile): String? = if (profile.caps.autoExec) "auto" else null
+
+    /** Ask the daemon whether this session has a live terminal. */
+    fun probeTui() {
+        val p = profile.value ?: return
+        val id = _ref.value.sessionId
+        if (!p.caps.autoExec || id.isEmpty()) return
+        val c = client ?: return
+        viewModelScope.launch {
+            runCatching { c.tuiState(id) }.onSuccess { _hasTui.value = it.attached }
+        }
+    }
+
+    /**
+     * Force stop this session on its host, for one that will not open: its
+     * running turn, the daemon's terminal for it, and Claude's own
+     * background copy. The conversation is kept.
+     */
+    fun resetOnHost() {
+        val c = client ?: return
+        val id = _ref.value.sessionId
+        if (id.isEmpty()) return
+        setStatus("Resetting the session on its host…")
+        viewModelScope.launch {
+            runCatching { c.resetSession(id) }
+                .onSuccess { r ->
+                    val did = buildList {
+                        if (r.turnStopped) add("turn stopped")
+                        if (r.terminalsClosed > 0) add("terminal closed")
+                        if (r.backgroundStopped) add("background copy stopped")
+                    }
+                    setStatus(
+                        when {
+                            r.detail.isNotBlank() -> r.detail
+                            did.isEmpty() -> "Nothing was holding this session"
+                            else -> "Reset: " + did.joinToString(", ")
+                        },
+                        sticky = false,
+                    )
+                    _hasTui.value = false
+                    probeTui()
+                }
+                .onFailure { setStatus(repo.reason(it)) }
+        }
+    }
+
+    /** The TUI face saw the terminal (or its absence). */
+    fun terminalSeen(live: Boolean) {
+        if (live) _hasTui.value = true
+    }
+
+    /**
+     * What the daemon made of an "auto" message. Says so once when a session
+     * that had a terminal no longer has one, since a headless turn behaves
+     * differently (messages queue, terminal-only commands do not run).
+     */
+    private fun noteMode(mode: String) {
+        if (mode.isEmpty()) return
+        val had = _hasTui.value
+        _hasTui.value = mode == ExecMode.INTERACTIVE
+        if (had && mode != ExecMode.INTERACTIVE) {
+            setStatus("This session's terminal is gone, so this ran headless. " +
+                "Send a line from TUI to start it again.")
+        }
+    }
+
+    /** The first line sent from the TUI face when the session has no terminal: start one. */
+    fun startTerminal(text: String) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        val c = client ?: return
+        if (_ref.value.sessionId.isEmpty()) return
+        echoUser(t)
+        watcher.markStarting()
+        viewModelScope.launch {
+            val model = sessionModel()
+            val effort = sessionEffort()
+            runCatching {
+                c.continueSession(
+                    sessionId = _ref.value.sessionId,
+                    prompt = t,
+                    execMode = ExecMode.INTERACTIVE,
+                    model = model,
+                    effort = effort,
+                    wireMode = ExecMode.INTERACTIVE,
+                )
+            }
+                .onSuccess { started ->
+                    _hasTui.value = true
+                    watcher.attach(started.jobId, _ref.value.sessionId)
+                }
+                .onFailure { e ->
+                    watcher.clearStarting()
+                    setStatus(repo.reason(e))
+                }
+        }
+    }
+
+    /** For the TUI face, which talks to the daemon on its own. */
+    val repository: AgentRepository get() = repo
+
+    /**
      * The Codex goal on this thread, if it has one. Null until the options
      * sheet asks for it: a session list does not need the round trip.
      */
@@ -203,6 +348,26 @@ class TranscriptViewModel(
         get() = repo.client(_ref.value.profileId)
 
     init {
+        // Whether the session has a terminal: asked when it opens and each
+        // time a turn starts or ends (a turn can start or end one).
+        viewModelScope.launch {
+            combine(profile, _ref, job) { p, ref, j ->
+                Triple(p?.caps?.autoExec == true, ref.sessionId, j.running)
+            }.distinctUntilChanged().collect { probeTui() }
+        }
+        // This conversation is one of the open tabs over the session sheet,
+        // under its current title.
+        viewModelScope.launch {
+            combine(_ref, _session, harnessProvider, profile) { ref, session, harness, profile ->
+                SessionTab(
+                    profileId = ref.profileId,
+                    sessionId = ref.sessionId,
+                    title = session?.title?.trim().orEmpty().ifEmpty { "Session" },
+                    provider = harness,
+                    profileName = profile?.displayName.orEmpty(),
+                )
+            }.collect { if (it.sessionId.isNotEmpty()) repo.tabStore.add(it) }
+        }
         viewModelScope.launch {
             watcher.events.collect { event ->
                 if (event.text.isNotBlank()) {
@@ -690,7 +855,7 @@ class TranscriptViewModel(
                 return
             }
             viewModelScope.launch {
-                val interactive = profile.effectiveExecMode(harnessProvider.value) == ExecMode.INTERACTIVE
+                val interactive = sendsToTerminal.value
                 runCatching {
                     if (interactive) c.input(jobId, text) else c.queue(jobId, text)
                 }.onFailure { e ->
@@ -716,10 +881,12 @@ class TranscriptViewModel(
                     execMode = profile.effectiveExecMode(harnessProvider.value),
                     model = model,
                     effort = effort,
+                    wireMode = wireMode(profile),
                 )
             }
-                .onSuccess { jobId ->
-                    watcher.attach(jobId, _ref.value.sessionId)
+                .onSuccess { started ->
+                    noteMode(started.mode)
+                    watcher.attach(started.jobId, _ref.value.sessionId)
                     flushPending()
                 }
                 .onFailure { e ->
@@ -749,7 +916,7 @@ class TranscriptViewModel(
         viewModelScope.launch {
             queued.forEach { text ->
                 runCatching {
-                    if (profile.effectiveExecMode(harnessProvider.value) == ExecMode.INTERACTIVE) {
+                    if (sendsToTerminal.value) {
                         c.input(jobId, text)
                     } else {
                         c.queue(jobId, text)
@@ -790,8 +957,10 @@ class TranscriptViewModel(
         // /rewind never reaches the harness — the daemon (≥ 2.5) rewinds the
         // session journal itself — so it is exempt from the interactive-only
         // rule. The advertised-list check below still gates old daemons.
-        if (profile.effectiveExecMode(harnessProvider.value) != ExecMode.INTERACTIVE && command != "/rewind") {
-            return "$command needs interactive execution — headless turns cannot run commands"
+        if (!sendsToTerminal.value && command != "/rewind") {
+            return if (profile.caps.autoExec)
+                "$command needs the session's terminal: send a line from TUI to start one"
+            else "$command needs interactive execution — headless turns cannot run commands"
         }
         // Daemon advertises harness built-ins; always allow /rewind and /goal
         // so older daemons / all clients stay consistent.
@@ -862,9 +1031,10 @@ class TranscriptViewModel(
                     execMode = profile.effectiveExecMode(harnessProvider.value),
                     model = model,
                     effort = effort,
+                    wireMode = wireMode(profile),
                 )
             }
-                .onSuccess { watcher.attach(it, _ref.value.sessionId) }
+                .onSuccess { watcher.attach(it.jobId, _ref.value.sessionId) }
                 .onFailure {
                     watcher.clearStarting()
                     setStatus(repo.reason(it))
@@ -1174,15 +1344,19 @@ class TranscriptViewModel(
      * Composer draft lives here (not in Compose remember) so it survives the
      * document-picker Activity Result lifecycle.
      */
-    private val _composerText = MutableStateFlow("")
+    // Kept on the phone per session as well (DraftStore), so leaving the
+    // session or the app being killed does not lose what was typed.
+    private val _composerText = MutableStateFlow(repo.draftStore.get(initialRef))
     val composerText: StateFlow<String> = _composerText.asStateFlow()
 
     fun updateComposer(text: String) {
         _composerText.value = text
+        repo.draftStore.put(_ref.value, text)
     }
 
     fun clearComposer() {
         _composerText.value = ""
+        repo.draftStore.put(_ref.value, "")
     }
 
     /**
@@ -1258,6 +1432,7 @@ class TranscriptViewModel(
             .joinToString(" ")
         if (text.isBlank()) return
         _composerText.value = ""
+        repo.draftStore.put(_ref.value, "")
         _attachments.value = emptyList()
         send(text)
     }

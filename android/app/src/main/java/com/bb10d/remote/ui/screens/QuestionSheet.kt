@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.bb10d.remote.data.QuestionDto
 import com.bb10d.remote.ui.markdown.MarkdownText
+import com.bb10d.remote.ui.theme.MonoStyle
 import com.bb10d.remote.ui.theme.palette
 
 /**
@@ -238,6 +240,23 @@ private fun QuestionBlock(
                         text = option.description,
                         style = MaterialTheme.typography.bodySmall,
                         color = pal.dim,
+                    )
+                }
+                if (option.preview.isNotBlank()) {
+                    // Drawn with spaces, so it keeps its own line breaks and
+                    // scrolls sideways instead of wrapping.
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = option.preview,
+                        style = MonoStyle,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        softWrap = false,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
                     )
                 }
             }

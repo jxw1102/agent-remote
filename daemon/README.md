@@ -19,6 +19,153 @@ Bump `agentremoted/__init__.py` → `__version__` **once per shippable change**
 intermediate edit in a single feature. `/api/ping` reports the version so you
 can see whether a host picked up a deploy.
 
+**2.32.0** A session can be force stopped on its host from a client.
+`POST /api/sessions/<id>/reset` stops the session's running turn, closes
+the daemon's terminal for it (a dead pane too), and stops Claude's own
+background copy of it (`claude agents --json` to find it, `claude stop
+<id>`), which otherwise refuses every resume until someone stops it on the
+host. The conversation is kept. The reply says what was done
+(`turn_stopped`, `terminals_closed`, `background_stopped`, `detail`).
+Advertised as `session_reset`. Web and Android 1.9.72 have it under More
+as "Reset on host", behind a confirmation. BlackBerry 10, iOS and the
+pager do not have it yet.
+
+**2.31.5** A session held by Claude's background agents says so. When a
+session is open in `claude agents` on the host, `claude --resume` refuses
+it and exits; the interactive turn used to fail with "TUI did not become
+ready — screen: exit status 1". It now fails with what to do: run
+`claude stop <id>` on the host, then send again. Other start failures
+carry the screen's last lines as well as the exit status. Web and Android
+1.9.71 show a turn's failure in the TUI view, where it was sent from, and
+start a terminal from that view on any daemon that runs interactive turns.
+
+**2.31.4** The request log leaves out share tokens too: a share link's
+token is its path (`/share/<token>`, `/api/share/<token>`), and it was
+logged in clear. Web and Android 1.9.68: text in the terminal can be
+selected (the screen is held still while it is), with fixes from a code
+review. BlackBerry 10's terminal view is not changed and was not built;
+the pager has no terminal view.
+
+**2.31.3** The request log no longer carries secrets. The API token and
+the TUI hook secret travel in the URL on a few routes (links a browser
+opens, event streams, the hook a terminal posts to), and the request line
+went into `daemon.log` in clear. `secret=` and `token=` query values are
+now written as `<redacted>`. A log written by an earlier version still
+holds them: scrub or delete it.
+
+**2.31.2** Fixes from a code review of scrollback paging. A history that
+got shorter than the client last heard (tmux trimmed it, or the program
+cleared it) answers with the newest page and `reset: true`, so the client
+starts over instead of showing gaps or repeats. The daemon's tmux keeps
+20000 lines per pane (it kept tmux's default 2000, trimmed a tenth at a
+time). Web and Android 1.9.66 follow the daemon's `next` cursor, reload
+after a reset, pick up lines that scrolled off while a page was loading,
+keep asking when the history was empty at first, and do not fold the top
+bar when a loaded page moves the scroll position.
+
+**2.31.1** Claude's terminals have scrollback. Claude Code's fullscreen
+renderer (the default on newer accounts) draws on the alternate screen, so
+tmux held none of the conversation and the Live TUI had nothing to page
+back through. The daemon now starts Claude with
+`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`, its classic renderer, whose
+output scrolls into tmux history. Terminals already running keep the
+renderer they started with. `"tui_scrollback": false` in the config leaves
+the choice to Claude.
+
+**2.31.0** Terminal scrollback is read a page at a time.
+`GET /api/sessions/<id>/tui/history` takes `before` (skip the newest K
+history lines, the ones the client already has) and `at` (the `history`
+size from the client's last reply, so lines that scroll in while it reads
+do not shift the page), and answers with `next`, the `before` for the page
+after. Clients used to ask for a larger window each time and got all of it
+again; now each request carries one page, and the scrollback a client can
+reach is no longer capped at 5000 lines. Advertised as
+`tui_history_paged` (ping and `caps`). Web and Android 1.9.65 page by 200
+lines as the reader reaches the top; they need this flag for scrollback.
+BlackBerry 10, iOS and the pager do not show scrollback.
+
+**2.30.1** Fixes from a code review. A job that only carries a question
+from an idle terminal reports `mode: "interactive"` and refuses `/queue`
+(it never drains one, so a message left there was lost). The Bypass
+Permissions consent screen is recognized only as the dialog at the foot of
+the pane, not when a resumed transcript quotes it. A question is no longer
+withdrawn from the phone while its panel is on another page (typing an
+answer, the review page), and a follow-up question's hook payload is not
+wiped by the previous question's cleanup. Web and Android 1.9.62: a line
+sent from the TUI view starts a terminal only when the daemon says there is
+none (not while merely connecting), also after a terminal has ended.
+
+**2.30.0** The daemon picks how a message runs. `permission_mode: "auto"`
+on `POST /api/sessions/<id>/continue` types the message into the session's
+terminal when it has a live one (a tmux TUI on this harness), and runs a
+headless turn when it does not. Clients used to choose Interactive or
+Headless per daemon, which let a headless turn start on a session whose
+terminal was open: two processes on one conversation, and the terminal
+never saw the headless turn. Now only one ever drives a session, so its
+history cannot fork, and there is nothing to choose. The reply carries
+`mode` ("interactive" | "headless") and so does every job snapshot;
+`GET /api/sessions/<id>/tui?state=1` says whether a terminal is alive
+without capturing it; `/api/ping` advertises `auto_exec: 1`. An explicit
+`interactive` still starts a terminal for a session that has none, which
+is how Web and Android 1.9.53 start one: the first line sent from the TUI
+face. Their Execution setting is gone on such a daemon, and Chat says so
+once if a session's terminal has gone and a message ran headless.
+BlackBerry 10, iOS and the pager keep their Execution setting and the
+explicit modes (deferred: not built on this machine).
+
+**2.29.0** The terminal's scrollback. A Live TUI frame is the visible
+screen only; what scrolled off its top was out of reach from a client.
+`GET /api/sessions/<id>/tui/history?lines=N[&ansi=1]` returns the newest N
+lines of the pane's tmux history (oldest first, up to 5000), the lines just
+above the screen, with `history` (all the scrollback tmux holds) and
+`more`. `/api/ping` advertises `tui_history: 1`. Web and Android 1.9.18
+fetch it when the terminal is scrolled to its top, 200 lines more each
+time, and keep it joined to the screen as new output scrolls off.
+
+**2.28.3** The question watcher publishes only the panel that is on
+screen. A question already answered left its footer and options in the
+scrollback, and the watcher published them again as a new card; it now needs
+the panel to be live. The hook's copy of a question is used only while its
+labels match the panel on screen, and is dropped once that question is
+answered or cancelled, so it can no longer stand in for a later panel in the
+same turn (or for a permission dialog under the old footer, where a pick
+from the phone would have chosen a permission option). An answer given on
+the phone is thrown away as "answered on the host" only after the panel has
+stayed gone for two seconds, not three quick readings. The preview box beside
+the options is cut from the question's rows only from the column it starts
+at, so a table in the question survives, and a "─" in a label is kept.
+Web and Android 1.9.3: a session's Chat/TUI face is restored when the
+daemon's capabilities arrive after the session opened (web); Android keys
+the remembered face by profile and session like the web, and keys the TUI
+pane on the session; both keep at most 300 remembered faces.
+
+**2.28.2** The first interactive turn on a new host says what it is
+waiting for. The first time Claude Code is started with
+`--dangerously-skip-permissions` on a machine it stops on a consent screen
+("WARNING: Claude Code running in Bypass Permissions mode", with "No, exit"
+selected). The daemon waited 90 s and failed with "claude TUI did not become
+ready" and a scrap of the screen. It now fails at once and tells the client
+what to do: run `claude --dangerously-skip-permissions` on the host once and
+choose "Yes, I accept". The daemon does not answer that screen itself; it
+reads "you accept all responsibility", which is the host owner's to say.
+
+**2.28.1** A question asked from a terminal reads properly on the phone.
+When Claude opens AskUserQuestion in a TUI the daemon is not driving, the
+pane watcher publishes it. It rebuilt the question from the screen: the last
+two lines of the question, no descriptions, and for options that carry a
+preview the box drawn beside them ended up inside the labels ("Uniform icon
+circles   ┌────"). The watcher now sends what the PreToolUse hook delivered:
+every question, whole, with descriptions. The screen is read only when there
+was no hook (CodeBuddy), and the preview box is cut off the labels there.
+Options carry the agent's `preview` text (a small mock-up drawn with
+spaces); Web and Android 1.9.3 show it in a fixed-width box under the
+option. BlackBerry, iOS and the pager ignore the field and show the label
+and description as before. Also: a question answered in the terminal is
+withdrawn from the clients about a second later, and answering or cancelling
+a card whose panel has already gone types nothing. Such a card could stay up
+for days, and its Escape or Down/Enter went into whatever the pane was doing
+by then.
+
 **2.27.0** The model belongs to the **session**, not to the client. Clients
 kept one model per daemon and applied it to whichever session was open, so
 the picker showed a model the open session was not running on and changing
@@ -97,6 +244,13 @@ were dimmed as file names); Web: a git command's output is not shown under
 another session. Changes is on Web and Android; BlackBerry 10 and the pager
 do not show it (deferred: neither has a view that fits a diff, and neither
 is built in this tree's CI).
+
+Clients, no daemon change: on Web and Android 1.9.2 the Live TUI is no
+longer a layer over the session but one of the session window's two faces,
+Chat and TUI, picked with a switch in the session bar and remembered per
+session. BlackBerry 10 and iOS still open it as a sheet over the session
+(deferred: neither is built on this machine, so the change could not be
+checked there).
 
 **2.24.1** A long transcript no longer stalls the daemon. Finding a
 session's title source re-read the whole transcript whenever the file had

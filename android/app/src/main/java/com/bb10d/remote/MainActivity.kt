@@ -2,6 +2,15 @@ package com.bb10d.remote
 
 import android.Manifest
 import android.content.Intent
+import androidx.compose.ui.Modifier
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.key
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Box
+import com.bb10d.remote.ui.screens.SheetMotion
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -29,7 +38,6 @@ import com.bb10d.remote.data.SessionRef
 import com.bb10d.remote.service.JobWatchService
 import com.bb10d.remote.ui.screens.DropScreen
 import com.bb10d.remote.ui.screens.DropViewModel
-import com.bb10d.remote.ui.screens.LiveTuiScreen
 import com.bb10d.remote.ui.screens.NewSessionScreen
 import com.bb10d.remote.ui.screens.NewSessionViewModel
 import com.bb10d.remote.ui.screens.ProfileEditorScreen
@@ -99,7 +107,6 @@ private object Routes {
     const val DROP = "drop"
     const val NEW_SESSION = "new-session"
     const val TRANSCRIPT = "transcript"
-    const val LIVE_TUI = "live-tui"
 
     fun transcript(
         profileId: String,
@@ -109,9 +116,6 @@ private object Routes {
     ) =
         "$TRANSCRIPT/$profileId/${sessionId.ifEmpty { NONE }}" +
             "?job=${jobId}&provider=${provider}"
-
-    fun liveTui(profileId: String, sessionId: String) =
-        "$LIVE_TUI/$profileId/${sessionId.ifEmpty { NONE }}"
 
     const val NONE = "-"
 }
@@ -154,20 +158,27 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
         JobWatchService.sync(context, running && settings.backgroundWatch)
     }
 
+    var sheet by rememberSaveable(stateSaver = SheetRoute.Saver) { mutableStateOf<SheetRoute?>(null) }
+    val openSheet: (SheetRoute) -> Unit = { sheet = it }
+
     LaunchedEffect(openOnStart) {
         val ref = openOnStart?.let { SessionRef.parse(it) } ?: return@LaunchedEffect
         onOpenConsumed()
-        nav.navigate(Routes.transcript(ref.profileId, ref.sessionId))
+        openSheet(SheetRoute(ref.profileId, ref.sessionId))
     }
 
+    // The session page is drawn over the navigation host, in the activity's
+    // own window: the list stays drawn (and live) under the session sheet,
+    // and the page reaches the full height of the screen (a dialog window
+    // could not reach under the status bar on every phone).
+
+    Box(Modifier.fillMaxSize()) {
     NavHost(navController = nav, startDestination = Routes.SESSIONS) {
         composable(Routes.SESSIONS) {
             SessionsScreen(
                 vm = viewModel(factory = factory),
                 onOpen = { ref, provider ->
-                    nav.navigate(
-                        Routes.transcript(ref.profileId, ref.sessionId, provider = provider),
-                    )
+                    openSheet(SheetRoute(ref.profileId, ref.sessionId, provider = provider))
                 },
                 onNewSession = { nav.navigate(Routes.NEW_SESSION) },
                 onProfiles = { nav.navigate(Routes.PROFILES) },
@@ -222,62 +233,111 @@ private fun AppNav(openOnStart: String?, onOpenConsumed: () -> Unit, dark: Boole
                 onBack = { nav.popBackStack() },
                 onStarted = { profileId, jobId, provider ->
                     nav.popBackStack()
-                    nav.navigate(
-                        Routes.transcript(profileId, "", jobId, provider = provider),
-                    )
+                    openSheet(SheetRoute(profileId, "", jobId, provider))
                 },
             )
         }
 
-        composable(
-            route = "${Routes.TRANSCRIPT}/{profileId}/{sessionId}?job={job}&provider={provider}",
-            arguments = listOf(
-                navArgument("profileId") { type = NavType.StringType },
-                navArgument("sessionId") { type = NavType.StringType },
-                navArgument("job") { defaultValue = "" },
-                navArgument("provider") { defaultValue = "" },
-            ),
-        ) { entry ->
-            val profileId = entry.arguments?.getString("profileId").orEmpty()
-            val rawSession = entry.arguments?.getString("sessionId").orEmpty()
-            val sessionId = if (rawSession == Routes.NONE) "" else rawSession
-            val jobId = entry.arguments?.getString("job").orEmpty()
-            val provider = entry.arguments?.getString("provider").orEmpty()
-            val ref = SessionRef(profileId, sessionId)
-            val transcriptFactory = remember(ref.key, jobId, provider) {
-                viewModelFactory {
-                    initializer { TranscriptViewModel(repo, ref, jobId, provider) }
-                }
-            }
-            // Theme is applied inside TranscriptScreen from the session harness
-            // (nav provider is the initial hint for multi hosts).
-            TranscriptScreen(
-                vm = viewModel(key = ref.key + jobId + provider, factory = transcriptFactory),
-                onBack = { nav.popBackStack() },
-                onLiveTui = {
-                    if (sessionId.isNotEmpty()) {
-                        nav.navigate(Routes.liveTui(profileId, sessionId))
-                    }
-                },
-            )
-        }
-
-        composable(
-            route = "${Routes.LIVE_TUI}/{profileId}/{sessionId}",
-            arguments = listOf(
-                navArgument("profileId") { type = NavType.StringType },
-                navArgument("sessionId") { type = NavType.StringType },
-            ),
-        ) { entry ->
-            val profileId = entry.arguments?.getString("profileId").orEmpty()
-            val rawSession = entry.arguments?.getString("sessionId").orEmpty()
-            val sessionId = if (rawSession == Routes.NONE) "" else rawSession
-            LiveTuiScreen(
+    }
+    sheet?.let { route ->
+        key(route.key) {
+            SessionSheetHost(
                 repo = repo,
-                ref = SessionRef(profileId, sessionId),
-                onBack = { nav.popBackStack() },
+                route = route,
+                onBack = { sheet = null },
+                onOpenTab = { tab ->
+                    // The sheet is already up: the next one does not slide in.
+                    SheetMotion.switching = true
+                    openSheet(SheetRoute(tab.profileId, tab.sessionId, provider = tab.provider))
+                },
             )
         }
+    }
+    }
+}
+
+/** Which session the sheet shows (saved across process death). */
+private data class SheetRoute(
+    val profileId: String,
+    val sessionId: String,
+    val jobId: String = "",
+    val provider: String = "",
+) {
+    val key: String get() = "$profileId/$sessionId/$jobId/$provider"
+
+    companion object {
+        val Saver = androidx.compose.runtime.saveable.listSaver<SheetRoute?, String>(
+            save = { r -> if (r == null) emptyList() else listOf(r.profileId, r.sessionId, r.jobId, r.provider) },
+            restore = { l -> if (l.size == 4) SheetRoute(l[0], l[1], l[2], l[3]) else null },
+        )
+    }
+}
+
+/** The session pages' view model stores, kept across activity recreation. */
+internal class SheetStores : androidx.lifecycle.ViewModel() {
+    private val stores = HashMap<String, androidx.lifecycle.ViewModelStore>()
+
+    fun storeFor(key: String): androidx.lifecycle.ViewModelStore =
+        stores.getOrPut(key) { androidx.lifecycle.ViewModelStore() }
+
+    fun drop(key: String) {
+        stores.remove(key)?.clear()
+    }
+
+    override fun onCleared() {
+        stores.values.forEach { it.clear() }
+        stores.clear()
+    }
+}
+
+private tailrec fun android.content.Context.findActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is android.content.ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+/**
+ * One session page, with view models of its own that are cleared when the
+ * page goes (it is not a navigation destination, so nothing else would).
+ */
+@Composable
+private fun SessionSheetHost(
+    repo: com.bb10d.remote.data.AgentRepository,
+    route: SheetRoute,
+    onBack: () -> Unit,
+    onOpenTab: (com.bb10d.remote.data.SessionTab) -> Unit,
+) {
+    // The page's store lives in the activity's own (retained) view model, so
+    // a rotation-like recreation keeps the page's state, as a navigation
+    // entry would. It is cleared when the page really goes.
+    val stores: SheetStores = viewModel()
+    val activity = androidx.compose.ui.platform.LocalContext.current.findActivity()
+    val owner = remember(route.key) {
+        object : androidx.lifecycle.ViewModelStoreOwner {
+            override val viewModelStore = stores.storeFor(route.key)
+        }
+    }
+    DisposableEffect(route.key) {
+        onDispose {
+            if (activity?.isChangingConfigurations != true) stores.drop(route.key)
+        }
+    }
+    val ref = SessionRef(route.profileId, route.sessionId)
+    val factory = remember {
+        viewModelFactory {
+            initializer { TranscriptViewModel(repo, ref, route.jobId, route.provider) }
+        }
+    }
+    androidx.compose.runtime.CompositionLocalProvider(
+        androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner provides owner,
+    ) {
+        // Theme is applied inside TranscriptScreen from the session harness
+        // (the route's provider is the initial hint for multi hosts).
+        TranscriptScreen(
+            vm = viewModel(factory = factory),
+            onBack = onBack,
+            onOpenTab = onOpenTab,
+        )
     }
 }
 

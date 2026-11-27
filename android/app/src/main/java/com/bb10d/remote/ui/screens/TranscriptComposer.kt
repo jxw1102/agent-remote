@@ -18,8 +18,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Add
@@ -33,6 +35,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import com.bb10d.remote.ui.components.CircleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
@@ -75,7 +78,6 @@ internal fun AttachmentChips(
     Row(
         Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 10.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -154,17 +156,21 @@ internal fun Composer(
         if (text != field.text) field = TextFieldValue(text, TextRange(text.length))
     }
     val queues = running && !interactive
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .navigationBarsPadding(),
-    ) {
+    // Inside the floating card: one piece with it. No surface or system bar
+    // padding of its own (the card and the page give those); + and Send are
+    // round, like the bubbles and the bar's switch.
+    Column(Modifier.fillMaxWidth()) {
+        // + and Send stand clear of the card's edge (8 dp at the sides, 11 dp
+        // at the foot) and centre on a one-line field.
         Row(
-            Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+            Modifier.padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 4.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
-            IconButton(onClick = onAttach) {
+            CircleButton(
+                onClick = onAttach,
+                modifier = Modifier.padding(bottom = 8.dp),
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f),
+            ) {
                 Icon(Icons.Outlined.Add, contentDescription = "Attach a file", tint = pal.dim)
             }
             TextField(
@@ -203,9 +209,11 @@ internal fun Composer(
             )
             // Always reserve the Stop slot so Send never slides when a turn
             // starts — same mis-click class as web Live TUI vs Stop.
-            IconButton(
+            CircleButton(
                 onClick = onStop,
                 enabled = running,
+                modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 8.dp),   // level with Send
+                color = if (running) pal.danger.copy(alpha = 0.10f) else Color.Transparent,
             ) {
                 Icon(
                     Icons.Outlined.Stop,
@@ -213,19 +221,17 @@ internal fun Composer(
                     tint = if (running) pal.danger else Color.Transparent,
                 )
             }
-            IconButton(
+            CircleButton(
                 onClick = onSend,
                 enabled = canSend,
-                modifier = Modifier
-                    .padding(bottom = 4.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(if (canSend) accent else Color.Transparent),
+                modifier = Modifier.padding(bottom = 8.dp),
+                color = if (canSend) accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f),
             ) {
                 // Says what it will do: while a headless turn runs, the
                 // message waits its turn on the daemon.
                 Icon(
                     if (queues) Icons.AutoMirrored.Outlined.PlaylistAdd
-                    else Icons.AutoMirrored.Outlined.Send,
+                    else Icons.Outlined.ArrowUpward,
                     contentDescription = if (queues) "Queue after this turn" else "Send",
                     tint = if (canSend) onAccent else pal.dim,
                 )
@@ -270,6 +276,8 @@ internal fun TurnChips(
     perSession: Boolean,
     onModel: (String) -> Unit,
     onEffort: (String) -> Unit,
+    /** One of the chips' menus is open (true) or all are closed (false). */
+    onMenu: (Boolean) -> Unit = {},
 ) {
     // Nothing to offer: no divider and no empty strip above the message box.
     if (!hasTurnChips(profile, harness)) return
@@ -280,17 +288,14 @@ internal fun TurnChips(
     val efforts = caps.effortsFor(harness).withCurrent(effort)
     val scope = if (perSession) "This session only"
                 else "Used for every session on ${profile.displayName}"
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface),
-    ) {
-        HorizontalDivider(color = palette.hairline)
+    // As wide as its chips: the caller floats it above the start of the
+    // bottom bar, in a card of its own.
+    Column {
+        // Not scrollable itself: the row it floats in scrolls, and one
+        // sideways scroller inside another is measured with no width limit,
+        // which Compose refuses (it crashed the app as the chips appeared).
         Row(
-            Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(start = 10.dp, end = 10.dp, top = 4.dp),
+            Modifier.padding(horizontal = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -301,6 +306,8 @@ internal fun TurnChips(
                     selected = model.ifBlank { models.first() },
                     footer = scope,
                     onSelect = onModel,
+                    onMenu = onMenu,
+                    outlined = false,
                 )
             }
             if (caps.canSetEffortFor(harness) && efforts.isNotEmpty()) {
@@ -310,6 +317,8 @@ internal fun TurnChips(
                     selected = effort.ifBlank { efforts.first() },
                     footer = scope,
                     onSelect = onEffort,
+                    onMenu = onMenu,
+                    outlined = false,
                 )
             }
         }
@@ -325,9 +334,16 @@ internal fun TurnChip(
     onSelect: (String) -> Unit,
     display: (String) -> String = { it },
     hint: (String) -> String = { "" },
+    /** The chip's menu opened or closed. */
+    onMenu: (Boolean) -> Unit = {},
+    /** Show the word before the value ("Model"). */
+    showLabel: Boolean = true,
+    /** Draw the chip's own outline; off inside a pill that already has one. */
+    outlined: Boolean = true,
 ) {
     val pal = palette
     var open by remember { mutableStateOf(false) }
+    LaunchedEffect(open) { onMenu(open) }
     val canChange = options.size > 1
     val shown = display(selected).ifBlank { "default" }
     Box {
@@ -348,10 +364,10 @@ internal fun TurnChip(
                 }
                 .padding(vertical = 6.dp)
                 .clip(RoundedCornerShape(14.dp))
-                .border(1.dp, pal.hairline, RoundedCornerShape(14.dp))
+                .border(1.dp, if (outlined) pal.hairline else Color.Transparent, RoundedCornerShape(14.dp))
                 .padding(start = 10.dp, end = if (canChange) 2.dp else 10.dp, top = 4.dp, bottom = 4.dp),
         ) {
-            Text(label, style = MaterialTheme.typography.labelSmall, color = pal.dim)
+            if (showLabel) Text(label, style = MaterialTheme.typography.labelSmall, color = pal.dim)
             Spacer(Modifier.width(6.dp))
             Text(
                 shown,

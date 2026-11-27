@@ -223,6 +223,44 @@ check("ask panel options",
           "Skip the VPS deploy"], _p)
 check("ask panel ignores idle pane", InteractiveManager._ask_panel("❯\n") == {})
 
+# Options that carry a preview are painted beside a box holding it. The box
+# is not part of the labels (it used to be: "Uniform icon circles   ┌────").
+_side = """ How should the buttons be reworked? Today they are three icons in the
+ middle: play on a disc, and the downloaded mark.
+
+❯ 1. Uniform icon circles         ┌──────────────────────────────────────────┐
+  2. Labelled pills               │ ( ▶ )     ( ✓ )     ( 🗑 )                 │
+  3. Primary + secondary          │      Play   Played   Remove dl           │
+  4. Type something               └──────────────────────────────────────────┘
+
+Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel
+"""
+_p = InteractiveManager._ask_panel(_side)
+check("ask panel beside a preview: labels only",
+      [o["label"] for o in (_p or {}).get("options") or []]
+      == ["Uniform icon circles", "Labelled pills", "Primary + secondary"], _p)
+check("ask panel beside a preview: no box in the question",
+      "┌" not in (_p or {}).get("question", "x┌")
+      and "│" not in (_p or {}).get("question", "x│"), _p)
+
+# The hook's own questions are what the clients are sent, whole.
+_q = InteractiveManager._ask_payload([{
+    "question": "Which one?", "header": "Buttons", "multiSelect": True,
+    "options": [
+        {"label": "Circles", "description": "All the same.",
+         "preview": "  ( ▶ )   ( ✓ )\n   Play  Played\n"},
+        {"label": "Pills", "description": ""},
+        {"description": "no label: dropped"},
+    ]}, "not a dict"])
+check("ask payload keeps question, header, multi-select",
+      len(_q) == 1 and _q[0]["question"] == "Which one?"
+      and _q[0]["header"] == "Buttons" and _q[0]["multi_select"] is True, _q)
+check("ask payload keeps descriptions and the preview's layout",
+      _q[0]["options"][0] == {"label": "Circles", "description": "All the same.",
+                              "preview": "( ▶ )   ( ✓ )\n Play  Played"}
+      and _q[0]["options"][1] == {"label": "Pills", "description": ""}
+      and len(_q[0]["options"]) == 2, _q)
+
 check("pasted content wrapper is stripped, text kept",
       _clean('<pasted_content id="20e4">\nssh -i ~/.ssh/k root@10.0.0.1\n'
              '</pasted_content id="20e4">')

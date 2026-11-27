@@ -128,6 +128,9 @@ def write_tmux_helper() -> str:
 _server_lock = threading.Lock()
 
 
+TMUX_HISTORY_LIMIT = 20000
+
+
 def ensure_tmux_server(tmux_bin: str) -> None:
     """Bring the fleet's tmux server up before anyone runs `new-session`.
 
@@ -146,6 +149,13 @@ def ensure_tmux_server(tmux_bin: str) -> None:
     with _server_lock:
         try:
             subprocess.run([tmux_bin, "-L", tmux_socket(), "start-server"],
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15)
+            # Room for the Live TUI's scrollback: tmux keeps 2000 lines by
+            # default and drops a tenth each time that fills. Applies to
+            # panes created from here on.
+            subprocess.run([tmux_bin, "-L", tmux_socket(), "set-option", "-g",
+                            "history-limit", str(TMUX_HISTORY_LIMIT)],
                            stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=15)
         except (OSError, subprocess.SubprocessError):
@@ -200,6 +210,11 @@ DEFAULTS = {
     "permission_timeout": 300,
     # How long to wait for the phone to answer a question panel. 0 = forever.
     "question_timeout": 0,
+    # Start Claude's terminals in its classic renderer, so the conversation
+    # scrolls into tmux history and the Live TUI can page back through it.
+    # False leaves Claude's own choice (its fullscreen renderer keeps no
+    # scrollback in tmux).
+    "tui_scrollback": True,
     "claude_env": {},
 
     # ---- grok provider --------------------------------------------------

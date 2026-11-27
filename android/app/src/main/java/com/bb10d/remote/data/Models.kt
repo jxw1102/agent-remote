@@ -179,6 +179,14 @@ data class PingDto(
     @SerialName("session_options") val sessionOptions: Boolean = false,
     /** 1: Live TUI frames pushed over SSE (agentremoted ≥ 2.22); 0: poll. */
     @SerialName("tui_stream") val tuiStream: Int = 0,
+    /** 1: GET …/tui/history returns the pane's scrollback (agentremoted ≥ 2.29). */
+    @SerialName("tui_history") val tuiHistory: Int = 0,
+    /** 1: that route pages (`before`, `at`, `next`; agentremoted ≥ 2.31). */
+    @SerialName("tui_history_paged") val tuiHistoryPaged: Int = 0,
+    /** 1: permission_mode "auto" on /continue (agentremoted ≥ 2.30). */
+    @SerialName("auto_exec") val autoExec: Int = 0,
+    /** 1: POST …/reset force stops a session on its host (agentremoted ≥ 2.32). */
+    @SerialName("session_reset") val sessionReset: Int = 0,
     /** Chunked POST /api/attachments (agentremoted ≥ 2.8.6). */
     @SerialName("chunked_upload") val chunkedUpload: Boolean = false,
     @SerialName("max_upload_mb") val maxUploadMb: Int = 16,
@@ -370,6 +378,8 @@ data class PendingPermissionDto(
 data class QuestionOptionDto(
     val label: String = "",
     val description: String = "",
+    /** A plain-text mock-up the agent drew for this option; fixed-width. */
+    val preview: String = "",
 )
 
 @Serializable
@@ -526,7 +536,38 @@ data class DropListDto(
 @Serializable
 data class JobStartedDto(@SerialName("job_id") val jobId: String = "")
 
+/** A turn that was started: its job, and how it runs (≥ 2.30: "interactive" | "headless"). */
+data class StartedTurn(val jobId: String, val mode: String = "")
+
+/** POST …/reset: what was let go of on the host. */
+@Serializable
+data class SessionResetDto(
+    @SerialName("turn_stopped") val turnStopped: Boolean = false,
+    @SerialName("terminals_closed") val terminalsClosed: Int = 0,
+    @SerialName("background_stopped") val backgroundStopped: Boolean = false,
+    val detail: String = "",
+)
+
+/** GET …/tui?state=1 — whether a terminal is alive for the session. */
+@Serializable
+data class TuiStateDto(val attached: Boolean = false)
+
 /** GET /api/sessions/<id>/tui — host tmux pane frame. */
+/** GET …/tui/history: one page of scrollback, oldest first. */
+@Serializable
+data class TuiHistoryDto(
+    val attached: Boolean = false,
+    val text: String = "",
+    val lines: Int = 0,
+    /** All the scrollback tmux holds for the pane. */
+    val history: Int = 0,
+    val more: Boolean = false,
+    /** The `before` for the page after this one. */
+    val next: Int = 0,
+    /** The history got shorter than `at`: this is the newest page; start over. */
+    val reset: Boolean = false,
+)
+
 @Serializable
 data class TuiFrameDto(
     @SerialName("session_id") val sessionId: String = "",
@@ -693,6 +734,15 @@ data class Caps(
     val sessionOptions: Boolean = false,
     /** Live TUI frames are pushed, not polled (agentremoted >= 2.22). */
     val tuiStream: Boolean = false,
+    /** The terminal's scrollback can be fetched (agentremoted >= 2.29). */
+    val tuiHistory: Boolean = false,
+    /**
+     * The daemon picks how each message runs (agentremoted >= 2.30): into
+     * the session's terminal when it has a live one, headless otherwise.
+     */
+    val autoExec: Boolean = false,
+    /** A session can be force stopped on its host (agentremoted >= 2.32). */
+    val sessionReset: Boolean = false,
     /** Chunked attachments (agentremoted >= 2.8.6). */
     val chunkedUpload: Boolean = false,
     /** Largest attachment the daemon accepts (ping max_upload_mb). */
@@ -840,6 +890,10 @@ data class Caps(
             changesTurn = ping.changesTurn,
             sessionOptions = ping.sessionOptions,
             tuiStream = ping.tuiStream > 0 || ping.caps["tui_stream"] == true,
+            // Scrollback is read a page at a time, which needs the paged route.
+            tuiHistory = ping.tuiHistoryPaged > 0 || ping.caps["tui_history_paged"] == true,
+            autoExec = ping.autoExec > 0 || ping.caps["auto_exec"] == true,
+            sessionReset = ping.sessionReset > 0 || ping.caps["session_reset"] == true,
             chunkedUpload = ping.chunkedUpload || ping.caps["chunked_upload"] == true,
             maxUploadMb = ping.maxUploadMb.takeIf { it > 0 } ?: 16,
             providers = ping.providers,

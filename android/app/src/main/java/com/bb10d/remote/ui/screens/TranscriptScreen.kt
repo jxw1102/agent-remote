@@ -16,6 +16,41 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.outlined.Stop
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import kotlinx.coroutines.delay
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material3.Surface
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.gestures.scrollBy
@@ -33,7 +68,6 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Tag
 import androidx.compose.material.icons.outlined.Timeline
-import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,6 +76,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
@@ -58,8 +93,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.derivedStateOf
 import com.bb10d.remote.ui.components.MetaPill
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import com.bb10d.remote.ui.components.connLabel
 import com.bb10d.remote.ui.components.connTint
+import com.bb10d.remote.ui.components.CircleButton
+import com.bb10d.remote.ui.components.stateTint
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -73,6 +111,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bb10d.remote.data.ExecMode
+import com.bb10d.remote.data.SessionTab
 import com.bb10d.remote.ui.components.ErrorBanner
 import com.bb10d.remote.ui.components.WorkingDots
 import androidx.compose.ui.graphics.Color
@@ -95,7 +134,8 @@ import kotlinx.coroutines.withContext
 fun TranscriptScreen(
     vm: TranscriptViewModel,
     onBack: () -> Unit,
-    onLiveTui: () -> Unit = {},
+    /** Another open conversation's bubble was tapped. */
+    onOpenTab: (SessionTab) -> Unit = {},
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val jobState by vm.job.collectAsStateWithLifecycle()
@@ -115,10 +155,11 @@ fun TranscriptScreen(
         else -> isSystemInDarkTheme()
     }
     AgentRemoteTheme(accent = accent, dark = dark) {
-        TranscriptScreenBody(
+        val sheet = isSheetLayout()
+        val body: @Composable () -> Unit = { TranscriptScreenBody(
             vm = vm,
             onBack = onBack,
-            onLiveTui = onLiveTui,
+            sheet = sheet,
             ui = ui,
             jobState = jobState,
             live = live,
@@ -128,7 +169,41 @@ fun TranscriptScreen(
             accent = accent,
             harness = harness,
             conn = conn,
-        )
+        ) }
+        if (!sheet) {
+            // A window of its own now (over the list): Back closes it.
+            androidx.activity.compose.BackHandler { onBack() }
+            // Over the list in the same window: it takes every touch.
+            Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { } }) {
+                body()
+                // The page runs to the top of the screen under a translucent
+                // status bar.
+                StatusBarScrim()
+            }
+        } else {
+            val tabs by vm.repository.tabStore.tabs.collectAsStateWithLifecycle()
+            val ref by vm.ref.collectAsStateWithLifecycle()
+            val working by vm.repository.workingKeys.collectAsStateWithLifecycle()
+            val blocked by vm.repository.blockedKeys.collectAsStateWithLifecycle()
+            val connAll by vm.repository.conn.collectAsStateWithLifecycle()
+            SessionSheetFrame(
+                tabs = tabs,
+                current = ref,
+                working = working,
+                blocked = blocked,
+                conn = connAll,
+                onHome = onBack,
+                onOpen = onOpenTab,
+                onClose = { tab ->
+                    val next = vm.repository.tabStore.close(tab.ref)
+                    // The open one closed: its neighbour comes forward, as in
+                    // a browser; with none left the sheet goes.
+                    if (tab.ref.key != ref.key) false
+                    else if (next != null) { onOpenTab(next); false }
+                    else true
+                },
+            ) { body() }
+        }
     }
 }
 
@@ -137,7 +212,7 @@ fun TranscriptScreen(
 private fun TranscriptScreenBody(
     vm: TranscriptViewModel,
     onBack: () -> Unit,
-    onLiveTui: () -> Unit,
+    sheet: Boolean,
     ui: TranscriptUi,
     jobState: com.bb10d.remote.data.JobState,
     live: com.bb10d.remote.data.ActiveJobDto?,
@@ -152,6 +227,10 @@ private fun TranscriptScreenBody(
     val ref by vm.ref.collectAsStateWithLifecycle()
     val showLiveTui = ref.sessionId.isNotEmpty()
         && (profile?.caps?.liveTuiFor(harness.ifBlank { null }) == true)
+    // The session window's two faces: the chat, or the host terminal. Each
+    // session reopens on the face it was left on.
+    val tuiView by vm.tuiView.collectAsStateWithLifecycle()
+    val tuiOn = showLiveTui && tuiView
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val clipboard = rememberClip()
@@ -212,6 +291,21 @@ private fun TranscriptScreenBody(
         (if (jobState.running) 1 else 0)
     LaunchedEffect(ui.scrollTick) {
         if (ui.items.isNotEmpty()) listState.scrollToItem(bottomRow)
+    }
+    // The keyboard coming up shrinks the list from below (imePadding). The
+    // list keeps its first row, so the newest ones slid under the keyboard;
+    // now the conversation follows it up to its newest row, so the reply
+    // being typed sits right under what it answers. Tracked through the
+    // keyboard's whole slide, not only where it ends.
+    val density = LocalDensity.current
+    val imeBottom = WindowInsets.ime.getBottom(density)
+    val lastIme = remember { intArrayOf(0) }
+    LaunchedEffect(imeBottom) {
+        val rising = imeBottom > lastIme[0]
+        lastIme[0] = imeBottom
+        if (!rising || tuiView || ui.items.isEmpty()) return@LaunchedEffect
+        listState.scrollToItem(bottomRow)
+        listState.scrollBy(1_000_000f)
     }
     // The tail appearing at the bottom is followed like new output.
     LaunchedEffect(jobState.running) {
@@ -276,6 +370,20 @@ private fun TranscriptScreenBody(
         wasReadingBack[0] = awayFromLatest || behindLatest
         if (!wasReadingBack[0]) unseen = false
     }
+    // Reaching the top asks for the earlier messages by itself, as if the
+    // "Load earlier messages" row had been tapped.
+    // Only once the reader has scrolled: the list also starts at the top
+    // for a moment before it jumps to the newest row.
+    var readerScrolled by remember { mutableStateOf(false) }
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) readerScrolled = true
+    }
+    val atTop by remember {
+        derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.layoutInfo.totalItemsCount > 1 }
+    }
+    LaunchedEffect(atTop, readerScrolled, ui.canLoadOlder, ui.loadingOlder) {
+        if (atTop && readerScrolled && ui.canLoadOlder && !ui.loadingOlder) vm.loadOlder()
+    }
     // Older messages went in above: shift the anchor by exactly as many rows,
     // so the message you were reading stays under your thumb.
     LaunchedEffect(ui.prependTick) {
@@ -290,12 +398,125 @@ private fun TranscriptScreenBody(
         )
     }
 
+    // The session bar opens expanded and folds down to a slim pill (the
+    // title) a few seconds later, or as soon as the reader drags the
+    // conversation. A tap on the pill opens it again. It stays open while
+    // its menu is open.
+    var confirmReset by remember(ref.key) { mutableStateOf(false) }
+    if (confirmReset) AlertDialog(
+        onDismissRequest = { confirmReset = false },
+        title = { Text("Force stop this session on its host?") },
+        text = {
+            Text(
+                "Its running turn is stopped, its terminal is closed, and Claude's " +
+                    "background copy of it is stopped. The conversation is kept; the " +
+                    "next message opens it again.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { confirmReset = false; vm.resetOnHost() }) { Text("Reset") }
+        },
+        dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
+    )
+    var barOpen by remember(ref.key) { mutableStateOf(true) }
+    var barTick by remember { mutableIntStateOf(0) }
+    // Phones only (the sheet): a tablet or a phone held sideways has the
+    // room, and folding there would only take the title and buttons away.
+    // Nor does it fold on an upright screen with room to spare (at least
+    // 480 x 720 dp): the open bar costs nothing there.
+    val cfg = androidx.compose.ui.platform.LocalConfiguration.current
+    val roomy = cfg.screenHeightDp > cfg.screenWidthDp &&
+        cfg.screenWidthDp >= 480 && cfg.screenHeightDp >= 720
+    val folds = sheet && !roomy
+    LaunchedEffect(folds) { if (!folds) barOpen = true }
+    LaunchedEffect(barOpen, barTick, menuOpen, folds) {
+        if (barOpen && !menuOpen && folds) {
+            delay(5000)
+            barOpen = false
+        }
+    }
+    val dragged by listState.interactionSource.collectIsDraggedAsState()
+    // The reader's own scrolling: down (toward the latest) folds the bar
+    // away, up (back through the conversation) brings it out again. Only
+    // while a finger is on the list, so new output arriving does neither.
+    val scrollGate = androidx.compose.runtime.rememberUpdatedState(dragged && !menuOpen && folds)
+    LaunchedEffect(listState) {
+        var prev = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        androidx.compose.runtime.snapshotFlow {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        }.collect { cur ->
+            val by = when {
+                // Earlier messages put on top move the index by a page at
+                // once: that is not the reader's scrolling.
+                kotlin.math.abs(cur.first - prev.first) > 3 -> 0
+                cur.first != prev.first -> (cur.first - prev.first) * 1000
+                else -> cur.second - prev.second
+            }
+            prev = cur
+            if (!scrollGate.value || kotlin.math.abs(by) < 6) return@collect
+            if (by > 0) barOpen = false
+            else if (!barOpen) { barOpen = true; barTick++ }
+        }
+    }
+
     Scaffold(
         topBar = {
-            Column {
+            // The bar floats: a rounded card over the top of the
+            // conversation, which scrolls on underneath it (as on the web).
+            // The live strip is a second, smaller card under it.
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(
+                        start = 10.dp, end = 10.dp, bottom = 4.dp,
+                        top = 8.dp,
+                    ),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                // Folding and unfolding is one motion: the card narrows to
+                // its end (where the pill sits) and the pill's content fades
+                // in, and back.
+                Box(Modifier.fillMaxWidth()) {
+                // One bar in both states; only its card changes shape, and
+                // that change is animated. Open, the card is one rounded
+                // rectangle. Folded, it is two pieces: a circle round Back and
+                // a pill round the Chat | TUI switch and More, with the title
+                // faded out between them. The buttons never move.
+                val fold by animateFloatAsState(
+                    targetValue = if (barOpen) 0f else 1f,
+                    animationSpec = tween(300, easing = FastOutSlowInEasing),
+                    label = "bar-fold",
+                )
+                var actionsPx by remember { mutableIntStateOf(0) }
+                BoxWithConstraints(
+                    Modifier
+                        .fillMaxWidth()
+                        // Any touch on the open bar keeps it open a while
+                        // longer. Folded, the gap between the pieces takes no
+                        // touch, so the page under it still scrolls.
+                        .then(
+                            if (barOpen) Modifier.pointerInput(Unit) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    barTick++
+                                }
+                            } else Modifier,
+                        ),
+                ) {
+                BarCard(
+                    fold = fold,
+                    total = maxWidth,
+                    actionsWidth = with(LocalDensity.current) { actionsPx.toDp() },
+                    modifier = Modifier.matchParentSize(),
+                )
+                Column(Modifier.clip(RoundedCornerShape(18.dp))) {
                 TopAppBar(
+                    windowInsets = WindowInsets(0, 0, 0, 0),
                     title = {
-                        Column {
+                        // Gone the moment the bar starts to fold; it only fades
+                        // on the way back.
+                        Column(Modifier.alpha(if (barOpen) 1f - fold else 0f)) {
                             Text(
                                 text = session?.title?.ifBlank { null } ?: "Session",
                                 fontWeight = FontWeight.SemiBold,
@@ -327,15 +548,23 @@ private fun TranscriptScreenBody(
                             }
                         }
                     },
+                    // Back to the list, at the start of the bar.
                     navigationIcon = {
-                        IconButton(onClick = onBack) {
+                        // 48 dp, the folded bar's circle exactly: the ripple
+                        // fills it.
+                        CircleButton(onClick = onBack, size = 48.dp) {
                             Icon(
                                 Icons.AutoMirrored.Outlined.ArrowBack,
-                                contentDescription = "Back",
+                                contentDescription = "Back to sessions",
                             )
                         }
                     },
                     actions = {
+                        // Measured, so the folded pill knows what to hug.
+                        Row(
+                            Modifier.onSizeChanged { actionsPx = it.width },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                         if (jobState.queued.isNotEmpty()) {
                             IconButton(onClick = { showQueue = true }) {
                                 Box {
@@ -349,22 +578,30 @@ private fun TranscriptScreenBody(
                                 }
                             }
                         }
-                        // In the bar at every width, as on the web: how the
-                        // next turn runs, and the host terminal. The rest is
-                        // what you do now and then, under More.
-                        IconButton(onClick = { showOptions = true }) {
-                            Icon(Icons.Outlined.Tune, contentDescription = "Session options")
-                        }
+                        // In the bar: the Chat | TUI switch and More. Session
+                        // options and the rest are under More.
                         if (showLiveTui) {
-                            IconButton(onClick = onLiveTui) {
-                                Icon(Icons.Outlined.Terminal, contentDescription = "Live TUI")
-                            }
+                            FaceSwitch(
+                                tui = tuiOn,
+                                accent = accent.tint,
+                                onPick = vm::setTuiView,
+                            )
                         }
                         Box {
-                            IconButton(onClick = { menuOpen = true }) {
+                            // Folded, More joins the bar again as it opens its menu.
+                            IconButton(onClick = { barOpen = true; barTick++; menuOpen = true }) {
                                 Icon(Icons.Outlined.MoreVert, contentDescription = "More")
                             }
                             DropdownMenu(menuOpen, onDismissRequest = { menuOpen = false }) {
+                                // How the next turn runs: first in the menu.
+                                DropdownMenuItem(
+                                    text = { Text("Session options") },
+                                    leadingIcon = { Icon(Icons.Outlined.Tune, null) },
+                                    onClick = {
+                                        menuOpen = false
+                                        showOptions = true
+                                    },
+                                )
                                 // Only where it can work: a daemon that has
                                 // the route, and a session with a folder.
                                 if (profile?.caps?.changes == true &&
@@ -415,6 +652,14 @@ private fun TranscriptScreenBody(
                                         clipboard.copy(plainTranscript(ui.items))
                                     },
                                 )
+                                if (profile?.caps?.sessionReset == true) DropdownMenuItem(
+                                    text = { Text("Reset on host") },
+                                    leadingIcon = { Icon(Icons.Outlined.PowerSettingsNew, null) },
+                                    onClick = {
+                                        menuOpen = false
+                                        confirmReset = true
+                                    },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Copy session id") },
                                     leadingIcon = { Icon(Icons.Outlined.Tag, null) },
@@ -425,42 +670,118 @@ private fun TranscriptScreenBody(
                                 )
                             }
                         }
+                        }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.background,
+                        containerColor = Color.Transparent,
                     ),
                 )
+                // The live strip folded into the bar's card, as its bottom
+                // row, while a turn runs.
+                // On a phone the bubbles' dot says it instead.
+                // Nor while the working row at the end of the conversation
+                // is in view: one of the two is enough.
                 StatusBanner(
-                    running = jobState.running,
+                    running = jobState.running && !sheet && (tuiOn || awayFromLatest),
                     phase = live?.phase.orEmpty(),
                     phaseDetail = live?.phaseDetail.orEmpty(),
                     tool = live?.tool.orEmpty().ifEmpty { jobState.toolLine },
                     toolDetail = live?.toolDetail.orEmpty(),
                     elapsed = live?.elapsedS ?: 0,
-                    accent = accent.tint,
+                    accent = com.bb10d.remote.ui.components.stateTint("working"),
                     agent = accent.label,
                 )
-                Hairline()
+                // On the TUI face: whether the terminal is live, in the same
+                // place.
+                if (tuiOn && !sheet) {
+                    val tui by remember(ref.key) { vm.repository.tuiFeeds.flowFor(ref) }
+                        .collectAsStateWithLifecycle()
+                    Text(
+                        text = (if (tui.live) "\u25CF " else "") + tui.status,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (tui.live) stateTint("working") else pal.dim,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(stateTint("working").copy(alpha = if (tui.live) 0.10f else 0f))
+                            .padding(horizontal = 16.dp, vertical = 7.dp),
+                    )
+                }
+                }
+                }
+                }
             }
         },
         containerColor = MaterialTheme.colorScheme.background,
     ) { padding ->
+        var chipMenuOpen by remember { mutableStateOf(false) }
+        // The floating bottom bar's height, so the list ends above it.
+        var bottomPx by remember { mutableIntStateOf(0) }
+        val bottomPad = with(LocalDensity.current) { bottomPx.toDp() }
+        // On the TUI face only a gate card floats there (no message box).
+        val gatePad = if (jobState.pendingPermission != null ||
+            (jobState.pendingQuestion != null && !questionSheetOpen)) bottomPad else 0.dp
+        // The sheet's tab column stands just above the bar.
+        // On the TUI face, above the terminal's keys and text line instead.
+        var tuiControlsPx by remember { mutableIntStateOf(0) }
+        val tuiControls = with(LocalDensity.current) { tuiControlsPx.toDp() }
+        val sheetInset = LocalSheetBottomInset.current
+        androidx.compose.runtime.SideEffect {
+            sheetInset.value = if (tuiOn) maxOf(tuiControls, gatePad) else bottomPad
+        }
+        // Everything starts below the floating bar but may scroll under it.
+        // Folded, the bar is shorter, but the page keeps the room it had
+        // open: padding that changed with it would shift the whole page.
+        val barRoom = remember(ref.key) { arrayOf(0.dp) }
+        if (barOpen) barRoom[0] = padding.calculateTopPadding()
+        val topPad = maxOf(barRoom[0], padding.calculateTopPadding())
         Column(
             Modifier
                 .fillMaxSize()
-                .padding(padding)
+                .padding(bottom = padding.calculateBottomPadding())
                 .imePadding(),
         ) {
             Box(Modifier.weight(1f)) {
                 when {
+                    // Keyed on the session: the pane's own state (last
+                    // frame, its number, the column count) belongs to one
+                    // session and must not carry over if the ref rebinds.
+                    tuiOn -> key(ref.key) {
+                        LiveTuiPane(
+                            repo = vm.repository,
+                            ref = ref,
+                            // One draft per session, whichever face it is
+                            // typed in.
+                            line = composerText,
+                            onLine = vm::updateComposer,
+                            // Under the floating bar, to the top of the screen;
+                            // above a gate card floating at the bottom.
+                            modifier = Modifier.fillMaxSize().padding(bottom = gatePad),
+                            onControlsHeight = { tuiControlsPx = it },
+                            running = jobState.running,
+                            onStop = vm::stop,
+                            // No terminal yet: the first line sent starts one.
+                            // Any daemon that runs interactive turns can start one, so
+                            // this does not wait on what the last ping said of auto mode.
+                            onStartTerminal = if (profile?.caps?.interactive == true) vm::startTerminal else null,
+                            startError = if (jobState.status == "error") jobState.error else "",
+                            accentColor = accent.tint,
+                            onAccentColor = accent.onTint,
+                            onTerminal = vm::terminalSeen,
+                            topInset = topPad,
+                        )
+                    }
+
                     ui.loading && ui.items.isEmpty() -> Box(
-                        Modifier.fillMaxSize(),
+                        Modifier.fillMaxSize().padding(top = topPad),
                         contentAlignment = Alignment.Center,
                     ) { CircularProgressIndicator(color = accent.tint) }
 
                     ui.error != null && ui.items.isEmpty() -> Box(
                         Modifier
                             .fillMaxSize()
+                            .padding(top = topPad)
                             .padding(16.dp),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -471,14 +792,21 @@ private fun TranscriptScreenBody(
 
                     else -> CompositionLocalProvider(
                         LocalHostLinkHandler provides vm::openHostFile,
-                    ) { LazyColumn(
+                    ) {
+                    val readSide = ((androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp - 840.dp) / 2)
+                        .coerceAtLeast(14.dp)
+                    LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
+                        // On a wide window (tablet, unfolded, a phone held
+                        // sideways) the text keeps a readable measure: the
+                        // column is 840 dp at most, centred.
                         contentPadding = PaddingValues(
-                            start = 14.dp,
-                            end = 14.dp,
-                            top = 10.dp,
-                            bottom = 16.dp,
+                            start = readSide,
+                            end = readSide,
+                            top = topPad + 10.dp,
+                            // 48 dp of air between the last row and the bar.
+                            bottom = bottomPad + 48.dp,
                         ),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
@@ -510,19 +838,21 @@ private fun TranscriptScreenBody(
                                         accent.label,
                                     ),
                                     elapsed = if (waiting) 0 else live?.elapsedS ?: 0,
-                                    color = if (waiting) palette.warn else accent.tint,
+                                    // The state's own colour, as in the list.
+                                    color = com.bb10d.remote.ui.components.stateTint(
+                                        if (waiting) "needs_answer" else "working"),
                                 )
                             }
                         }
                     } }
                 }
-                if ((awayFromLatest || unseen) && ui.items.isNotEmpty()) {
+                if (!tuiOn && (awayFromLatest || unseen) && ui.items.isNotEmpty()) {
                     JumpToLatest(
                         unseen = unseen,
                         accent = accent.tint,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
-                            .padding(bottom = 10.dp),
+                            .padding(bottom = bottomPad + 8.dp),
                     ) {
                         scope.launch {
                             // Far away: go straight there. A smooth scroll
@@ -537,8 +867,36 @@ private fun TranscriptScreenBody(
                         }
                     }
                 }
-            }
 
+            // Soft fades where the page runs under the floating pieces, so
+            // the text does not collide with them.
+            val pageBg = MaterialTheme.colorScheme.background
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .height(if (barOpen) topPad + 14.dp else topPad)
+                    .background(Brush.verticalGradient(0f to pageBg, 0.6f to pageBg.copy(alpha = 0.85f), 1f to Color.Transparent)),
+            )
+            if (!tuiOn) Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(bottomPad + 18.dp)
+                    .background(Brush.verticalGradient(0f to Color.Transparent, 0.45f to pageBg.copy(alpha = 0.85f), 1f to pageBg)),
+            )
+
+            // The bottom bar floats, like the session bar: the gate and the
+            // message box are cards over the bottom of the conversation,
+            // which scrolls on underneath them. Its height pads the list.
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .onSizeChanged { bottomPx = it.height }
+                    .padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
             jobState.pendingPermission?.let { pending ->
                 PermissionPrompt(
                     tool = pending.toolName,
@@ -562,6 +920,15 @@ private fun TranscriptScreenBody(
                 )
             }
 
+            // The TUI face types straight into the host terminal, so the
+            // chat's composer and its chips step aside.
+            if (!tuiOn) Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, pal.hairline),
+                shadowElevation = 8.dp,
+            ) {
+            Column {
             AnimatedVisibility(ui.status.isNotBlank()) {
                 Row(
                     Modifier
@@ -580,25 +947,14 @@ private fun TranscriptScreenBody(
             }
 
             val h = harness.ifBlank { null }
-            val interactiveNow = profile?.effectiveExecMode(harness) == ExecMode.INTERACTIVE
+            // Typed into the session's terminal, or a headless turn: the
+            // daemon's pick on a new daemon, the Execution setting on an old.
+            val interactiveNow by vm.sendsToTerminal.collectAsStateWithLifecycle()
             SlashSuggestions(
                 matches = slashMatches(composerText, profile?.caps?.slashFor(h).orEmpty()),
                 headless = !interactiveNow,
                 onPick = { vm.updateComposer("$it ") },
             )
-            profile?.let {
-                TurnChips(
-                    profile = it,
-                    harness = h,
-                    // Read from the collected session state, not the view
-                    // model, so the chips repaint when the pin changes.
-                    model = sessionModelOf(session, profile, harness),
-                    effort = sessionEffortOf(session, profile, harness),
-                    perSession = it.caps.sessionOptions && ref.sessionId.isNotEmpty(),
-                    onModel = vm::setModel,
-                    onEffort = vm::setEffort,
-                )
-            }
             AttachmentChips(
                 chips = attachments,
                 onRemove = vm::removeAttachment,
@@ -616,6 +972,66 @@ private fun TranscriptScreenBody(
                 onStop = vm::stop,
                 onAttach = { picker.launch(arrayOf("*/*")) },
             )
+            }
+            }
+            }
+            // Model and effort float above the start of the bottom bar, in a
+            // card of their own, and only while the keyboard is up (that is
+            // when the next message is being written). They sit over the
+            // page, not in the bar's column, so nothing else moves.
+            if (!tuiOn) Box(
+                Modifier
+                    .align(Alignment.BottomStart)
+                    // Stops short of the tab bubble at the end of the bar
+                    // (and scrolls sideways if it needs more).
+                    .padding(end = 76.dp, bottom = (bottomPad - 8.dp).coerceAtLeast(0.dp)),
+            ) {
+                // Opening a chip's menu takes the focus, which puts the
+                // keyboard away: the chips stay for as long as a menu is
+                // open, or they would vanish and take the menu with them.
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = imeBottom > 0 || chipMenuOpen,
+                    enter = fadeIn(tween(160)),
+                    exit = fadeOut(tween(120)),
+                ) {
+                    Row(
+                        // Room inside the scroll for the pill's shadow on
+                        // every side (a scroller clips at its edge), most
+                        // at the foot where a shadow reaches furthest.
+                        Modifier
+                            .horizontalScroll(rememberScrollState())
+                            .padding(start = 10.dp, end = 16.dp, top = 12.dp, bottom = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                    val chipHarness = harness.ifBlank { null }
+                    if (profile?.let { hasTurnChips(it, chipHarness) } == true) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, pal.hairline),
+                        shadowElevation = 6.dp,
+                    ) {
+                    profile?.let {
+                        TurnChips(
+                            profile = it,
+                            harness = harness.ifBlank { null },
+                            // Read from the collected session state, not the view
+                            // model, so the chips repaint when the pin changes.
+                            model = sessionModelOf(session, profile, harness),
+                            effort = sessionEffortOf(session, profile, harness),
+                            perSession = it.caps.sessionOptions && ref.sessionId.isNotEmpty(),
+                            onModel = vm::setModel,
+                            onEffort = vm::setEffort,
+                            onMenu = { chipMenuOpen = it },
+                        )
+                    }
+                    }
+                    }
+                    }
+                }
+            }
+            }
         }
     }
 

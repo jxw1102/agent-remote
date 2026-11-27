@@ -23,6 +23,7 @@ import com.bb10d.remote.data.ShareDto
 import com.bb10d.remote.data.ShellResultDto
 import com.bb10d.remote.data.TitleDto
 import com.bb10d.remote.data.TuiFrameDto
+import com.bb10d.remote.data.TuiHistoryDto
 import com.bb10d.remote.data.UsageDto
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -487,20 +488,44 @@ class DaemonClient(
         execMode: String,
         model: String,
         effort: String,
-    ): String = parseJobId(
-        raw(
+        /** Sent as is when set ("auto", "interactive"); else from [execMode]. */
+        wireMode: String? = null,
+    ): com.bb10d.remote.data.StartedTurn {
+        val body = raw(
             request(url("api/sessions/$sessionId/continue")).post(
                 jsonBody(
                     buildJsonObject {
                         put("prompt", prompt)
                         // Interactive | Headless UI → daemon permission_mode.
-                        put("permission_mode", com.bb10d.remote.data.ExecMode.wire(execMode))
+                        put("permission_mode",
+                            wireMode ?: com.bb10d.remote.data.ExecMode.wire(execMode))
                         put("model", model)
                         put("effort", effort)
                     },
                 ),
             ).build(),
-        ),
+        )
+        val mode = runCatching {
+            primitiveString((Json.parseToJsonElement(body.decodeToString()) as? JsonObject)?.get("mode"))
+        }.getOrNull().orEmpty()
+        return com.bb10d.remote.data.StartedTurn(parseJobId(body), mode)
+    }
+
+    /** Whether a terminal is alive for the session (agentremoted ≥ 2.30). */
+    /**
+     * Force stop a session on its host (agentremoted ≥ 2.32): its running
+     * turn, the daemon's terminal for it, and Claude's background copy.
+     */
+    suspend fun resetSession(sessionId: String): com.bb10d.remote.data.SessionResetDto = call(
+        request(url("api/sessions/$sessionId/reset")).post(jsonBody(buildJsonObject {})).build(),
+        com.bb10d.remote.data.SessionResetDto.serializer(),
+        timeoutSeconds = 60,
+    )
+
+    suspend fun tuiState(sessionId: String): com.bb10d.remote.data.TuiStateDto = call(
+        request(url("api/sessions/$sessionId/tui", mapOf("state" to "1"))).get().build(),
+        com.bb10d.remote.data.TuiStateDto.serializer(),
+        timeoutSeconds = 8,
     )
 
     suspend fun newSession(
@@ -549,6 +574,30 @@ class DaemonClient(
      * Live TUI pane capture for a session.
      * [ansi] requests coloured SGR (web/Android). Default plain is for BB.
      */
+    /**
+     * One page of the pane's scrollback (agentremoted ≥ 2.31): [lines] lines,
+     * skipping the newest [before] (already held). [at] is the history size
+     * from the last reply, so lines that scrolled in since do not shift it.
+     */
+    suspend fun tuiHistory(
+        sessionId: String,
+        lines: Int,
+        before: Int = 0,
+        at: Int = 0,
+        ansi: Boolean = true,
+    ): TuiHistoryDto = call(
+        request(
+            url(
+                "api/sessions/$sessionId/tui/history",
+                mapOf("lines" to lines.toString()) +
+                    (if (before > 0) mapOf("before" to before.toString(), "at" to at.toString()) else emptyMap()) +
+                    (if (ansi) mapOf("ansi" to "1") else emptyMap()),
+            ),
+        ).get().build(),
+        TuiHistoryDto.serializer(),
+        timeoutSeconds = 20,
+    )
+
     suspend fun tui(sessionId: String, ansi: Boolean = true): TuiFrameDto = call(
         request(
             url(
