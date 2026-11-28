@@ -40,6 +40,7 @@ import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.foundation.layout.ime
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -116,6 +117,8 @@ fun LiveTuiPane(
      * session yet, the first line sent starts one through this.
      */
     onStartTerminal: ((String) -> Unit)? = null,
+    /** The reader scrolled the terminal by this many pixels (down is positive). */
+    onReaderScroll: (Int) -> Unit = {},
     /** The terminal is there (true once a live frame has come). */
     onTerminal: (Boolean) -> Unit = {},
     /** Why the last turn failed, when it did: shown here, where a line that
@@ -145,6 +148,22 @@ fun LiveTuiPane(
     val error = keyError ?: view.error ?: startError.takeIf { it.isNotBlank() && !view.live }
     LaunchedEffect(view.live) { onTerminal(view.live) }
     val scroll = rememberScrollState()
+    // The reader's own scrolling, told to the session page: its top bar
+    // folds away going down and comes back going up, as in the chat. Only
+    // while a finger is on the terminal, so output arriving (which moves
+    // the view to its bottom) is not taken for it; and not the jump when a
+    // page of scrollback is put on top.
+    val tuiDragged by scroll.interactionSource.collectIsDraggedAsState()
+    val readerScroll = androidx.compose.runtime.rememberUpdatedState(onReaderScroll)
+    val draggedNow = androidx.compose.runtime.rememberUpdatedState(tuiDragged)
+    LaunchedEffect(scroll) {
+        var prev = scroll.value
+        snapshotFlow { scroll.value }.collect { v ->
+            val by = v - prev
+            prev = v
+            if (draggedNow.value && kotlin.math.abs(by) in 6..600) readerScroll.value(by)
+        }
+    }
     // The bottom of a terminal is where it is used (the prompt, the cursor),
     // so the pane keeps to its bottom: on the first frame, on every frame
     // while the reader is there, and whenever the keyboard comes up and

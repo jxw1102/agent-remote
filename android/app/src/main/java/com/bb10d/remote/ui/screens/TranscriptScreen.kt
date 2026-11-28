@@ -770,6 +770,15 @@ private fun TranscriptScreenBody(
                             onAccentColor = accent.onTint,
                             onTerminal = vm::terminalSeen,
                             topInset = topPad,
+                            // The top bar follows the terminal's scrolling
+                            // as it does the chat's: away going down, back
+                            // going up.
+                            onReaderScroll = { by ->
+                                if (folds && !menuOpen) {
+                                    if (by > 0) barOpen = false
+                                    else if (!barOpen) { barOpen = true; barTick++ }
+                                }
+                            },
                         )
                     }
 
